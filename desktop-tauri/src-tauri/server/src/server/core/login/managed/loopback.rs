@@ -232,6 +232,7 @@ pub(super) fn claim(state: &mut State, id: &str, step: &str, raw: &str, manual: 
 fn spawn(listener: TcpListener, task: &WeakTask, session: &Arc<Session>, id: &str, uri: &str,
     cancel: &CancellationToken, slots: &Arc<Semaphore>) {
     let task = task.clone();
+    let provider = session.provider.clone();
     let session = Arc::downgrade(session);
     let id = id.to_string();
     let uri = uri.to_string();
@@ -248,13 +249,14 @@ fn spawn(listener: TcpListener, task: &WeakTask, session: &Arc<Session>, id: &st
             if !peer.ip().is_loopback() { continue; }
             let Ok(permit) = slots.clone().try_acquire_owned() else { continue; };
             let task = task.clone();
+            let provider = provider.clone();
             let session = session.clone();
             let id = id.clone();
             let uri = uri.clone();
             let cancel = cancel.clone();
             crate::spawn_task(async move {
                 let _permit = permit;
-                serve(stream, task, session, &id, &uri, cancel).await;
+                serve(stream, task, session, &provider, &id, &uri, cancel).await;
             });
         }
     });
@@ -302,13 +304,13 @@ async fn request(stream: &mut TcpStream, uri: &str) -> Result<String, GatewayErr
     Ok(format!("http://{authority}{}", parts[1]))
 }
 
-async fn serve(mut stream: TcpStream, task: WeakTask, session: Weak<Session>, id: &str, uri: &str, cancel: CancellationToken) {
+async fn serve(mut stream: TcpStream, task: WeakTask, session: Weak<Session>, provider: &str, id: &str, uri: &str, cancel: CancellationToken) {
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => return,
         result = tokio::time::timeout(Duration::from_secs(5), request(&mut stream, uri)) => result,
     };
-    let raw = match result { Ok(Ok(raw)) => raw, _ => { respond(&mut stream, false).await; return; } };
+    let raw = match result { Ok(Ok(raw)) => raw, _ => { respond(&mut stream, false, provider).await; return; } };
     let Some(session) = session.upgrade() else { return; };
     let accepted = {
         let mut state = session.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -320,22 +322,23 @@ async fn serve(mut stream: TcpStream, task: WeakTask, session: Weak<Session>, id
         }
         valid
     };
-    if !accepted { respond(&mut stream, false).await; return; }
+    if !accepted { respond(&mut stream, false, provider).await; return; }
     let Some(task) = task.upgrade() else { return; };
     // 不把完整回调放进全局队列或日志。操作锁下再次校验租约并一次消费。
     // 同一租约最多排一个事件；等串行锁时仍占连接许可，避免无限堆积回调任务。
     let id = id.to_string();
     let completion = crate::spawn_task(async move { super::receive_callback(task, &id, &raw).await });
-    respond(&mut stream, true).await;
+    respond(&mut stream, true, provider).await;
     let _ = completion.await;
 }
 
-async fn respond(stream: &mut TcpStream, accepted: bool) {
-    let message = if accepted { "回调已交给登录任务处理，请返回面板查看最终结果。" }
-        else { "未接受此回调，请返回面板检查当前登录步骤。" };
+async fn respond(stream: &mut TcpStream, accepted: bool, provider: &str) {
     // OPTIONS/POST/外站探测不回显请求材料，也不开放跨域读取。
-    let status = if accepted { "200 OK" } else { "400 Bad Request" };
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n{message}", message.len());
+    let response = crate::server::core::login::callback_page::raw_receipt_response(
+        accepted,
+        provider,
+        "未接受此回调，请返回面板检查当前登录步骤",
+    );
     let _ = tokio::time::timeout(Duration::from_secs(1), stream.write_all(response.as_bytes())).await;
     let _ = stream.shutdown().await;
 }

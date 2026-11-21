@@ -972,7 +972,7 @@ impl AccountStore {
         if changed == 0 {
             return;
         }
-        match self.save_locked(&state, &guard) {
+        match self.save(&state, &guard) {
             Ok(()) => {
                 drop(guard);
                 logging::log(

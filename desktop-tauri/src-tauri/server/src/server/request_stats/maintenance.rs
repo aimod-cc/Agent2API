@@ -34,7 +34,7 @@ impl RequestStats {
     /// 只清两侧报文，或同时清理请求明细；无筛选删除明细时重置日报。
     pub fn clear_requests(&self, filter: &RequestQuery, raw_only: bool) -> Option<ClearResult> {
         let plan = sql::FilterPlan::of(filter);
-        self.with_conn_mut(&self.guard(), |conn| {
+        let outcome = self.with_conn_mut(&self.guard(), |conn| {
             let tx = conn.transaction()?;
             let raw = sql::delete_raw_matching(&tx, &plan)?;
             let deleted = if raw_only {
@@ -53,7 +53,16 @@ impl RequestStats {
                 downstream_raw: raw.downstream,
                 upstream_raw: raw.upstream,
             })
-        })
+        });
+        if let Some(result) = outcome {
+            if !raw_only && result.deleted > 0 {
+                self.filters_cache.invalidate();
+            }
+            if result.deleted > 0 || result.raw > 0 {
+                crate::server::core::panel_events::notify_requests();
+            }
+        }
+        outcome
     }
 
     pub fn clear_preview(&self, filter: &RequestQuery) -> Option<Value> {

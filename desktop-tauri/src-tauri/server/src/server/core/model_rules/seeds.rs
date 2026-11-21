@@ -7,13 +7,7 @@ const EXTRA_ALIASES: &[(&str, &str, &str)] = &[
         "cline-free/deepseek-v4.1-flash",
         "deepseek-v4.1-flash",
     ),
-    (
-        "cline-pass",
-        "cline-pass/deepseek-v4.1-flash",
-        "deepseek-v4.1-flash",
-    ),
     ("cline-free", "z-ai/glm-5.3-flash", "glm-5.3-flash"),
-    ("cline-pass", "cline-pass/glm-5.3-flash", "glm-5.3-flash"),
 ];
 
 pub(super) fn seed_extra_aliases(

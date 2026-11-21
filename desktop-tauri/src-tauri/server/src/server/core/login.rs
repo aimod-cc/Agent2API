@@ -39,6 +39,7 @@ use crate::server::core::providers::{kind_from_id, kind_id, ProviderKind};
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 
+pub(crate) mod callback_page;
 pub(crate) mod sms;
 pub(crate) mod sms_contract;
 pub(crate) mod managed;

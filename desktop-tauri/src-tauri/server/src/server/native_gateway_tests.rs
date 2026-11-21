@@ -165,6 +165,7 @@ impl Harness {
             local_panel: false,
             config_dir: home,
             ui_dir: None,
+            ui_assets: None,
             login: LoginService::new(store.clone()),
             upstream: UpstreamService::new(store.clone(), auth.clone()),
             auto_checkin: AutoCheckin::new(store.clone(), billing.clone()),

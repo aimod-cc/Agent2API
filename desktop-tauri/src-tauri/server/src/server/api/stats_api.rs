@@ -252,6 +252,7 @@ fn filter_from_params(params: &Params) -> RequestQuery {
         // 闭开区间 [start, end)：翻页时上一页末尾的 ts 可直接当下页的 end
         start: parse_query_ms(params.get("start")),
         end: parse_query_ms(params.get("end")),
+        list_only: params.get("view").is_some_and(|value| value.trim() == "list"),
     }
 }
 
@@ -276,7 +277,31 @@ fn checked_filter(params: &Params) -> Result<RequestQuery, Response> {
 ///
 /// 不带任何查询参数：它与时间档位无关（理由见存储层 `select_filter_options`）。
 pub async fn stats_request_filters(State(state): State<ServerState>) -> Response {
-    ok_json(state.request_stats().filter_options())
+    let stats = state.request_stats();
+    match tokio::task::spawn_blocking(move || stats.filter_options()).await {
+        Ok(value) => ok_json(value),
+        Err(error) => errors::management_error(500, format!("筛选选项读取任务失败: {error}")),
+    }
+}
+
+/// GET /api/stats/requests/detail?rowId=&id=&ts= —— 单条请求的完整详情（路由回放 / 尝试明细 / 敏感词 / 识别证据）。
+pub async fn stats_request_detail(State(state): State<ServerState>, Query(params): Query<Params>) -> Response {
+    let row_id = params.get("rowId").and_then(|value| value.trim().parse::<i64>().ok()).filter(|value| *value > 0);
+    let id = text_of(&params, "id");
+    let ts = parse_query_ms(params.get("ts"));
+    if row_id.is_none() && id.is_none() {
+        return errors::management_error(400, "缺少 rowId 或 id 参数");
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let mut value = state.request_stats().request_detail(row_id, id.as_deref(), ts)?;
+        crate::server::core::billing::keepalive::normalize_request_display(state.store(), &mut value);
+        Some(value)
+    }).await;
+    match result {
+        Ok(Some(value)) => ok_json(value),
+        Ok(None) => errors::management_error(404, "未找到该请求的详细记录"),
+        Err(error) => errors::management_error(500, format!("请求详情读取任务失败: {error}")),
+    }
 }
 
 /// DELETE /api/stats/requests?mode=raw|all&model=&provider=&status=&start=&end=&all=

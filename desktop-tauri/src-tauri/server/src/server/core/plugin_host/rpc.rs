@@ -796,20 +796,31 @@ impl ProviderAdapter for RpcAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
-            if super::operations::active_for_provider(self.id) { return false; }
-            if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
-                && super::rpc_refresh::readiness(store, self.id, account_id).await.is_err() {
-                return false;
+            self.check_credentials_expiring(store, account_id).await.unwrap_or(false)
+        })
+    }
+
+    fn check_credentials_expiring<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if super::operations::active_for_provider(self.id) {
+                return Err(GatewayError::with_status(503, "插件正在安装或更新，暂时无法检查凭证有效期。")
+                    .with_code("credential_refresh_check_unavailable"));
             }
-            self.control(
+            let execution = self.execution().await?;
+            if self.id == "codearts" && execution.host.options.wasm.is_some() {
+                super::rpc_refresh::readiness(store, self.id, account_id).await?;
+            }
+            let value = execution.control(
                 proto::methods::gateway::TOKEN_EXPIRING,
-                self.with_account(account_id),
-            )
-            .await
-            .ok()
-            .and_then(|value| value.as_bool())
-            // 判不出来就 false：宁可漏刷，也不要凭猜测打上游。
-            .unwrap_or(false)
+                execution.with_account(account_id),
+            ).await?;
+            value.as_bool().ok_or_else(|| GatewayError::with_status(
+                502, "无法检查凭证有效期，插件返回的结果无效。",
+            ).with_code("credential_refresh_check_failed"))
         })
     }
 

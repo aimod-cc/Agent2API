@@ -1001,6 +1001,15 @@ pub trait ProviderAdapter: Send + Sync {
         Box::pin(async move { self.credentials_expiring(store, account_id) })
     }
 
+    /// 维护任务保留检查失败的原因；失败不表示未到期，也不允许据此发送续期请求。
+    fn check_credentials_expiring<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move { Ok(self.credentials_expiring_async(store, account_id).await) })
+    }
+
     /// 本 provider 是否允许「一个账号都没有时用默认登录态转发」
     /// （模块头扩展 3；workbuddy 的 `WORKBUDDY_TOKEN` 旁路）。
     fn allows_anonymous_default_session(&self) -> bool {
@@ -2000,6 +2009,14 @@ impl ProviderAdapter for BuiltinAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         adapter_for(self.0).credentials_expiring_async(store, account_id)
+    }
+
+    fn check_credentials_expiring<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        adapter_for(self.0).check_credentials_expiring(store, account_id)
     }
 
     fn allows_anonymous_default_session(&self) -> bool {

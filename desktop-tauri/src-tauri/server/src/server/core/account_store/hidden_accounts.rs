@@ -34,9 +34,13 @@ enum HiddenReason {
     LoadTimeout,
     NotLoaded,
     LegacyUnsupported,
+    ReplacedByTemplate,
 }
 
 fn reason_of(provider: &str, registry: &PackRegistry) -> HiddenReason {
+    if providers::availability::is_replaced_by_template(provider) {
+        return HiddenReason::ReplacedByTemplate;
+    }
     if let Some(state) = startup::provider(provider) {
         if !state.pack_enabled { return HiddenReason::PackDisabled; }
         if !state.enabled { return HiddenReason::ProviderDisabled; }
@@ -96,14 +100,18 @@ pub(super) fn summary(counts: BTreeMap<String, usize>) -> Value {
         let registry = PackRegistry::load();
         for (provider, count) in &counts {
             let state = startup::provider(provider);
-            details.push(json!({
+            let mut row = json!({
                 "id": provider,
                 "label": providers::label_of(provider),
                 "count": count,
                 "reason": reason_of(provider, &registry),
                 "packId": state.as_ref().map(|state| &state.pack_id),
                 "startup": state.as_ref().map(|state| &state.startup),
-            }));
+            });
+            if let Some(template_key) = providers::availability::replaced_template_key(provider) {
+                row["templateKey"] = json!(template_key);
+            }
+            details.push(row);
         }
     }
     json!({

@@ -144,6 +144,7 @@ pub mod task_state;
 pub(crate) mod trae_model_ids;
 pub mod update;
 pub mod upstream;
+pub mod upstream_versions;
 pub(crate) mod user_agent;
 pub mod usage_query;
 pub mod usage_records;

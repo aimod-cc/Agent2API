@@ -346,7 +346,7 @@ impl Call {
         Ok(())
     }
 
-    pub(crate) fn with_trae_local_source<R>(&self,
+    pub(crate) fn with_trae_login_source<R>(&self,
         action: impl FnOnce() -> Result<R, GatewayError>,
     ) -> Result<R, GatewayError> {
         if !super::trae::applies(self.provider(), self.method_index()) { return Err(unavailable()); }

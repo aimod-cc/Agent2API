@@ -43,6 +43,7 @@ use crate::server::logging;
 
 pub(crate) mod diagnostics;
 pub mod local_session;
+pub(crate) mod login_source;
 
 /// 会话 cookie 名：**一枚装两段**（`agent2api-panel=<access>.<refresh>`）。
 ///

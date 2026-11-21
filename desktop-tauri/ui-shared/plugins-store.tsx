@@ -90,8 +90,10 @@ export function PluginStoreCard({ name, description, version, icon, artwork, hig
       <div className='min-w-0 flex-1'>
         <h3 className='m-0 break-words text-[14px] font-semibold leading-5'>{name}</h3>
         <div className='mt-1.5 flex flex-wrap items-center gap-1.5'>
-          <Badge variant={highlightedSource ? 'brand' : 'ghost'} shape='tag'
-            className={cn('font-normal', !highlightedSource && 'border-0 px-0')}>{sourceLabel ?? t('社区插件')}</Badge>
+          <Badge variant={highlightedSource ? 'brand' : 'outline'} shape='tag'
+            className={cn('font-normal', !highlightedSource && 'bg-muted text-muted-foreground dark:bg-surface-2')}>
+            {sourceLabel ?? t('社区插件')}
+          </Badge>
           {badges}
         </div>
       </div>

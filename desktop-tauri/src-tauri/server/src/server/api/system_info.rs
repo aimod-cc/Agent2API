@@ -146,7 +146,7 @@ pub async fn get_system_info(
             "host": state.host.to_string(),
             "port": state.port,
             "panelPort": state.panel_port,
-            "uiHosted": state.ui_dir().is_some(),
+            "uiHosted": state.ui_hosted(),
             "localPanel": state.local_panel,
             "configDir": show(&config_dir),
             "dbFile": show(&db_file),

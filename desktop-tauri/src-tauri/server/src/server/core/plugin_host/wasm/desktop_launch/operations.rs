@@ -34,6 +34,7 @@ pub(super) struct State {
     pub committed: bool,
     pub started: bool,
     pub restored: bool,
+    pub client_running: bool,
     pub backup: Option<String>,
     pub error: bool,
 }
@@ -47,6 +48,7 @@ pub(super) struct Operation {
     pub targets: Arc<BTreeMap<String, storage::Target>>,
     pub setting: settings::Setting,
     pub restart: bool,
+    pub hot_switch: bool,
     pub initial_running: bool,
     pub pending_backup: Option<String>,
     pub cancel: CancellationToken,
@@ -75,7 +77,7 @@ impl Operation {
             "client": { "id": self.binding.client.id, "label": self.binding.client.label },
             "phase": state.phase, "message": state.message, "error": state.error,
             "committed": state.committed, "started": state.started, "restored": state.restored,
-            "running": self.initial_running, "requiresRestart": self.restart,
+            "running": state.client_running, "requiresRestart": self.restart, "hotSwitch": self.hot_switch,
             "executable": self.executable.display().to_string(), "package": self.binding.package,
             "resources": self.binding.client.resources.iter().map(|resource| json!({ "id": resource.id, "label": resource.label,
                 "location": self.targets.get(&resource.id).map(storage::Target::display) })).collect::<Vec<_>>(),
@@ -123,21 +125,26 @@ pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Se
     let setting = settings::read(&db, &binding.provider, &binding.client.id)?;
     let client = binding.client.clone();
     let override_path = setting.path.clone();
-    let (executable, targets, running, pending) = crate::server::core::blocking::run(move || {
+    let (executable, targets, running, hot_switch, pending) = crate::server::core::blocking::run(move || {
         let executable = paths::detect(&client, &override_path)?.ok_or("没有找到本机客户端，请先选择程序位置")?;
         let targets = storage::targets(&client, &executable)?;
         for target in targets.values() { target.probe()?; }
         let running = windows::running(&executable)?;
+        let hot_switch = if running {
+            windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
+        } else {
+            false
+        };
         let pending = storage::Journal::pending(&executable, &targets)?;
-        Ok::<_, String>((executable, targets, running, pending))
+        Ok::<_, String>((executable, targets, running, hot_switch, pending))
     }).await.map_err(|_| "本机客户端检查中断")??;
     binding.current()?;
     if !manager.is_current() { return Err("本机管理会话已变化".into()); }
     let id = random_id()?;
     let operation = Arc::new(Operation { id: id.clone(), manager, binding, db, executable, targets: Arc::new(targets), setting,
-        restart: running, initial_running: running, pending_backup: pending, cancel: CancellationToken::new(), deadline: Instant::now() + Duration::from_secs(180),
+        restart: running && !hot_switch, hot_switch, initial_running: running, pending_backup: pending, cancel: CancellationToken::new(), deadline: Instant::now() + Duration::from_secs(180),
         state: Mutex::new(State { phase: "awaiting_confirmation", message: String::new(), confirmed: false, worker: false,
-            committed: false, started: false, restored: false, backup: None, error: false }), changed: Notify::new(),
+            committed: false, started: false, restored: false, client_running: running, backup: None, error: false }), changed: Notify::new(),
         expected: Mutex::new(None), recovery_only: false });
     insert(operation.clone())?;
     Ok(operation.public())
@@ -179,14 +186,21 @@ pub fn confirm(manager: Source, intent: &str, restart_confirmed: bool) -> Result
     let client = operation.binding.client.clone();
     let executable = operation.executable.clone();
     let targets = operation.targets.clone();
-    let (running, pending) = crate::server::core::blocking::in_place(move || {
+    let (running, hot_switch, pending) = crate::server::core::blocking::in_place(move || {
         paths::identity(&client, &executable)?;
-        Ok::<_, String>((windows::running(&executable)?, storage::Journal::pending(&executable, &targets)?))
+        let running = windows::running(&executable)?;
+        let hot_switch = if running {
+            windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
+        } else {
+            false
+        };
+        Ok::<_, String>((running, hot_switch, storage::Journal::pending(&executable, &targets)?))
     })?;
     operation.check()?;
     operation.binding.origin()?.check(operation.binding.origin()?.initial())?;
     if operation.pending_backup.is_some() || pending.is_some() { return Err("上次本机切换未完整结束，请先恢复原凭证".into()); }
-    if running && !operation.restart { return Err("客户端在准备后已启动，请重新确认重启".into()); }
+    if running && !operation.initial_running { return Err("客户端在准备后已启动，请重新确认".into()); }
+    if operation.hot_switch && running && !hot_switch { return Err("客户端后台服务状态已变化，请重新确认".into()); }
     if operation.restart && !restart_confirmed { return Err("客户端正在运行，请确认已保存内容并允许重启".into()); }
     {
         let state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;

@@ -193,6 +193,8 @@ fn create_main_window(app: &AppHandle, visible: bool) -> tauri::Result<tauri::We
     #[cfg(target_os = "windows")]
     let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
         .decorations(false)
+        // WebView2 的原生拖拽与网页拖拽互斥，主窗口的文件上传使用网页拖拽。
+        .disable_drag_drop_handler()
         .additional_browser_args(
             "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
              --disable-background-timer-throttling \
@@ -247,11 +249,25 @@ pub fn ensure_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     create_main_window(app, true).ok()
 }
 
+/// 安装桌面端异步运行时（8 MiB 线程栈），避免沿用 Tauri 默认的 2 MiB 栈导致 Wasm 插件加载溢出。
+fn install_desktop_runtime() {
+    // Tauri 要求传入的异步运行时底层对象在进程存活期间不得被销毁。
+    static DESKTOP_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> =
+        std::sync::OnceLock::new();
+    DESKTOP_RUNTIME.get_or_init(|| {
+        let runtime =
+            agent2api_server::build_runtime().expect("创建桌面端 Tokio 运行时失败");
+        tauri::async_runtime::set(runtime.handle().clone());
+        runtime
+    });
+}
+
 pub fn run() {
     if let Some(code) = server::core::providers::subscriptions::dispatch_helper() {
         std::process::exit(i32::from(code));
     }
     graphics::initialize();
+    install_desktop_runtime();
     let mut builder = tauri::Builder::default();
 
     // 单实例必须第一个注册：插件按注册顺序执行，晚于其它插件时，
@@ -298,6 +314,7 @@ pub fn run() {
             commands::direct_credentials,
             commands::local_ip,
             commands::start_login,
+            login::managed_window::open_managed_login,
             commands::start_autoclaw_oauth_login,
             commands::login_kuku_sms_send,
             commands::login_kuku_sms_verify,

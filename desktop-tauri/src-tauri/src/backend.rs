@@ -24,12 +24,14 @@
 
 pub(crate) mod lifecycle;
 
+use std::collections::HashMap;
 #[cfg(windows)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 // 端口归属查询与进程树结束改用 Win32 API 的原因见 Cargo.toml 里 windows-sys
 // 依赖处的说明：外部命令（taskkill / powershell）的字符串与进程创建行为会被
@@ -74,11 +76,11 @@ const HEALTH_INTERVAL: Duration = Duration::from_millis(100);
 /// 同时被 `commands::backend_status` 使用（前端启动阶段显示「服务已就绪」提示），
 /// 因此保持为公开函数、语义不变：能拿到 2xx 就算就绪。
 pub async fn is_ready(port: u16) -> bool {
-    let Ok(client) = local_client(HEALTH_TIMEOUT) else {
+    let Ok(client) = local_client() else {
         return false;
     };
     matches!(
-        client.get(format!("http://127.0.0.1:{port}/health")).send().await,
+        client.get(format!("http://127.0.0.1:{port}/health")).timeout(HEALTH_TIMEOUT).send().await,
         Ok(response) if response.status().is_success()
     )
 }
@@ -155,16 +157,28 @@ async fn start_once(app: &AppHandle, start: &lifecycle::Startup) -> Result<(), S
                 "⚠️  网络访问已开启但尚未配置 API Key：/v1/* 暂时拒绝服务，请在「网关 Key」页创建第一把",
             );
         }
-        // 网页管理面板（可选）：设了 ui_dir 网关就在本端口托管 ui/ 静态目录
-        //（含网页端 bridge），远程浏览器打开 http://<本机IP>:<端口> 即面板；
-        // 不开则保持桌面形态 —— 网关只出 API，界面仍由 Tauri 壳自己出。
+        // 网页管理面板（可选）：开发态直接读源码目录 ui/ 便于热调试；发布版直接复用
+        // Tauri 编译期内嵌进可执行文件的界面资源，不再在安装目录重复放第二份 ui/。
         if lan.lan_panel {
-            match resolve_ui_dir(app) {
-                Some(dir) => state.set_ui_dir(dir),
-                None => server::logging::log(
-                    "[Server]",
-                    "⚠️  网页面板资源缺失：网页管理面板无法托管（重装本程序可恢复），API 转发不受影响",
-                ),
+            if cfg!(debug_assertions) {
+                match resolve_dev_ui_dir() {
+                    Some(dir) => state.set_ui_dir(dir),
+                    None => server::logging::log(
+                        "[Server]",
+                        "⚠️  网页面板资源缺失：开发目录 ui/ 不存在，API 转发不受影响",
+                    ),
+                }
+            } else {
+                use server::EmbeddedUiAssets;
+                let assets = TauriUiAssets::new(app.asset_resolver());
+                if assets.etag("/index.html").is_some() {
+                    state.set_ui_assets(Arc::new(assets));
+                } else {
+                    server::logging::log(
+                        "[Server]",
+                        "⚠️  网页面板内嵌资源缺失：网页管理面板无法托管（重装本程序可恢复），API 转发不受影响",
+                    );
+                }
             }
         }
     }
@@ -211,25 +225,57 @@ async fn start_once(app: &AppHandle, start: &lifecycle::Startup) -> Result<(), S
     )))
 }
 
-/// 局域网面板托管用的 `ui/` 静态目录（与 headless 同一份界面文件）。
+/// 局域网面板开发态使用的 `ui/` 静态目录。
 ///
-/// release：tauri.conf.json 把 `../ui` 列进了 bundle resources —— 打包器会把
-/// 越出应用目录的 `..` 段映射成 `_up_`（见 tauri-utils `resources.rs` 的目标
-/// 路径规则），所以安装后落在资源目录的 `_up_/ui` 下（Windows NSIS 实测为
-/// `<install>/_up_/ui`）。只找 `ui/` 会永远找不到，面板托管随之静默降级成
-/// 「远程没界面」—— 两个候选都看一遍，把这种布局差异吃在这里。
-/// debug：资源不打包，直接指源码目录（`tauri dev` 时 ui-islands 的构建产物就
-/// 落在那里）。目录不存在返回 None —— 面板托管的缺失只是「远程没界面」，
-/// API 照常工作（headless 对 ui 缺失也是这个取舍）。
-fn resolve_ui_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
-    if cfg!(debug_assertions) {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui");
-        return dir.is_dir().then_some(dir);
+/// 发布版已改为直接读取随程序打包的嵌入资源（见 [`TauriUiAssets`]），
+/// 不再随安装包分发第二份磁盘 `ui/` 目录。
+fn resolve_dev_ui_dir() -> Option<std::path::PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui");
+    dir.is_dir().then_some(dir)
+}
+
+/// 桌面端内嵌静态资源适配器：把 Tauri 编译期内嵌的 `frontendDist` 暴露给局域网面板。
+struct TauriUiAssets {
+    resolver: tauri::AssetResolver<tauri::Wry>,
+    etags: HashMap<String, String>,
+}
+
+impl TauriUiAssets {
+    fn new(resolver: tauri::AssetResolver<tauri::Wry>) -> Self {
+        let etags = resolver
+            .iter()
+            .map(|(key, bytes)| {
+                let normalized = if key.starts_with('/') {
+                    key.into_owned()
+                } else {
+                    format!("/{key}")
+                };
+                let etag = embedded_etag(&bytes);
+                (normalized, etag)
+            })
+            .collect();
+        Self { resolver, etags }
     }
-    let base = app.path().resource_dir().ok()?;
-    [base.join("_up_").join("ui"), base.join("ui")]
-        .into_iter()
-        .find(|dir| dir.is_dir())
+}
+
+impl server::EmbeddedUiAssets for TauriUiAssets {
+    fn etag(&self, key: &str) -> Option<String> {
+        self.etags.get(key).cloned()
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let trimmed = key.strip_prefix('/').unwrap_or(key);
+        self.resolver.get(trimmed.to_string()).map(|asset| asset.bytes)
+    }
+}
+
+fn embedded_etag(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("W/\"{}-{:x}-{:x}\"", env!("CARGO_PKG_VERSION"), bytes.len(), hash)
 }
 
 /// 查端口上的监听进程（PID、镜像名、路径，以及两个身份标记）。
@@ -586,10 +632,10 @@ fn process_image_path(pid: u32) -> Option<String> {
 
 /// 端口上的服务是否是 WorkBuddy 网关（读 /health 的 product 特征字段）。
 async fn health_reports_workbuddy(port: u16) -> bool {
-    let Ok(client) = local_client(HEALTH_TIMEOUT) else {
+    let Ok(client) = local_client() else {
         return false;
     };
-    let Ok(response) = client.get(format!("http://127.0.0.1:{port}/health")).send().await
+    let Ok(response) = client.get(format!("http://127.0.0.1:{port}/health")).timeout(HEALTH_TIMEOUT).send().await
     else {
         return false;
     };
@@ -669,6 +715,23 @@ fn cleanup_legacy_resources() {
                 server::logging::log(
                     "[Server]",
                     &format!("清理旧版残留 {name} 失败（下次启动再试）: {error}"),
+                )
+            }
+        }
+    }
+    // 旧版曾通过 bundle.resources 把 ../ui 拷贝到 _up_/ui；改走内嵌资源后覆盖安装顺手清理旧副本。
+    let legacy_up = install_dir.join("_up_");
+    let legacy_ui = legacy_up.join("ui");
+    if legacy_ui.is_dir() {
+        match std::fs::remove_dir_all(&legacy_ui) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir(&legacy_up);
+                server::logging::log("[Server]", "已清理旧版残留的磁盘界面副本（_up_/ui）");
+            }
+            Err(error) => {
+                server::logging::log(
+                    "[Server]",
+                    &format!("清理旧版磁盘界面副本失败（下次启动再试）: {error}"),
                 )
             }
         }

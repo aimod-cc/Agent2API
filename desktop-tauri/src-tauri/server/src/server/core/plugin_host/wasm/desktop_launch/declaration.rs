@@ -23,8 +23,20 @@ pub struct Client {
     pub executables: Vec<String>,
     pub locations: Vec<Location>,
     pub identity: Identity,
+    #[serde(default)]
+    pub hot_switch: Option<HotSwitch>,
     pub resources: Vec<Resource>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HotSwitch {
+    pub service_executables: Vec<String>,
+    #[serde(default = "default_respawn_timeout_ms")]
+    pub respawn_timeout_ms: u64,
+}
+
+fn default_respawn_timeout_ms() -> u64 { 15_000 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -137,6 +149,15 @@ impl Declaration {
                 Identity::JsonProduct { path, field, values } if relative(path) && identifier(field) && names(values, 8) => {},
                 Identity::PeProduct { values, absent, .. } if names(values, 8) && !absent.is_empty() && absent.len() <= 8 && absent.iter().all(|path| relative(path)) => {},
                 _ => return Err("本机客户端身份校验声明无效".into()),
+            }
+            if let Some(hot_switch) = &client.hot_switch {
+                if !names(&hot_switch.service_executables, 8)
+                    || hot_switch.service_executables.iter().any(|name| !relative(name) || name.contains('/') || !name.to_ascii_lowercase().ends_with(".exe")
+                        || client.executables.iter().any(|main_name| main_name.eq_ignore_ascii_case(name)))
+                    || !(1_000..=30_000).contains(&hot_switch.respawn_timeout_ms)
+                {
+                    return Err("本机客户端在线切换配置无效".into());
+                }
             }
             let mut resources = HashSet::new();
             if client.resources.is_empty() || client.resources.len() > 8 { return Err("本机凭证资源数量无效".into()); }

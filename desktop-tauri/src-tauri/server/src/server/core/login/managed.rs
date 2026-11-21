@@ -46,10 +46,11 @@ pub(crate) struct Session {
     flow: String,
     provider: String,
     method_index: u64,
+    browser_mode: &'static str,
     expires_at: i64,
     deadline: tokio::time::Instant,
     cancel: CancellationToken,
-    local_source: Option<crate::server::access::local_session::Source>,
+    local_source: Option<crate::server::access::login_source::Source>,
     state: Mutex<State>,
     kiro_completed: Mutex<Option<kiro::Completion>>,
     _reservation: OwnedSemaphorePermit,
@@ -130,6 +131,15 @@ fn session(task: &LoginTaskHandle) -> Result<Arc<Session>, GatewayError> {
     Ok(session)
 }
 
+pub(crate) fn check_source(task: &LoginTaskHandle, headers: &axum::http::HeaderMap) -> Result<(), GatewayError> {
+    let session = session(task)?;
+    if let Some(original) = &session.local_source {
+        let source = crate::server::access::login_source::Source::capture(headers).ok_or_else(unavailable)?;
+        if !original.same(&source) || !original.is_current() { return Err(unavailable()); }
+    }
+    Ok(())
+}
+
 pub(crate) fn interrupt(task: &LoginTaskHandle) {
     let session = task.context.as_ref().and_then(|context|
         context.managed.lock().ok().and_then(|guard| guard.clone()));
@@ -171,10 +181,10 @@ pub(crate) fn snapshot(task: &LoginTaskHandle) -> Result<Value, GatewayError> {
 
 /// 只在本地登记，返回后才在后台读取上游配置；不能等验证码或等授权地址。
 pub(crate) fn start(state: &ServerState, adapter: Arc<dyn ProviderAdapter>, method_index: u64,
-    options: Value, proxy: Option<LoginProxySelection>, local_source: Option<crate::server::access::local_session::Source>,
+    options: Value, proxy: Option<LoginProxySelection>, local_source: Option<crate::server::access::login_source::Source>,
 ) -> Result<Value, GatewayError> {
     if trae::applies(adapter.provider_id(), method_index) && local_source.as_ref().is_none_or(|source| !source.is_current()) {
-        return Err(GatewayError::with_status(403, "Trae托管网页登录只能从网关本机桌面发起，请改用凭据导入"));
+        return Err(GatewayError::with_status(403, "Trae 网页登录需要有效的面板管理会话，请登录面板后重新发起"));
     }
     let adapter = adapter.managed_login_owner().ok_or_else(unavailable)?;
     static LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -183,7 +193,8 @@ pub(crate) fn start(state: &ServerState, adapter: Arc<dyn ProviderAdapter>, meth
     let flow = format!("managed_{}", nonce()?);
     let now = logging::now_ms();
     let task = state.login().new_handle_for_adapter("", adapter.clone(), proxy);
-    let session = Arc::new(Session { flow: flow.clone(), provider: adapter.provider_id().into(), method_index,
+    let browser_mode = if options["mode"] == "embedded" { "embedded" } else { "external" };
+    let session = Arc::new(Session { flow: flow.clone(), provider: adapter.provider_id().into(), method_index, browser_mode,
         expires_at: now + LOGIN_TIMEOUT_MS as i64, deadline: tokio::time::Instant::now() + Duration::from_millis(LOGIN_TIMEOUT_MS),
         cancel: CancellationToken::new(), local_source, state: Mutex::new(State { step: Some(Step::preparing(nonce()?)),
             active: None, callback_step: None, runtime: None, leases: Default::default(),
@@ -234,6 +245,7 @@ fn monitor(task: &LoginTaskHandle, session: &Arc<Session>, runtime: Arc<RuntimeB
                 _ = runtime.stopped.cancelled() => {},
                 _ = tokio::time::sleep_until(session.deadline) => {},
                 _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    if let Some(source) = &session.local_source { source.refresh_revocation(); }
                     if session.valid() && (runtime.alive)() { continue; }
                 }
             }
@@ -377,7 +389,28 @@ struct Input {
 /// 调用方必须持有 task.operation；只校验一次、消费一次，不把请求失败当成可重放。
 pub(crate) async fn submit(task: &LoginTaskHandle, value: Value) -> Result<Value, GatewayError> {
     let input: Input = serde_json::from_value(value).map_err(|_| GatewayError::bad_request("托管登录输入字段无效"))?;
-    let call = Call::submit(task, &input)?;
+    let current = session(task)?;
+    if input.state != current.flow { return Err(unavailable()); }
+    let call = if trae::applies(&current.provider, current.method_index) {
+        {
+            let state = current.state.lock().map_err(|_| unavailable())?;
+            state.step.as_ref().ok_or_else(unavailable)?.check(&input)?;
+        }
+        let raw = input.inputs["callbackUrl"].as_str().ok_or_else(unavailable)?;
+        let queued = match trae::manual_callback(task, &input.interaction, raw) {
+            Ok(queued) => queued,
+            Err(error) if error.status_code == 400 => return Ok(json!({"accepted":false,"retryable":true})),
+            Err(error) => return Err(error),
+        };
+        match Call::trae_callback(task, queued) {
+            Ok(call) => call,
+            Err(error) => {
+                fail(task, &error.message);
+                task.cancel_provider_flow_locked(&input.state).await;
+                return Err(error);
+            }
+        }
+    } else { Call::submit(task, &input)? };
     let captcha = call.is_captcha();
     let result = invoke(task, &call).await;
     if let Err(error) = result {

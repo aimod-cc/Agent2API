@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::stream;
+use serde_json::json;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -41,11 +43,92 @@ fn authorized(headers: &HeaderMap) -> bool {
         && crate::server::config::current().active_api_keys().is_empty()
 }
 
-pub async fn events(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+#[derive(Clone, Copy)]
+enum RevisionTopic {
+    Logs,
+    Requests,
+}
+
+impl RevisionTopic {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Logs => "logs",
+            Self::Requests => "requests",
+        }
+    }
+}
+
+struct RevisionEvents {
+    topic: RevisionTopic,
+    headers: HeaderMap,
+    revisions: watch::Receiver<u64>,
+    stopping: CancellationToken,
+    initial: bool,
+}
+
+fn revision_response(topic: RevisionTopic, headers: HeaderMap, stopping: CancellationToken) -> Response {
+    let revisions = match topic {
+        RevisionTopic::Logs => panel_events::subscribe_logs(),
+        RevisionTopic::Requests => panel_events::subscribe_requests(),
+    };
+    let state = RevisionEvents { topic, headers, revisions, stopping, initial: true };
+    let stream = stream::unfold(state, |mut current| async move {
+        if current.stopping.is_cancelled() || !authorized(&current.headers) {
+            return None;
+        }
+        if current.initial {
+            current.initial = false;
+            let revision = *current.revisions.borrow_and_update();
+            let event = Event::default().event("ready").json_data(json!({ current.topic.key(): revision })).ok()?;
+            return Some((Ok::<_, Infallible>(event), current));
+        }
+        let changed = tokio::select! {
+            biased;
+            _ = current.stopping.cancelled() => return None,
+            result = current.revisions.changed() => {
+                if result.is_err() { return None; }
+                true
+            },
+            _ = tokio::time::sleep(HEARTBEAT) => false,
+        };
+        if changed {
+            tokio::select! {
+                biased;
+                _ = current.stopping.cancelled() => return None,
+                _ = tokio::time::sleep(COALESCE) => {},
+            }
+        }
+        if !authorized(&current.headers) {
+            return None;
+        }
+        let event = if changed {
+            let revision = *current.revisions.borrow_and_update();
+            Event::default().event("change").json_data(json!({ current.topic.key(): revision })).ok()?
+        } else {
+            Event::default().event("heartbeat").data("{}")
+        };
+        Some((Ok::<_, Infallible>(event), current))
+    });
+    let mut response = Sse::new(stream).into_response();
+    response.headers_mut().insert("cache-control", HeaderValue::from_static("no-store"));
+    response.headers_mut().insert("x-accel-buffering", HeaderValue::from_static("no"));
+    response
+}
+
+pub async fn events(
+    State(state): State<ServerState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
     if !authorized(&headers) {
         return crate::server::errors::panel_login_required_response(&headers);
     }
     let stopping = state.panel_events_stop.clone();
+    match params.get("scope").map(|value| value.trim()) {
+        Some("logs") => return revision_response(RevisionTopic::Logs, headers, stopping),
+        Some("requests") => return revision_response(RevisionTopic::Requests, headers, stopping),
+        _ => {}
+    }
     let external = crate::server::core::blocking::in_place(|| external::ExternalChanges::new(state.db().cloned()));
     let events = Events { external, store: state.store().clone(), deadline: None, deadline_revision: (0, 0, 0), headers, stopping,
         revisions: panel_events::subscribe(), initial: true };

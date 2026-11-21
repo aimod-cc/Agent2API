@@ -13,12 +13,14 @@ function FilterGroup<T extends string>({ label, options, value, onChange }: {
 }
 
 export function PluginPageToolbar({ source, status, search, count, selecting, locked, checking, scriptsAvailable, scriptActive,
-  onSource, onStatus, onSearch, onSelect, onFile, onMissing, onRefresh, onCheck, onSettings, onScript, onDiagnostics }: {
+  updateCount, updateDisabled,
+  onSource, onStatus, onSearch, onSelect, onUpdateAll, onFile, onMissing, onRefresh, onCheck, onSettings, onScript, onDiagnostics }: {
   source: PluginSourceFilter; status: PluginStatusFilter; search: string
   count(source: PluginSourceFilter, status: PluginStatusFilter): number
   selecting: boolean; locked: boolean; checking: boolean; scriptsAvailable: boolean; scriptActive: boolean
+  updateCount: number; updateDisabled: boolean
   onSource(value: PluginSourceFilter): void; onStatus(value: PluginStatusFilter): void
-  onSearch(value: string): void; onSelect(): void; onFile(): void; onMissing(): void; onRefresh(): void; onCheck(): void; onSettings(): void; onScript(): void; onDiagnostics(): void
+  onSearch(value: string): void; onSelect(): void; onUpdateAll(): void; onFile(): void; onMissing(): void; onRefresh(): void; onCheck(): void; onSettings(): void; onScript(): void; onDiagnostics(): void
 }) {
   return <div className='plugins-toolbar' role='region' aria-label={t('插件筛选和操作')}>
     <div className='plugins-toolbar-filters'>
@@ -40,7 +42,7 @@ export function PluginPageToolbar({ source, status, search, count, selecting, lo
         <InputGroupAddon><svg viewBox='0 0 16 16' className='size-3.5' fill='none' stroke='currentColor' strokeWidth='1.7' strokeLinecap='round' aria-hidden='true'><circle cx='6.8' cy='6.8' r='4.6' /><path d='M10.3 10.3 14 14' /></svg></InputGroupAddon>
       </InputGroup>
       <Button variant={selecting ? 'secondary' : 'outline'} size='sm' disabled={locked} onClick={onSelect}>{selecting ? t('退出批量管理') : t('批量管理')}</Button>
-      <Button size='sm' disabled={locked} onClick={onFile}>{t('本地安装')}</Button>
+      {updateCount > 0 ? <Button size='sm' disabled={updateDisabled} title={t('有 {count} 个插件可更新', { count: updateCount })} onClick={onUpdateAll}>{t('全部更新')}</Button> : null}
       <PluginPageTools disabled={locked} fileDisabled={locked} scriptDisabled={locked || scriptActive}
         scriptsAvailable={scriptsAvailable} checking={checking} onRefresh={onRefresh} onCheck={onCheck} onSettings={onSettings}
         onFile={onFile} onScript={onScript} onDiagnostics={onDiagnostics} onMissing={onMissing} />

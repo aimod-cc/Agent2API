@@ -1669,7 +1669,12 @@ pub fn shim_js() -> &'static str {
         flow.requestId = typeof options.requestId === 'string' ? options.requestId.trim() : '';
         flow.method = await selectedLoginMethod(target, options);
         if (flow.canceled) throw canceledError();
+        if (target === 'raccoon') {
+          var problem = raccoonCallbackOriginProblem();
+          if (problem) await reportRaccoonCallbackProblem(problem);
+        }
         var body = { provider: target, mode: 'external', methodIndex: options.methodIndex, locale: options.locale || 'zh-CN' };
+        if (target === 'raccoon') body.callbackOrigin = window.location.origin;
         if (flow.requestId) body.requestId = flow.requestId;
         if (Object.prototype.hasOwnProperty.call(options, 'inputs')) body.inputs = options.inputs;
         if (Object.prototype.hasOwnProperty.call(options, 'proxy')) body.proxy = options.proxy;
@@ -2349,6 +2354,7 @@ pub fn shim_js() -> &'static str {
       }));
     },
     getStatsRequests: function (query) { return call('GET', '/api/stats/requests' + toQuery(query)); },
+    getStatsRequestDetail: function (query) { return call('GET', '/api/stats/requests/detail' + toQuery(query)); },
     getStatsRequestFilters: function () { return call('GET', '/api/stats/requests/filters'); },
     clearStatsRequests: function (query) { return call('DELETE', '/api/stats/requests' + toQuery(query)); },
     // 按 id 取单条请求的原始正文（详情弹窗「预览对话」的数据源；找不到给 404）

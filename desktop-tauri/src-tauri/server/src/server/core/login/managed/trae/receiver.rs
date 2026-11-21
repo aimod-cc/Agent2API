@@ -18,6 +18,7 @@ use crate::server::errors::GatewayError;
 pub(super) fn spawn(receiver: &Arc<ReceiverOwner>, task: &WeakTask, session: &Arc<Session>) {
     let receiver = Arc::downgrade(receiver);
     let task = task.clone();
+    let provider = session.provider.clone();
     let session = Arc::downgrade(session);
     let slots = Arc::new(Semaphore::new(4));
     let Some(owner) = receiver.upgrade() else {
@@ -47,12 +48,13 @@ pub(super) fn spawn(receiver: &Arc<ReceiverOwner>, task: &WeakTask, session: &Ar
                 continue;
             };
             let receiver = receiver.clone();
+            let provider = provider.clone();
             let session = session.clone();
             let task = task.clone();
             let cancel = cancel.clone();
             crate::spawn_task(async move {
                 let _permit = permit;
-                serve(stream, receiver, session, task, cancel).await;
+                serve(stream, receiver, session, task, &provider, cancel).await;
             });
         }
     });
@@ -140,6 +142,7 @@ async fn serve(
     receiver: Weak<ReceiverOwner>,
     session: Weak<Session>,
     task: WeakTask,
+    provider: &str,
     cancel: CancellationToken,
 ) {
     let Some(owner) = receiver.upgrade() else {
@@ -152,7 +155,7 @@ async fn serve(
         _ = cancel.cancelled() => return,
         result = tokio::time::timeout(Duration::from_secs(5), request(&mut stream, port)) => match result {
             Ok(Ok(input)) => input,
-            _ => { respond(&mut stream, false).await; return; },
+            _ => { respond(&mut stream, false, provider).await; return; },
         },
     };
     let Some(current) = session.upgrade() else {
@@ -161,7 +164,7 @@ async fn serve(
     let queued = match queue(&current, &receiver, input) {
         Ok(queued) => queued,
         Err(_) => {
-            respond(&mut stream, false).await;
+            respond(&mut stream, false, provider).await;
             return;
         }
     };
@@ -171,7 +174,7 @@ async fn serve(
     drop(current);
     // 完整对象移到单一交付任务；不排raw URL、不按序列化码重新构造，也不重复回调。
     let completion = crate::spawn_task(deliver(task, queued));
-    respond(&mut stream, true).await;
+    respond(&mut stream, true, provider).await;
     let _ = completion.await;
 }
 
@@ -209,18 +212,12 @@ fn deliver(
     }
 }
 
-async fn respond(stream: &mut TcpStream, accepted: bool) {
-    let message = if accepted {
-        "Trae 回调已交给本次登录任务；兑换与保存结果请以面板为准。"
-    } else {
-        "未受理此Trae回调，请回到面板查看当前步骤。"
-    };
-    let status = if accepted {
-        "200 OK"
-    } else {
-        "400 Bad Request"
-    };
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n{message}", message.len());
+async fn respond(stream: &mut TcpStream, accepted: bool, provider: &str) {
+    let response = crate::server::core::login::callback_page::raw_receipt_response(
+        accepted,
+        provider,
+        "未受理此 Trae 回调，请回到面板查看当前步骤",
+    );
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         stream.write_all(response.as_bytes()),

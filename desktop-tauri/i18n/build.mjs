@@ -3,11 +3,11 @@
  *
  * ── 输入 / 输出 ──────────────────────────────────────────────
  *   输入   desktop-tauri/i18n/i18n-src/<locale>/<domain>.json （scan.mjs 扫出来的键 + 人工译文）
- *   输出   desktop-tauri/ui/i18n/manifest.js                  （域清单）
- *          desktop-tauri/ui/i18n/<locale>/<domain>.js         （运行时词典，经典脚本）
+ *   输出   desktop-tauri/ui/i18n/combined/<locale>.js         （主面板与手机端合并词典）
+ *          desktop-tauri/ui/i18n/<locale>/{login,accounts}.js （登录页按需加载的分域词典）
  *
- * 运行时的形态刻意是「一域一个 .js、直接往 window.wbI18nDict 上 Object.assign」：
- * 页面 head 里的引导脚本按 manifest 同步 document.write 出这些 <script>，
+ * 运行时的形态刻意是「往 window.wbI18nDict 上 Object.assign 的经典脚本」：
+ * 页面 head 里的引导脚本直接 document.write 出所需词典 <script>，
  * 于是词典在任何一个业务脚本（units.js / app.js / 各岛）执行前就已就位。
  * 不打包进 islands/ui.js 是刻意的 —— 词典是纯数据、按语言拆分，没必要塞进
  * 「必须有一份 React 实例」的岛产物里，也方便以后按语言增量更新。
@@ -40,6 +40,8 @@ const OUT_DIR = path.join(DESKTOP, 'ui', 'i18n')
 
 /** 需要产出词典的语言（简体不需要：查不到就显示键本身，即简体原文） */
 const OUTPUT_LOCALES = ['en', 'zh-Hant', 'ja', 'ko', 'pt-BR']
+/** 只有登录页会按需单独加载的域；主面板与手机端统一读 combined/<locale>.js */
+const SPLIT_DOMAINS = new Set(['login', 'accounts'])
 const ONLY_DOMAIN = process.argv.find(arg => arg.startsWith('--domain='))?.slice('--domain='.length)
 if (ONLY_DOMAIN && !DOMAIN_ORDER.includes(ONLY_DOMAIN)) throw new Error(`Unknown i18n domain: ${ONLY_DOMAIN}`)
 
@@ -75,13 +77,6 @@ function dictFileContent(locale, domain, entries) {
   if (entries.length === 0) return `${header}\n${boot}\n`
   const pairs = entries.map(([key, value]) => `${jsString(key)}: ${jsString(value)}`).join(', ')
   return `${header}\n${boot} Object.assign(window.wbI18nDict, { ${pairs} });\n`
-}
-
-/** 域清单（head 引导脚本据此逐个注入域文件） */
-function manifestContent() {
-  const list = DOMAIN_ORDER.map(name => jsString(name)).join(', ')
-  const header = '/* Agent2API 词典域清单 —— 由 desktop-tauri/i18n/build.mjs 生成，请勿手改 */'
-  return `${header}\nwindow.__WB_I18N_DOMAINS = [${list}];\n`
 }
 
 /* ─── 加载词典源 ───────────────────────────── */
@@ -158,14 +153,12 @@ async function main() {
 
   // 先全部生成到内存并自校验，再落盘 —— 不写半套坏词典
   const outputs = []
-  if (!ONLY_DOMAIN) outputs.push({ file: path.join(OUT_DIR, 'manifest.js'), content: manifestContent() })
 
   let hantGenerated = 0
   let hantManual = 0
   for (const locale of OUTPUT_LOCALES) {
-    // 主面板走合并词典（一个文件装下该语言的全部域）：原来 head 里要写 22 个
-    // <script>，现在只剩 1 个。逐域文件仍然保留 —— 手机端按 manifest 增量取、
-    // 登录页只取 login/accounts 两个域，都还依赖它们。
+    // 主面板与手机端统一走合并词典（一个文件装下该语言的全部域）；
+    // 登录页只额外按需保留 login / accounts 两个分域文件。
     const combined = []
     for (const domain of produced) {
       const manual = values.get(`${locale}/${domain}`) || {}
@@ -182,7 +175,9 @@ async function main() {
         }
         if (typeof value === 'string' && value) entries.push([key, value])
       }
-      outputs.push({ file: path.join(OUT_DIR, locale, `${domain}.js`), content: dictFileContent(locale, domain, entries) })
+      if (SPLIT_DOMAINS.has(domain)) {
+        outputs.push({ file: path.join(OUT_DIR, locale, `${domain}.js`), content: dictFileContent(locale, domain, entries) })
+      }
       combined.push(...entries)
     }
     // 单域构建（--domain=）不碰合并词典：它手里只有这一个域，写出去会
@@ -202,13 +197,18 @@ async function main() {
     }
   }
 
-  // 落盘前先清过期文件：本语言目录下不该再产出的域文件（JSON 源已删 / 域不存在）
+  // 落盘前先清过期文件：移除废弃的 manifest.js，以及本语言目录下不再单独产出的分域文件
+  const legacyManifest = path.join(OUT_DIR, 'manifest.js')
+  if (!ONLY_DOMAIN && fs.existsSync(legacyManifest)) {
+    fs.unlinkSync(legacyManifest)
+    process.stdout.write('[build] 清理过期词典：manifest.js\n')
+  }
   for (const locale of OUTPUT_LOCALES) {
     const dir = path.join(OUT_DIR, locale)
     if (!fs.existsSync(dir)) continue
     for (const name of fs.readdirSync(dir).filter(file => file.endsWith('.js'))) {
       const domain = name.slice(0, -'.js'.length)
-      if ((!ONLY_DOMAIN || domain === ONLY_DOMAIN) && !produced.includes(domain)) {
+      if ((!ONLY_DOMAIN || domain === ONLY_DOMAIN) && (!produced.includes(domain) || !SPLIT_DOMAINS.has(domain))) {
         fs.unlinkSync(path.join(dir, name))
         process.stdout.write(`[build] 清理过期词典：${locale}/${name}\n`)
       }
@@ -222,7 +222,7 @@ async function main() {
 
   // 报告
   process.stdout.write(`\n[build] 产出域 ${produced.length} 个：${produced.join(', ') || '（无）'}\n`)
-  process.stdout.write(`[build] ${ONLY_DOMAIN ? ONLY_DOMAIN : 'manifest.js'} + ${OUTPUT_LOCALES.length} 个语言目录，共 ${outputs.length} 个文件\n`)
+  process.stdout.write(`[build] ${ONLY_DOMAIN ? ONLY_DOMAIN : 'combined'} + 按需分域（${[...SPLIT_DOMAINS].join(', ')}）× ${OUTPUT_LOCALES.length} 个语言，共 ${outputs.length} 个文件\n`)
   if (converter) {
     process.stdout.write(`[build] zh-Hant：opencc 全量生成 ${hantGenerated} 条，人工译文覆盖 ${hantManual} 条\n`)
   } else {

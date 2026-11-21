@@ -77,7 +77,7 @@ impl Source {
                 same_user(reference,&credentials,&["userId"])?;
                 (root.join("auth.json"),None,"",credentials)
             }
-            "cline-free" | "cline-pass" => {
+            "cline-free" => {
                 let path=home()?.join(".cline/data/settings/providers.json");
                 let value=object(&path,256*1024)?;
                 let auth=value.pointer("/providers/cline/settings/auth").filter(|value|value.is_object()).ok_or_else(invalid)?;

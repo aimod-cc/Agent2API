@@ -153,6 +153,7 @@ pub use shutdown::ServerHandle;
 mod panel_captcha;
 pub mod request_stats;
 mod static_files;
+pub use static_files::EmbeddedUiAssets;
 
 #[cfg(test)]
 mod native_gateway_tests;
@@ -205,9 +206,10 @@ pub struct ServerState {
     /// 配置目录（`~/.agent2api`），与壳侧 gateway::config_dir() 同源
     pub config_dir: PathBuf,
     /// headless 下托管管理界面（`ui/` 静态目录）的根；`None` = 不托管
-    /// （桌面形态由 Tauri 壳的 custom-protocol 出界面，网关只出 API）。
-    /// 桌面壳不设置它；headless 二进制经 [`ServerState::set_ui_dir`] 打开。
+    /// （桌面形态由 Tauri 壳内嵌资源或开发态目录出界面）。
     ui_dir: Option<PathBuf>,
+    /// 桌面形态开启局域网面板时直接从 Tauri 内嵌资源读取，避免安装目录重复打包一份 `ui/`。
+    ui_assets: Option<Arc<dyn EmbeddedUiAssets>>,
     /// 账号存储句柄（内部一把 Mutex，绝不在持锁时做网络请求）
     store: AccountStore,
     /// 鉴权服务句柄（会话读取 / token 刷新）
@@ -372,6 +374,7 @@ impl ServerState {
         // 下面日志裁剪天数与旧文件候选目录才不会用错值。
         let snapshot = config::init(db.clone());
         core::task_state::install(db.clone());
+        core::upstream_versions::install(db.clone());
         core::maintenance::storage::install(db.clone());
         // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时
         // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
@@ -585,6 +588,7 @@ impl ServerState {
             local_panel: false,
             config_dir,
             ui_dir: None,
+            ui_assets: None,
             store,
             auth,
             login,
@@ -768,6 +772,7 @@ impl ServerState {
         // 服务器停机时进程会结束，任务随之消失。用 crate::spawn_task
         // （与 auto_checkin 同一理由）保证从非 tokio 上下文调用也能进入全局运行时。
         core::scheduled_tasks::spawn(state.store.clone(), state.update.clone());
+        core::upstream_versions::spawn();
         // 配置更新和插件热加载会唤醒排程，关闭时保持等待而不是省掉调度循环。
         core::growth_scheduler::spawn(state.store.clone());
         // ZCode 活动套餐的「推理要不要验证码令牌」由上游配置说 —— 那份同步
@@ -950,14 +955,29 @@ impl ServerState {
     }
 
     /// 打开 headless 形态的管理界面托管：`ui_dir` 指向 `ui/` 静态目录，
-    /// 网关随 API 一并出面板（桌面形态不调用 —— 界面由 Tauri 壳出）。
+    /// 网关随 API 一并出面板。
     pub fn set_ui_dir(&mut self, dir: PathBuf) {
         self.ui_dir = Some(dir);
     }
 
-    /// headless 是否托管管理界面（`http::router` 据此挂静态 fallback）。
+    /// 打开桌面形态的内置管理界面托管（直接读取随壳编译的嵌入资源，避免硬盘重复副本）。
+    pub fn set_ui_assets(&mut self, assets: Arc<dyn EmbeddedUiAssets>) {
+        self.ui_assets = Some(assets);
+    }
+
+    /// headless 是否托管管理界面磁盘目录。
     pub fn ui_dir(&self) -> Option<&PathBuf> {
         self.ui_dir.as_ref()
+    }
+
+    /// 桌面形态内嵌资源提供方。
+    pub fn ui_assets(&self) -> Option<&Arc<dyn EmbeddedUiAssets>> {
+        self.ui_assets.as_ref()
+    }
+
+    /// 是否已启用管理界面静态托管（磁盘目录或内嵌资源任一就绪）。
+    pub fn ui_hosted(&self) -> bool {
+        self.ui_dir.is_some() || self.ui_assets.is_some()
     }
 }
 

@@ -16,6 +16,8 @@ import {
 import { LogDetail, LogsList } from './logs-list'
 import { DateRangeFields } from './date-range-fields'
 import { PageAutoRefresh, pageRefreshStore, usePageAutoRefresh } from './page-auto-refresh'
+import { requestDirect } from './assistant-api'
+import { subscribeScopedLiveRefresh, type ScopedRefreshController } from '../../../ui-shared/page-live-refresh'
 
 type PanelHandle = {
   load(options?: LoadOptions): Promise<void>
@@ -58,8 +60,11 @@ function LogsPanel() {
   const touchedRef = React.useRef(false)
   const keywordTimerRef = React.useRef<number | undefined>(undefined)
   const scrollRef = React.useRef<number | null>(null)
+  const loadedOnceRef = React.useRef(false)
+  const liveRef = React.useRef<ScopedRefreshController | null>(null)
 
   const loadPanel = React.useCallback(async (options: LoadOptions = {}): Promise<void> => {
+    if (!loadedOnceRef.current && loadingRef.current > 0 && !options.resetPage) return
     if (!restoredRef.current && shared().wbFilterMemory) {
       restoredRef.current = true
       if (!touchedRef.current) {
@@ -79,6 +84,7 @@ function LogsPanel() {
     const selectedPage = state.page
     const selectedSize = state.size
     const selectedFilters = state.filters
+    liveRef.current?.markLoaded()
     if (!options.silent) setLoading(true)
     try {
       const api = shared().workbuddyDesktop
@@ -100,6 +106,7 @@ function LogsPanel() {
       scrollRef.current = options.resetPage || !options.silent ? 0 : (listRef.current?.scrollTop || 0)
       current.current.data = result
       setData(result)
+      loadedOnceRef.current = true
       setLoaded(true)
       setError('')
       lastIdRef.current = Number(result.lastId) || 0
@@ -115,6 +122,7 @@ function LogsPanel() {
       if (seq === seqRef.current) setError(errorMessage(failure))
     } finally {
       loadingRef.current -= 1
+      liveRef.current?.markLoaded()
       if (seq === seqRef.current) setLoading(false)
     }
   }, [])
@@ -172,11 +180,20 @@ function LogsPanel() {
   }, [changeFilters, loadPanel])
 
   React.useEffect(() => {
-    if (!auto.enabled) return
-    const timer = window.setInterval(() => {
-      if (!document.hidden && shared().wbApp?.currentPage === 'logs') void poll()
-    }, auto.ms)
-    return () => window.clearInterval(timer)
+    const controller = subscribeScopedLiveRefresh({
+      scope: 'logs',
+      enabled: auto.enabled,
+      intervalMs: auto.ms,
+      isActive: () => !document.hidden && shared().wbApp?.currentPage === 'logs',
+      open: (path, signal) => requestDirect(path, { method: 'GET', signal }),
+      onRefresh: poll,
+      windowEvents: ['wb:page'],
+    })
+    liveRef.current = controller
+    return () => {
+      liveRef.current = null
+      controller.stop()
+    }
   }, [auto.enabled, auto.ms, poll])
 
   React.useLayoutEffect(() => {
@@ -271,7 +288,7 @@ function LogsPanel() {
         <div className='log-filters'>
           <SegmentedControl options={RANGE_OPTIONS} value={filters.range} onValueChange={range => changeFilters({ range })} aria-label={t('事件日志时间范围')} className='shrink-0' />
           {filters.range === 'custom' ? <DateRangeFields dates={filters.dates}
-            onChange={dates => changeFilters({ dates })} onClear={() => changeFilters({ range: 'all' })} /> : null}
+            onChange={dates => changeFilters({ dates })} onClear={() => changeFilters({ range: 'today' })} /> : null}
           {filters.view !== 'debug' ? <Select value={filters.level} onValueChange={value => changeFilters({ level: String(value ?? '') })}>
             <SelectTrigger className='min-w-[120px]' aria-label={t('按最低级别筛选')}><SelectValue>{levelLabel}</SelectValue></SelectTrigger>
             <SelectContent>{LEVEL_OPTIONS.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>

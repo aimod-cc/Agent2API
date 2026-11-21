@@ -171,10 +171,8 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // 以邮箱报名字）。插件已经申报了同一份，这里是旧插件版本的兜底。
   qwenwork: { usage: true, creditDetail: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },
   'qwenwork-intl': { usage: true, creditDetail: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },
-  // Cline 两条键：同一家上游按计费通道拆成两个 provider，账号形态完全一样（见
-  // providers::cline::models）。查表按 id 精确匹配，只登记一个会让另一家掉进兜底
+  // Cline Free（Cline Pass 已改用内置 API 模板）
   'cline-free': { usage: true, edition: false, identifier: ['account'], expiry: ['expiresAt'] },
-  'cline-pass': { usage: true, edition: false, identifier: ['account'], expiry: ['expiresAt'] },
   // Accio 两个地区：额度可查（上游只给用量百分比）、有地区概念
   accio: { usage: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },
   'accio-cn': { usage: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },

@@ -314,8 +314,11 @@ function PluginsPage(): React.ReactElement {
         <PluginPageToolbar source={source} status={status} search={search} count={countMatching}
           selecting={selecting} locked={locked} checking={busy === 'check' || catalog?.checking === true}
           scriptsAvailable={Boolean(scripts)} scriptActive={scripts?.operation.active === true}
+          updateCount={pendingUpdates.length} updateDisabled={locked || active || scripts?.operation.active === true}
           onSource={setSource} onStatus={setStatus} onSearch={setSearch}
-          onSelect={() => { setSelecting(value => !value); setSelected(new Set()) }} onFile={fileInstall.show} onMissing={() => setMissingOpen(true)}
+          onSelect={() => { setSelecting(value => !value); setSelected(new Set()) }}
+          onUpdateAll={() => confirmBatch('update', pendingUpdates)}
+          onFile={fileInstall.show} onMissing={() => setMissingOpen(true)}
           onRefresh={() => void refreshStore()} onCheck={() => void check()} onSettings={() => setSettingsOpen(true)}
           onScript={() => setScriptInstallRequest(value => value + 1)} onDiagnostics={() => setDiagnosticsOpen(true)} />
         {error || syncError ? <Alert variant='destructive' className='break-words'>{error || syncError}</Alert> : null}
@@ -323,10 +326,7 @@ function PluginsPage(): React.ReactElement {
           accounts={missingAccounts} onOpen={() => setMissingOpen(true)} t={t} /> : null}
         {selecting ? <PluginBatchToolbar items={batchItems} visibleKeys={shownKeys.filter(key => !batchItems.find(item => item.key === key)?.active)}
           selected={selected} disabled={locked} onSelection={changeSelection} onAction={confirmBatch}
-          onExit={() => { setSelecting(false); setSelected(new Set()) }} t={t} /> : pendingUpdates.length ? <div className='plugins-update-summary'>
-          <span>{t('有 {count} 个插件可更新', { count: pendingUpdates.length })}</span>
-          <Button variant='link' size='xs' disabled={locked || active || scripts?.operation.active === true} onClick={() => confirmBatch('update', pendingUpdates)}>{t('全部更新')}</Button>
-        </div> : null}
+          onExit={() => { setSelecting(false); setSelected(new Set()) }} t={t} /> : null}
         {batch.task ? <PluginBatchProgress task={batch.task} t={t} onClose={batch.clear}
           onRetry={items => confirmBatch(batch.task!.action, items)} /> : null}
         {!fileInstall.open && fileInstall.results.length ? <div className='plugins-update-summary'><span>{fileInstall.running ? t('正在安装本地插件包…') : t('本地安装结果')}</span><Button variant='link' size='xs' onClick={() => fileInstall.setOpen(true)}>{t('查看详情')}</Button></div> : null}

@@ -1,4 +1,4 @@
-import type { PanelChanges } from '../../../ui-shared/panel-events'
+import type { PanelChanges, PanelRevisions } from '../../../ui-shared/panel-events'
 import { PANEL_EVENTS_PATH, subscribePanelEvents } from '../../../ui-shared/panel-events'
 import { requestDirect } from './assistant-api'
 import { bump, getStore } from './accounts-store'
@@ -15,6 +15,7 @@ let stop: (() => void) | undefined
 let syncing = false
 let generation = 0
 let balanceRevision = 0
+let lastRevisions: PanelRevisions | null = null
 let pending: PanelChanges = { accounts: false, balances: false, usage: false, connections: false, proxies: false }
 
 export const accountBalanceEventsRevision = (): number => balanceRevision
@@ -72,6 +73,11 @@ export function startAccountEvents(): void {
       changed: enqueue,
       fallback: () => sync({ accounts: true, balances: true, usage: true, connections: true, proxies: true }),
       connection: status => { setAccountEventsConnected(status === 'connected') },
+      baseline: lastRevisions,
+      onRevisions: next => { lastRevisions = next },
+      onInitialReady: next => {
+        if (next.connections > 0) void syncConnections()
+      },
     })
   }
   window.addEventListener('wb:page', activate)

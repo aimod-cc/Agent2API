@@ -11,7 +11,7 @@ const REFRESH_EXPIRY_KEYS: &[&str] = &[
 
 pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String, Value>) {
     if record.is_desktop() && matches!(record.provider().as_str(),
-        "raccoon" | "kiro" | "autoclaw" | "autoclaw-intl" | "cline-free" | "cline-pass")
+        "raccoon" | "kiro" | "autoclaw" | "autoclaw-intl" | "cline-free")
         && crate::server::core::plugin_host::wasm::has_capability(&record.provider(), "desktop.credentials.v1") {
         public.insert("canSyncCredentials".to_string(), Value::Bool(true));
     }

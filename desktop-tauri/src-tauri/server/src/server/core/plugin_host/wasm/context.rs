@@ -119,6 +119,7 @@ pub struct Context {
     pub(super) progress: super::progress::Progress,
     pub guards: HashMap<String, OwnedMutexGuard<()>>,
     pub calls: u32,
+    pub(super) spin_calls: u32,
 }
 
 impl Context {
@@ -137,7 +138,7 @@ impl Context {
             proxy_selected: params.get("proxy").is_some(), system_proxy_when_unset, user_agent: None,
             trace: params.get("plugin_trace").cloned().unwrap_or(Value::Null),
             sink, head_sent: false, resources: HashMap::new(), http_handles: HashMap::new(), converters: HashMap::new(),
-            blobs: Default::default(), progress: Default::default(), guards: HashMap::new(), calls: 0,
+            blobs: Default::default(), progress: Default::default(), guards: HashMap::new(), calls: 0, spin_calls: 0,
         }
     }
 }

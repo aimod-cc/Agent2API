@@ -73,6 +73,24 @@ const SUSPENDED_IDS: [&str; 3] = [
     "gemini-subscription",
 ];
 
+/// 已改由内置「API 模板」承担、彻底下线不再安装运行的旧提供商。
+const RETIRED_TO_TEMPLATE_IDS: [&str; 1] = [
+    "cline-pass",
+];
+
+/// 这条旧路线是否已改由软件内置 API 模板替代。
+pub fn is_replaced_by_template(id: &str) -> bool {
+    RETIRED_TO_TEMPLATE_IDS.contains(&id)
+}
+
+/// 若该旧提供商已改由内置 API 模板替代，返回对应的模板 key（如 `"clinepass"`）。
+pub fn replaced_template_key(id: &str) -> Option<&'static str> {
+    match id {
+        "cline-pass" => Some("clinepass"),
+        _ => None,
+    }
+}
+
 /// 本家是不是「千问办公」那一族（国内版 / 国际版 / 企业版）。
 ///
 /// 严格错误投影要对这三个 id 用同一套业务码表（`strict_error_codes` 的
@@ -87,5 +105,5 @@ pub(crate) fn is_runtime_identity(id: &str) -> bool {
 
 /// 这条路线此刻有没有执行体。
 pub fn is_suspended(id: &str) -> bool {
-    SUSPENDED_IDS.contains(&id)
+    SUSPENDED_IDS.contains(&id) || is_replaced_by_template(id)
 }

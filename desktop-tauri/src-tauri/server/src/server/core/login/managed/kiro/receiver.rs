@@ -64,6 +64,7 @@ fn spawn_one(
     let listener = Arc::downgrade(listener);
     let receiver = Arc::downgrade(receiver);
     let task = task.clone();
+    let provider = session.provider.clone();
     let session = Arc::downgrade(session);
     let slots = slots.clone();
     let Some(owner) = receiver.upgrade() else {
@@ -109,12 +110,13 @@ fn spawn_one(
                 continue;
             };
             let receiver = receiver.clone();
+            let provider = provider.clone();
             let session = session.clone();
             let task = task.clone();
             let cancel = cancel.clone();
             crate::spawn_task(async move {
                 let _permit = permit;
-                serve(stream, receiver, session, task, stage, cancel).await;
+                serve(stream, receiver, session, task, &provider, stage, cancel).await;
             });
         }
     });
@@ -203,6 +205,7 @@ async fn serve(
     receiver: Weak<ReceiverOwner>,
     session: Weak<Session>,
     task: WeakTask,
+    provider: &str,
     stage: String,
     cancel: CancellationToken,
 ) {
@@ -216,7 +219,7 @@ async fn serve(
         _ = cancel.cancelled() => return,
         result = tokio::time::timeout(Duration::from_secs(5), request(&mut stream, port)) => match result {
             Ok(Ok(raw)) => raw,
-            _ => { respond(&mut stream, false).await; return; },
+            _ => { respond(&mut stream, false, provider).await; return; },
         },
     };
     let Some(current_session) = session.upgrade() else {
@@ -251,7 +254,7 @@ async fn serve(
         valid
     };
     if !accepted {
-        respond(&mut stream, false).await;
+        respond(&mut stream, false, provider).await;
         return;
     }
     let Some(task) = task.upgrade() else {
@@ -260,7 +263,7 @@ async fn serve(
     // 原操作锁下再claim，材料只进原Call，一次受理后旧stage不可排队/恢复。
     // 不复制raw到额外worker；此连接已持许可，其未来被取消时一次材料直接丢弃。
     drop(current_session);
-    respond(&mut stream, true).await;
+    respond(&mut stream, true, provider).await;
     let completion = super::super::receive_callback(task, &stage, &raw);
     tokio::select! {
         biased;
@@ -269,18 +272,12 @@ async fn serve(
     }
 }
 
-async fn respond(stream: &mut TcpStream, accepted: bool) {
-    let message = if accepted {
-        "本次 Kiro 回调已交给登录任务，请返回面板查看当前步骤及最终结果。"
-    } else {
-        "未接受此 Kiro 回调，请返回面板查看当前登录步骤。"
-    };
-    let status = if accepted {
-        "200 OK"
-    } else {
-        "400 Bad Request"
-    };
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n{message}", message.len());
+async fn respond(stream: &mut TcpStream, accepted: bool, provider: &str) {
+    let response = crate::server::core::login::callback_page::raw_receipt_response(
+        accepted,
+        provider,
+        "未接受此 Kiro 回调，请返回面板查看当前登录步骤",
+    );
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         stream.write_all(response.as_bytes()),

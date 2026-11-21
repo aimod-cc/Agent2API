@@ -26,8 +26,17 @@ impl Context {
         if url.origin().ascii_serialization() != "https://www.doubao.com" || !matches!(url.path(),"/chat/completion"|"/chat/async/chunk_stream") {return Ok(None);}
         self.permission("http.doubao-turn.v1")?;
         if params["method"] != "POST" {return Err(invalid());}
-        let encoded = params["body"].as_str().filter(|bytes|bytes.len()<=12*1024*1024).ok_or_else(invalid)?;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_|invalid())?;
+        let (bytes, pinned_body) = if let Some(resource) = params.get("body_resource").filter(|value| !value.is_null()) {
+            if params.get("body").is_some_and(|value| !value.is_null()) { return Err(invalid()); }
+            self.permission("resources.v1")?;
+            let raw = self.blobs.raw(resource.as_str().ok_or_else(invalid)?)?;
+            if raw.len() > 8 * 1024 * 1024 { return Err(invalid()); }
+            (raw.clone(), Some(script::RequestBody::Bytes(raw)))
+        } else {
+            let encoded = params["body"].as_str().filter(|bytes|bytes.len()<=12*1024*1024).ok_or_else(invalid)?;
+            let raw = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_|invalid())?;
+            (bytes::Bytes::from(raw), None)
+        };
         let body: Value = super::managed_task::declaration::parse_object(&bytes,8*1024*1024).map_err(|_|invalid())?;
         if url.path() == "/chat/completion" {
             if self.doubao_turn.is_some() {return Err(invalid());}
@@ -58,7 +67,7 @@ impl Context {
         let turn = self.doubao_turn.as_mut().ok_or_else(invalid)?;
         let client = turn.client.client().map_err(|_|invalid())?.clone();
         let task = (url.path()=="/chat/async/chunk_stream").then(||body["task_id"].as_str().unwrap_or("").to_string());
-        let (result,handle) = script::open_pinned(params,client,deadline.cap_at(self.call_deadline)).await?;
+        let (result,handle) = script::open_pinned_body(params,pinned_body,client,deadline.cap_at(self.call_deadline)).await?;
         if result["status"] == 200 && result["headers"]["content-type"].as_str().is_some_and(|value| value.starts_with("text/event-stream")) {
             turn.readers.insert(handle.id().to_string(),receipt::Reader::new(task));
         }

@@ -7,6 +7,27 @@ use super::{sql, store::AccountStore, store_util::truncate_chars};
 
 const PROVIDER_STATE: &str = "routingProviderCooldowns";
 
+/// 一次加载整份提供商共享冷却映射，供批量列表装饰和限流判定复用，避免按账号逐条查库。
+pub(crate) struct PolicyCooldownState {
+    providers: Value,
+}
+
+impl PolicyCooldownState {
+    pub(crate) fn cooldown_for(&self, provider: &str, model: &str, now: i64) -> Option<Value> {
+        pick_policy_cooldown(&self.providers, provider, model, now)
+    }
+}
+
+fn pick_policy_cooldown(state: &Value, provider: &str, model: &str, now: i64) -> Option<Value> {
+    let limits = state.get(provider)?;
+    [limits.get(model), limits.get("@provider")]
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["resetAt"].as_i64().is_some_and(|at| at > now))
+        .max_by_key(|entry| entry["resetAt"].as_i64().unwrap_or(0))
+        .cloned()
+}
+
 impl AccountStore {
     pub(crate) fn mark_policy_cooldown(&self, account_id: &str, model: &str, scope: CooldownScope,
         status: i32, code: Option<i64>, reset_at: Option<i64>, message: &str, rule: &ErrorRule, floor_ms: u64) -> Option<Value> {
@@ -52,14 +73,20 @@ impl AccountStore {
         saved.then_some(entry)
     }
 
+    pub(crate) fn policy_cooldown_snapshot(&self) -> PolicyCooldownState {
+        let guard = self.guard();
+        let providers = self
+            .with_conn(&guard, |conn| load_providers(conn))
+            .ok()
+            .unwrap_or_else(|| json!({}));
+        PolicyCooldownState { providers }
+    }
+
     pub(crate) fn policy_cooldown_for(&self, provider: &str, model: &str) -> Option<Value> {
         let guard = self.guard();
-        self.with_conn(&guard, |conn| load_providers(conn)).ok().and_then(|state| {
-            let limits = state.get(provider)?;
-            [limits.get(model), limits.get("@provider")].into_iter().flatten()
-                .filter(|entry| entry["resetAt"].as_i64().is_some_and(|at| at > logging::now_ms()))
-                .max_by_key(|entry| entry["resetAt"].as_i64().unwrap_or(0)).cloned()
-        })
+        self.with_conn(&guard, |conn| load_providers(conn))
+            .ok()
+            .and_then(|state| pick_policy_cooldown(&state, provider, model, logging::now_ms()))
     }
 
     pub(crate) fn clear_provider_policy_cooldowns(&self, account_id: &str) -> Result<usize, String> {

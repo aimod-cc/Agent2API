@@ -10,6 +10,8 @@ export type LoadOptions = { silent?: boolean; resetPage?: boolean }
 
 const FILTERS_KEY = 'workbuddy-desktop-logs-filters'
 const RANGE_KEY = 'workbuddy-desktop-logs-range'
+const RANGE_MIGRATED_KEY = 'workbuddy-desktop-logs-range-v2'
+const DEFAULT_RANGE = 'today'
 const CUSTOM_RANGE_KEY = 'workbuddy-desktop-logs-custom-range'
 const VIEW_KEY = 'workbuddy-desktop-logs-view'
 const AGGREGATE_KEY = 'workbuddy-desktop-logs-aggregate'
@@ -57,13 +59,19 @@ export function errorMessage(error: unknown): string { return error instanceof E
 export function readFilters(): Filters {
   const saved = shared().wbFilterMemory?.load(FILTERS_KEY, { level: '', category: '', keyword: '' })
   let view: LogView = 'important'
-  let range = 'all'
+  let range = DEFAULT_RANGE
   let aggregate = true
   try {
     const storedView = localStorage.getItem(VIEW_KEY)
     if (storedView === 'all' || storedView === 'debug') view = storedView
+    const migrated = localStorage.getItem(RANGE_MIGRATED_KEY)
     const storedRange = localStorage.getItem(RANGE_KEY)
-    if (RANGE_OPTIONS.some(option => option.value === storedRange)) range = storedRange!
+    if (!migrated) {
+      localStorage.setItem(RANGE_MIGRATED_KEY, '1')
+      if (storedRange === 'all') localStorage.setItem(RANGE_KEY, DEFAULT_RANGE)
+    }
+    const currentRange = localStorage.getItem(RANGE_KEY)
+    if (RANGE_OPTIONS.some(option => option.value === currentRange)) range = currentRange!
     aggregate = localStorage.getItem(AGGREGATE_KEY) !== '0'
   } catch { /* 存储不可用不影响当前会话。 */ }
   return {

@@ -211,6 +211,15 @@ export type AttemptDetail = { provider?: string; status?: number; error?: string
   errorPolicy?: import('../../../ui-shared/routing-errors-types').ErrorPolicyRecord }
 
 export type RequestRow = {
+  rowId?: number
+  detailsLoaded?: boolean
+  hasRoute?: boolean
+  visionMode?: string
+  hasProcessFacts?: boolean
+  internalRetries?: number
+  hasSensitiveHits?: boolean
+  hasClientEvidence?: boolean
+  clientUserAgent?: string
   clientLabel?: string
   clientEvidence?: import('../../../ui-shared/client-identification').ClientEvidence
   ts?: number
@@ -260,6 +269,7 @@ export function fetchRequests(
     endDate?: string
     productionOnly?: string
     completedOnly?: string
+    view?: 'list'
   },
   signal?: AbortSignal,
 ): Promise<RequestPage> {
@@ -270,11 +280,22 @@ export function fetchRequests(
   if (params.model) query.set('model', params.model)
   if (params.provider) query.set('provider', params.provider)
   if (params.client !== undefined) query.set('client', params.client)
-  for (const key of ['apiKey', 'startDate', 'endDate', 'productionOnly', 'completedOnly'] as const) {
+  for (const key of ['apiKey', 'startDate', 'endDate', 'productionOnly', 'completedOnly', 'view'] as const) {
     if (params[key] !== undefined) query.set(key, params[key] as string)
   }
   const suffix = query.toString()
   return apiCall<RequestPage>(`/api/stats/requests${suffix ? `?${suffix}` : ''}`, { signal })
+}
+
+export function fetchRequestDetail(
+  params: { rowId?: number; id?: string; ts?: number },
+  signal?: AbortSignal,
+): Promise<RequestRow> {
+  const query = new URLSearchParams()
+  if (params.rowId) query.set('rowId', String(params.rowId))
+  if (params.id) query.set('id', params.id)
+  if (params.ts) query.set('ts', String(params.ts))
+  return apiCall<RequestRow>(`/api/stats/requests/detail?${query.toString()}`, { signal })
 }
 
 /* ─── 运行日志 ─────────────────────────────────── */

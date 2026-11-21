@@ -71,7 +71,11 @@ impl Projection {
         let native = Value::Object(native);
         bounded::check(&native, bounded::MAX_SECRET_BYTES)?;
         reject_reserved(&native)?;
-        let identity = Value::Object(select(fields, IDENTITY_KEYS));
+        let mut identity = select(fields, IDENTITY_KEYS);
+        if let Some(uid) = record.identity_field("uid") {
+            identity.insert("uid".to_string(), uid.clone());
+        }
+        let identity = Value::Object(identity);
         let public_identity = match fields.get("pluginPublic").filter(|value| !value.is_null()) {
             Some(Value::Object(public)) => Value::Object(select(public, IDENTITY_KEYS)),
             Some(_) => return Err(Error::InvalidRecord),

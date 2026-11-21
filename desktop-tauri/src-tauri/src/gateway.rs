@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -183,19 +184,27 @@ pub fn config_dir() -> PathBuf {
 /// 通用 60 秒是给「管理 API 小请求」定的；云同步的上传 / 下载要打外网传几 MB，
 /// 慢速云盘上 60 秒根本不够。放宽的是**这一条命令**的超时，不是全局 ——
 /// 其它管理请求仍应快速失败（卡住的面板比报错更难排查）。
-pub(crate) fn local_client(timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .no_proxy()
-        .timeout(timeout)
-        .build()
-        .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
+/// 全局复用的本机管理请求 Client（跳过系统代理，按单次请求覆盖超时）。
+///
+/// 避免每次调接口都重新分配连接池与 socket，让 `127.0.0.1` 的 keep-alive 连接得以持续复用。
+pub(crate) fn local_client() -> Result<&'static reqwest::Client, String> {
+    static SHARED_LOCAL_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    SHARED_LOCAL_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
-fn management_client(path: &str, timeout_ms: u64) -> Result<reqwest::Client, String> {
+fn management_timeout(path: &str, timeout_ms: u64) -> Duration {
     if path.split('?').next() != Some("/api/accounts/usage") {
-        return local_client(Duration::from_millis(timeout_ms));
+        return Duration::from_millis(timeout_ms);
     }
-    local_client(Duration::from_secs(195))
+    Duration::from_secs(195)
 }
 
 fn request_builder_with_timeout(
@@ -205,7 +214,8 @@ fn request_builder_with_timeout(
     timeout_ms: u64,
 ) -> Result<reqwest::RequestBuilder, String> {
     let url = format!("http://127.0.0.1:{}{path}", proxy_port());
-    let base = management_client(path, timeout_ms)?;
+    let base = local_client()?;
+    let timeout = management_timeout(path, timeout_ms);
     let mut builder = match method.to_uppercase().as_str() {
         "GET" => base.get(&url),
         "POST" => base.post(&url),
@@ -214,7 +224,7 @@ fn request_builder_with_timeout(
         "DELETE" => base.delete(&url),
         other => return Err(format!("不支持的请求方法: {other}")),
     };
-    builder = builder.header("Accept", "application/json");
+    builder = builder.timeout(timeout).header("Accept", "application/json");
     builder = crate::panel_session::attach(builder)?;
     // 与原实现一致：POST/PUT/PATCH 即使无参数也发一个空对象，
     // 后端部分路由按「有 body」判定，省略会让它们走错分支
@@ -249,7 +259,7 @@ pub async fn call_with_api_key(method: &str, path: &str, body: Option<&Value>, a
             .map_err(|_| "API Key 包含无效的请求头字符".to_string())?;
         request.headers_mut().insert("x-api-key", key);
         let credentials = request.headers().clone();
-        let response = local_client(Duration::from_millis(REQUEST_TIMEOUT_MS))?.execute(request).await
+        let response = local_client()?.execute(request).await
             .map_err(|error| describe_transport_error(&error))?;
         let status = response.status().as_u16();
         let text = response.text().await.map_err(|error| format!("读取响应失败: {error}"))?;
@@ -373,7 +383,7 @@ async fn send_once_with_source(
         return Err("本机管理会话已变化，本次确认或请求没有自动重发；请重新读取状态".into());
     }
     let credentials = request.headers().clone();
-    let response = management_client(path, timeout_ms)?
+    let response = local_client()?
         .execute(request)
         .await
         .map_err(|error| describe_transport_error(&error))?;

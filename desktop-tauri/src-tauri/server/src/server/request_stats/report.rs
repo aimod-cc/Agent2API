@@ -602,6 +602,58 @@ pub(super) fn entry_json(entry: &RequestEntry) -> Value {
     value
 }
 
+/// 列表页轻量行转 JSON，契约与 `entry_json` 展示列一致，但省掉大字段拆装。
+pub(super) fn list_entry_json(row: &super::record::RequestListRow) -> Value {
+    let phase_elapsed = row.phase_started_at.map(|started| (now_ms() - started).max(0));
+    let mut object = serde_json::Map::with_capacity(40);
+    object.insert("rowId".into(), json!(row.row_id));
+    object.insert("id".into(), json!(row.id));
+    object.insert("ts".into(), json!(row.ts));
+    object.insert("model".into(), json!(row.model));
+    object.insert("accountId".into(), json!(row.account_id));
+    object.insert("accountName".into(), json!(row.account_name));
+    object.insert("status".into(), json!(row.status));
+    object.insert("durationMs".into(), json!(row.duration_ms));
+    object.insert("firstResponseMs".into(), json!(row.first_response_ms));
+    object.insert("attempts".into(), json!(row.attempts));
+    object.insert("error".into(), json!(row.error));
+    object.insert("promptTokens".into(), json!(row.prompt_tokens));
+    object.insert("completionTokens".into(), json!(row.completion_tokens));
+    object.insert("totalTokens".into(), json!(row.total_tokens));
+    object.insert("cacheReadTokens".into(), json!(row.cache_read_tokens));
+    object.insert("credit".into(), json!(row.credit));
+    object.insert("provider".into(), json!(row.provider));
+    object.insert("providerLabel".into(), Value::String(provider_label(&row.provider)));
+    object.insert("clientModel".into(), json!(row.client_model));
+    object.insert("upstreamModel".into(), json!(row.upstream_model));
+    object.insert("clientReasoning".into(), json!(row.client_reasoning));
+    object.insert("upstreamReasoning".into(), json!(row.upstream_reasoning));
+    object.insert("phase".into(), json!(row.phase));
+    object.insert("phaseStartedAt".into(), json!(row.phase_started_at));
+    object.insert("phaseElapsedMs".into(), json!(phase_elapsed));
+    object.insert("isTest".into(), json!(row.is_test));
+    object.insert("client".into(), json!(row.client));
+    object.insert("clientLabel".into(), json!(crate::server::core::client::display_name(&row.client, &row.recorded_client_name)));
+    object.insert("apiKeyId".into(), json!(row.api_key_id));
+    object.insert("apiKeyName".into(), json!(row.api_key_name));
+    object.insert("apiKeySource".into(), json!(row.api_key_source));
+    object.insert("detailsLoaded".into(), Value::Bool(false));
+    object.insert("hasRoute".into(), Value::Bool(row.has_route));
+    if !row.vision_mode.is_empty() {
+        object.insert("visionMode".into(), Value::String(row.vision_mode.clone()));
+    }
+    object.insert("hasSensitiveHits".into(), Value::Bool(row.has_sensitive_hits));
+    object.insert("hasProcessFacts".into(), Value::Bool(row.has_process_facts));
+    if row.internal_retries > 0 {
+        object.insert("internalRetries".into(), json!(row.internal_retries));
+    }
+    object.insert("hasClientEvidence".into(), Value::Bool(row.has_client_evidence));
+    if !row.client_user_agent.is_empty() {
+        object.insert("clientUserAgent".into(), Value::String(row.client_user_agent.clone()));
+    }
+    Value::Object(object)
+}
+
 /// 区间级 topModel：按 `tokens` 降序，并列比 `requests`，再并列比名字
 /// （名字兜底是为了结果稳定，不受聚合行内部顺序影响）。
 /// 无数据或所有记录都没带模型名时返回 `null`。

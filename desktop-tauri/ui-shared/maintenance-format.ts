@@ -1,4 +1,5 @@
 import { t } from '../ui-kit/src/i18n'
+import { credentialRefreshMessage } from './plugin-login-refresh-message'
 import type { MaintenanceItem, MaintenanceRun, MaintenanceRunStatus, MaintenanceTaskId } from './maintenance-types'
 
 export const maintenanceLabel = (id: MaintenanceTaskId): string => id === 'credentialMaintenance' ? t('凭证维护') : t('模型目录更新')
@@ -17,6 +18,8 @@ export const hasFailures = (run: MaintenanceRun): boolean => run.failed > 0 || r
 export function maintenanceMessage(message: string): string {
   const known: Record<string, string> = {
     '凭证未过期或临期': t('凭证未过期或临期'),
+    '插件正在安装或更新，暂时无法检查凭证有效期。': t('插件正在安装或更新，暂时无法检查凭证有效期。'),
+    '无法检查凭证有效期，插件返回的结果无效。': t('无法检查凭证有效期，插件返回的结果无效。'),
     '登录授权已失效，需要重新登录该账号': t('登录授权已失效，需要重新登录该账号'),
     '未注册的提供商': t('未注册的提供商'),
     '该提供商不支持主动刷新凭证（没有续期手段）': t('该提供商不支持主动刷新凭证（没有续期手段）'),
@@ -33,7 +36,7 @@ export function maintenanceMessage(message: string): string {
     '上次执行中断，没有完整结果；请核对账号状态': t('上次执行中断，没有完整结果；请核对账号状态'),
     '维护已执行，但完整结果未能保存；请先核对账号状态，不要反复执行': t('维护已执行，但完整结果未能保存；请先核对账号状态，不要反复执行'),
   }
-  return Object.prototype.hasOwnProperty.call(known, message) ? known[message] : t(message)
+  return Object.prototype.hasOwnProperty.call(known, message) ? known[message] : credentialRefreshMessage(message, t)
 }
 
 export function itemMessage(item: MaintenanceItem, taskId: MaintenanceTaskId): string {

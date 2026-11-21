@@ -1,3 +1,5 @@
+import { credentialRefreshMessage } from './plugin-login-refresh-message'
+
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
 export const USAGE_NOT_CONFIGURED_CODE = 'usage_not_configured'
@@ -111,7 +113,7 @@ export function usageFailureMessage(row: UsageQueryRow, t: Translate): string {
       case 'request_timeout': return t('余额请求超时（连接或响应未完成），请检查网络或稍后重试')
     }
   }
-  return row.error ? t(row.error) : ''
+  return row.error ? credentialRefreshMessage(row.error, t) : ''
 }
 
 export function usageStopText(diagnostics: UsageQueryDiagnostics | null | undefined, t: Translate): string {

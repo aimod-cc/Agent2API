@@ -103,16 +103,11 @@ function apkBundle(): Plugin {
       // Capacitor 的 webDir 只认 index.html。
       fs.copyFileSync(path.resolve(__dirname, 'apk.html'), path.join(root, 'index.html'))
 
-      // 词典：只带运行时用得到的那几个域文件，连同 manifest.js
-      const i18nSrc = path.join(source, 'i18n')
-      const i18nOut = path.join(root, 'i18n')
-      if (fs.existsSync(i18nSrc)) {
-        // combined/ 只服务桌面主面板（登录页与手机端仍按域取）；APK 里用不到，
-        // 不打进去，避免多出五份约 700 KB 的合并词典。
-        fs.cpSync(i18nSrc, i18nOut, {
-          recursive: true,
-          filter: src => path.basename(src) !== 'combined',
-        })
+      // 词典：APK 手机端直接用合并词典（combined/<locale>.js），不带分域碎片文件
+      const combinedSrc = path.join(source, 'i18n', 'combined')
+      const combinedOut = path.join(root, 'i18n', 'combined')
+      if (fs.existsSync(combinedSrc)) {
+        fs.cpSync(combinedSrc, combinedOut, { recursive: true })
       }
       for (const name of ['i18n.js', 'aliyun-captcha.js']) {
         fs.copyFileSync(path.join(source, name), path.join(root, name))

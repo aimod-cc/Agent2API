@@ -1,6 +1,6 @@
 export type LaunchClient = { id: string; label: string; platform: 'windows' }
 export type LaunchSelection = { provider: string; account: string; client: string }
-export type LaunchPhase = 'awaiting_confirmation' | 'preparing' | 'closing' | 'writing' | 'starting' | 'started' | 'committed' | 'failed' | 'canceled' | 'restored' | 'recovery_required'
+export type LaunchPhase = 'awaiting_confirmation' | 'preparing' | 'closing' | 'writing' | 'reloading' | 'starting' | 'started' | 'switched' | 'committed' | 'failed' | 'canceled' | 'restored' | 'recovery_required'
 export type LaunchResult = {
   intent: string
   provider: string
@@ -14,6 +14,7 @@ export type LaunchResult = {
   restored: boolean
   running: boolean
   requiresRestart: boolean
+  hotSwitch: boolean
   executable: string
   resources: Array<{ id: string; label: string; location: string }>
   backup: string | null
@@ -29,7 +30,7 @@ export type LaunchTranslate = (key: string, vars?: Record<string, string | numbe
 
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const string = (value: unknown, maximum = 4096): value is string => typeof value === 'string' && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value)
-const phases: readonly string[] = ['awaiting_confirmation', 'preparing', 'closing', 'writing', 'starting', 'started', 'committed', 'failed', 'canceled', 'restored', 'recovery_required']
+const phases: readonly string[] = ['awaiting_confirmation', 'preparing', 'closing', 'writing', 'reloading', 'starting', 'started', 'switched', 'committed', 'failed', 'canceled', 'restored', 'recovery_required']
 
 export function launchClients(raw: unknown, provider: string): LaunchClient[] {
   if (!object(raw) || !object(raw[provider])) return []
@@ -46,7 +47,7 @@ export function readLaunchResult(raw: unknown): LaunchResult {
     || !string(raw.message) || !string(raw.executable) || !Array.isArray(raw.resources) || raw.resources.length > 8
     || raw.resources.some(resource => !object(resource) || !string(resource.id, 128) || !string(resource.label, 128) || !string(resource.location))
     || typeof raw.remainingMs !== 'number' || !Number.isFinite(raw.remainingMs) || raw.remainingMs < 0
-    || ['error', 'committed', 'started', 'restored', 'running', 'requiresRestart', 'canRestore', 'canRetryStart'].some(key => typeof raw[key] !== 'boolean')
+    || ['error', 'committed', 'started', 'restored', 'running', 'requiresRestart', 'hotSwitch', 'canRestore', 'canRetryStart'].some(key => typeof raw[key] !== 'boolean')
     || ['backup', 'pendingBackup'].some(key => raw[key] !== null && !string(raw[key], 48))) throw new Error('本机启动状态返回格式无效')
   return raw as unknown as LaunchResult
 }
@@ -67,7 +68,7 @@ export function readLaunchRecoveries(raw: unknown): LaunchPendingRecovery[] {
   return raw.pending as LaunchPendingRecovery[]
 }
 
-export const launchPending = (phase: LaunchPhase): boolean => ['preparing', 'closing', 'writing', 'starting'].includes(phase)
+export const launchPending = (phase: LaunchPhase): boolean => ['preparing', 'closing', 'writing', 'reloading', 'starting'].includes(phase)
 
 export function launchMessage(message: string, t: LaunchTranslate): string {
   const translated = t(message)
@@ -89,8 +90,10 @@ export function launchPhaseText(phase: LaunchPhase, t: LaunchTranslate): string 
     case 'preparing': return t('正在准备账号凭证')
     case 'closing': return t('正在关闭客户端')
     case 'writing': return t('正在切换本机凭证')
+    case 'reloading': return t('正在重载客户端服务')
     case 'starting': return t('正在启动客户端')
     case 'started': return t('客户端已启动')
+    case 'switched': return t('凭证已在线切换')
     case 'committed': return t('凭证已切换，客户端未启动')
     case 'failed': return t('启动未完成')
     case 'canceled': return t('本次启动已取消')

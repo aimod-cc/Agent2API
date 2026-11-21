@@ -142,7 +142,7 @@ function shared(): SharedWindow {
  * 源）：Cline 的清单接口无鉴权、内容是全局的，「用哪个账号去拉」对它没有意义 —— 那一列显示为空
  * 占位，而不是给一个选了也一样的下拉。
  */
-const ACCOUNTLESS_REFRESH = new Set(['cline-free', 'cline-pass'])
+const ACCOUNTLESS_REFRESH = new Set(['cline-free'])
 
 /** 「模型来源」的落盘键：`{providerId: accountId}`（见 loadSavedSource 的说明） */
 const SOURCE_KEY = 'workbuddy-desktop-fetch-model-source'

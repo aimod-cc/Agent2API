@@ -1,4 +1,4 @@
-import { subscribePanelEvents, type PanelChanges } from '../../../ui-shared/panel-events'
+import { subscribePanelEvents, type PanelChanges, type PanelRevisions } from '../../../ui-shared/panel-events'
 import { mergeUsageQueryRow } from '../../../ui-shared/usage-query-state'
 import { openPanelEvents } from '../api/client'
 import { fetchUsageSnapshot, type UsageSnapshot } from '../api/gateway'
@@ -16,6 +16,7 @@ let usageRequested = 0
 let usageTimer: ReturnType<typeof setTimeout> | undefined
 let usage: UsageSnapshot = {}
 let balanceRevision = 0
+let lastRevisions: PanelRevisions | null = null
 const revisionListeners = new Set<() => void>()
 const scopes = new Map<symbol, string[]>()
 const listeners = new Set<(snapshot: UsageSnapshot) => void>()
@@ -96,6 +97,7 @@ function ensure(): void {
   if (currentIdentity !== identity) {
     currentIdentity = identity
     usage = {}
+    lastRevisions = null
     listeners.forEach(listener => listener(usage))
   }
   const run = generation
@@ -112,6 +114,8 @@ function ensure(): void {
     changed: changes => { void sync(changes) },
     fallback: () => sync({ accounts: true, balances: true, usage: true, connections: false, proxies: true }),
     connection: status => { connected = status === 'connected' },
+    baseline: lastRevisions,
+    onRevisions: next => { lastRevisions = next },
   })
 }
 

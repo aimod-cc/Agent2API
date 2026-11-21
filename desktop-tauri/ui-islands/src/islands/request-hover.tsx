@@ -33,12 +33,17 @@ const FLOW_ROW = 'rh-row min-w-0 break-words'
  * null），读取处各自归一 —— 与旧实现 `Number(x) || 1` 的手法一致。
  */
 type RequestEntry = {
+  rowId?: unknown
+  id?: unknown
+  ts?: unknown
+  detailsLoaded?: unknown
   attempts?: unknown
   provider?: unknown
   status?: unknown
   error?: unknown
   attemptDetails?: unknown
   sensitiveHits?: unknown
+  loadingDetail?: boolean
 }
 
 /** 一次尝试的明细（后端 AttemptDetail；字段名是后端契约） */
@@ -80,6 +85,9 @@ type BindOptions = {
  * 独占的 wbRequestHover（见文件末尾）。
  */
 type SharedWindow = {
+  workbuddyDesktop?: {
+    getStatsRequestDetail?: (query: { rowId?: number; id?: string; ts?: number }) => Promise<unknown>
+  }
   /** 提供商展示名目录（providerLabel 的兜底链：目录 → 原样回显 id） */
   wbProviders?: { labelOf?: (id: string) => string }
   /** 旧实现从 wbApp 取 `esc` 拼 innerHTML，本岛**不使用**（React 的文本节点天然转义，再 esc
@@ -272,6 +280,9 @@ function AttemptRow({ item, index, inFlight }: { item: AttemptDetail; index: num
 function ChainPanel({ entry }: { entry: RequestEntry }) {
   const attempts = Number(entry.attempts) || 1
   const details = detailsOf(entry)
+  if (entry.loadingDetail && !details.length) {
+    return <div className={DIM_ROW}>{t('正在加载详情…')}</div>
+  }
   if (!details.length) {
     const finalProvider = providerLabel(entry.provider)
     const sentence = finalProvider
@@ -319,6 +330,9 @@ function ChainPanel({ entry }: { entry: RequestEntry }) {
  */
 function SensitivePanel({ entry }: { entry: RequestEntry }) {
   const hits = hitsOf(entry)
+  if (entry.loadingDetail && !hits.length) {
+    return <div className={DIM_ROW}>{t('正在加载详情…')}</div>
+  }
   if (!hits.length) {
     return <div className={DIM_ROW}>{t('这条记录命中了敏感词，但没有留下命中明细')}</div>
   }
@@ -464,6 +478,53 @@ function renderPanel(kind: PanelKind, entry: RequestEntry): void {
   bindGlobals()
 }
 
+const MAX_DETAIL_CACHE = 120
+const detailCache = new Map<string, RequestEntry>()
+
+function cacheKeyOf(entry: RequestEntry): string {
+  const rowId = Number(entry.rowId)
+  const identity = Number.isFinite(rowId) && rowId > 0 ? `#${rowId}` : String(entry.id ?? entry.ts ?? '')
+  return `${identity}:${String(entry.ts ?? '')}:${String(entry.attempts ?? '')}:${String(entry.status ?? '')}:${String(entry.error ?? '')}`
+}
+
+function hydrateEntry(entry: RequestEntry): { entry: RequestEntry; needsFetch: boolean } {
+  if (entry.detailsLoaded !== false) return { entry, needsFetch: false }
+  const cached = detailCache.get(cacheKeyOf(entry))
+  if (cached) return { entry: { ...entry, ...cached, detailsLoaded: true }, needsFetch: false }
+  return { entry: { ...entry, loadingDetail: true }, needsFetch: true }
+}
+
+function fetchEntryDetail(entry: RequestEntry, el: HTMLElement): void {
+  const getDetail = shared().workbuddyDesktop?.getStatsRequestDetail
+  if (typeof getDetail !== 'function') return
+  const key = cacheKeyOf(entry)
+  const rowId = Number(entry.rowId)
+  const id = String(entry.id ?? '').trim()
+  const ts = Number(entry.ts)
+  const query: { rowId?: number; id?: string; ts?: number } = {}
+  if (Number.isFinite(rowId) && rowId > 0) query.rowId = rowId
+  if (id) query.id = id
+  if (Number.isFinite(ts) && ts > 0) query.ts = ts
+  if (!query.rowId && !query.id) return
+  void getDetail(query).then(result => {
+    const full = asEntry(result)
+    if (!full) return
+    detailCache.delete(key)
+    detailCache.set(key, full)
+    if (detailCache.size > MAX_DETAIL_CACHE) {
+      const oldest = detailCache.keys().next().value
+      if (oldest !== undefined) detailCache.delete(oldest)
+    }
+    if (anchor === el && el.isConnected) {
+      renderPanel(panelKind, { ...entry, ...full, detailsLoaded: true })
+    }
+  }).catch(() => {
+    if (anchor === el && el.isConnected) {
+      renderPanel(panelKind, { ...entry, loadingDetail: false })
+    }
+  })
+}
+
 /** 展开锚点的面板（数据由 entryOf 反查；反查不到就什么都不显示） */
 function openPanel(el: HTMLElement): void {
   // 锚点必须还在文档里：整表重绘会把标签换成新节点，而 150ms 延迟窗口里排下的这次打开
@@ -471,15 +532,17 @@ function openPanel(el: HTMLElement): void {
   // pointerout、开了就不会自己关。作废这次打开即可：指针还在标签上的话，补发的 pointerover
   // 会重新排一次。
   if (!el.isConnected) return
-  const entry = asEntry(entryOfFn?.(el))
+  const raw = asEntry(entryOfFn?.(el))
   // 反查不到数据（列表在打开前恰好刷新过）：不显示（旧实现返回空 HTML 时直接早退）
-  if (!entry) return
+  if (!raw) return
   cancelTimers()
   if (anchor && anchor !== el) closePanel()
   anchor = el
+  const { entry, needsFetch } = hydrateEntry(raw)
   renderPanel(kindOfTag(el), entry)
   el.classList.add('active')
   el.setAttribute('aria-describedby', PANEL_ID)
+  if (needsFetch) fetchEntryDetail(raw, el)
 }
 
 function closePanel(): void {
@@ -531,8 +594,8 @@ function afterListRedraw(): void {
   }
   const next = listHost ? findTag(listHost, pending.kind, pending.key) : null
   // 找不回新节点（行被挤出当前页 / 列表变空 / 出错态）就不再反查数据
-  const entry = next ? asEntry(entryOfFn?.(next)) : null
-  if (!next || !entry) {
+  const raw = next ? asEntry(entryOfFn?.(next)) : null
+  if (!next || !raw) {
     closePanel()
     return
   }
@@ -540,9 +603,11 @@ function afterListRedraw(): void {
   anchor.classList.remove('active')
   anchor.removeAttribute('aria-describedby')
   anchor = next
+  const { entry, needsFetch } = hydrateEntry(raw)
   renderPanel(kindOfTag(next), entry)
   next.classList.add('active')
   next.setAttribute('aria-describedby', PANEL_ID)
+  if (needsFetch) fetchEntryDetail(raw, next)
 }
 
 /** 在新 DOM 里按「标签种类 + 行身份键」找回锚点；没有就是这一行不在本屏了 */

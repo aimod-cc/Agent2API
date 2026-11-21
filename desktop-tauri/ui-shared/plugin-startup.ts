@@ -180,6 +180,7 @@ export function startupForPack(id: string, fallback?: PluginLoadStatus | null): 
 }
 export function hiddenWithStartup(hidden: HiddenAccountsSummary): HiddenAccountsSummary {
   const providers = hidden.providers.map((item): HiddenAccountProvider => {
+    if (item.reason === 'replaced_by_template') return item
     const live = view.value?.providers[item.id]
     if (!live || item.startup && item.startup.updatedAt > live.startup.updatedAt) return item
     if (live.startup.phase === 'unsupported') return { ...item, packId: live.packId, startup: live.startup, reason: 'legacy_unsupported' }

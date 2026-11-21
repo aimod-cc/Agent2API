@@ -68,7 +68,7 @@ const PROVIDER_HUES: Record<string, number> = {
   workbuddy: 250, 'workbuddy-intl': 295,
   raccoon: 60, catpaw: 85,
   autoclaw: 250, 'autoclaw-intl': 295,
-  qoder: 330, 'qoder-intl': 350, 'cline-free': 200, 'cline-pass': 200,
+  qoder: 330, 'qoder-intl': 350, 'cline-free': 200,
   // 千问办公两版（与 Qoder 同一套协议栈的另一家产品）：手工给一对
   // 相邻但可辨的色相，而不是让未登记 id 落到哈希上（那种颜色是随机的）。
   qwenwork: 300, 'qwenwork-intl': 315,

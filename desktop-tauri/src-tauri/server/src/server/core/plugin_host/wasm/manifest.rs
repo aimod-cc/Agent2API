@@ -49,7 +49,11 @@ pub struct Manifest {
     pub verified: bool,
 }
 
-fn memory_default() -> usize { 64 }
+pub const MIN_MEMORY_MIB: usize = 8;
+pub const DEFAULT_MEMORY_MIB: usize = 128;
+pub const MAX_MEMORY_MIB: usize = 256;
+
+fn memory_default() -> usize { DEFAULT_MEMORY_MIB }
 fn concurrency_default() -> usize { 8 }
 
 #[derive(Clone, Debug)]
@@ -148,7 +152,7 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         && (manifest.providers[0].id.as_str() != "raccoon" || !requires("desktop.credentials.v1")) {
         return Err("小浣熊本机续期只能由对应插件通过固定本机凭据入口使用".into());
     }
-    for provider in ["kiro", "autoclaw", "autoclaw-intl", "cline-free", "cline-pass"] {
+    for provider in ["kiro", "autoclaw", "autoclaw-intl", "cline-free"] {
         if super::desktop_credentials::refresh::helper(provider).is_some_and(|helper| spec.helpers.iter().any(|id| id == helper))
             && (manifest.providers[0].id.as_str() != provider || !requires("desktop.credentials.v1")) {
             return Err("本机续期辅助只能由对应提供商通过固定本机凭据入口使用".into());
@@ -226,9 +230,9 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     if requires("http.managed-task.v1") && spec.managed_task.as_ref().is_some_and(|declaration| !declaration.has_profile()) {
         return Err("Wasm 受控任务能力必须声明一个对应地区的固定 profile".into());
     }
-    if !(8..=128).contains(&spec.memory_mib) || !(1..=4096).contains(&spec.concurrency)
+    if !(MIN_MEMORY_MIB..=MAX_MEMORY_MIB).contains(&spec.memory_mib) || !(1..=4096).contains(&spec.concurrency)
         || spec.concurrency_hard_limit.is_some_and(|limit| !(1..=4096).contains(&limit)) {
-        return Err("Wasm 资源声明超出允许范围（内存 8–128 MiB，并发 1–4096）".into());
+        return Err(format!("Wasm 资源声明超出允许范围（内存 {MIN_MEMORY_MIB}–{MAX_MEMORY_MIB} MiB，并发 1–4096）"));
     }
     if spec.helpers.len() > 8 || spec.helpers.iter().any(|helper| helper.is_empty() || helper.len() > 80
         || !helper.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
@@ -265,6 +269,12 @@ pub fn checked_entry(dir: &Path, entry: &str) -> Result<PathBuf, String> {
 
 impl Options {
     pub(crate) fn source_digest(&self) -> &[u8; 32] { &self.source_digest }
+
+    /// 宿主兜底抬高单次运行内存上限，避免旧包因签名锁定无法修改而卡在 64 MiB。
+    pub(super) fn effective_memory_mib(&self, is_conversation: bool) -> usize {
+        let floor = if is_conversation { MAX_MEMORY_MIB } else { DEFAULT_MEMORY_MIB };
+        self.manifest.memory_mib.max(floor).min(MAX_MEMORY_MIB)
+    }
 
     pub fn allows(&self, capability: &str) -> bool {
         self.manifest.requires.iter().any(|item| item == capability)

@@ -1,4 +1,6 @@
 {
+  "插件正在安装或更新，暂时无法检查凭证有效期。": "O plugin está sendo instalado ou atualizado. Ainda não é possível verificar a validade das credenciais.",
+  "无法检查凭证有效期，插件返回的结果无效。": "Não foi possível verificar a validade das credenciais porque o plugin retornou um resultado inválido.",
   " 字段": ".",
   " 的 ": ", no campo ",
   "{enabled} / {total} 个已开启": "{enabled} / {total} habilitadas",

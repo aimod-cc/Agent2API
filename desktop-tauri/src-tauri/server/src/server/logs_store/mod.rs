@@ -81,6 +81,7 @@ static APPENDS_SINCE_TRIM: AtomicU64 = AtomicU64::new(0);
 
 fn bump_cache_epoch() {
     CACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
+    crate::server::core::panel_events::notify_logs();
 }
 
 fn cache_epoch() -> u64 {

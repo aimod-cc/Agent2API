@@ -15,6 +15,10 @@ pub(super) fn suspended_reason(pack: &InstalledPack) -> Option<String> {
             !crate::server::core::providers::availability::is_suspended(provider.id.as_str())) {
         return None;
     }
+    if pack.manifest_providers.iter().all(|provider|
+        crate::server::core::providers::availability::is_replaced_by_template(provider.id.as_str())) {
+        return Some("Cline 订阅池已改为软件内置「Cline Pass」API 模板，无需再安装或运行此插件；请前往「添加账号 → API 模板」使用 Cline Pass。".into());
+    }
     Some("插件文件已安装，但该提供商目前暂停开放，不会启动或参与转发；恢复开放后可重新启用。".into())
 }
 

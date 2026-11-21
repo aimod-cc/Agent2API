@@ -42,3 +42,33 @@ pub(crate) fn notify(change: Change) {
 pub(crate) fn subscribe() -> watch::Receiver<Revisions> {
     channel().subscribe()
 }
+
+fn logs_channel() -> &'static watch::Sender<u64> {
+    static LOGS: OnceLock<watch::Sender<u64>> = OnceLock::new();
+    LOGS.get_or_init(|| watch::channel(0).0)
+}
+
+fn requests_channel() -> &'static watch::Sender<u64> {
+    static REQUESTS: OnceLock<watch::Sender<u64>> = OnceLock::new();
+    REQUESTS.get_or_init(|| watch::channel(0).0)
+}
+
+pub(crate) fn notify_logs() {
+    logs_channel().send_modify(|revision| {
+        *revision = revision.wrapping_add(1);
+    });
+}
+
+pub(crate) fn subscribe_logs() -> watch::Receiver<u64> {
+    logs_channel().subscribe()
+}
+
+pub(crate) fn notify_requests() {
+    requests_channel().send_modify(|revision| {
+        *revision = revision.wrapping_add(1);
+    });
+}
+
+pub(crate) fn subscribe_requests() -> watch::Receiver<u64> {
+    requests_channel().subscribe()
+}

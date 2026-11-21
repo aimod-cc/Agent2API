@@ -4,6 +4,7 @@ import { ProviderSettingsCard } from './provider-settings-card'
 import {
   matchesProviderSettings, providerSettingsKey, providerSettingsLabel,
   type ProviderSettingsRequest, type ProviderSettingsRow, type ProviderSettingsTranslate, type ProviderSettingValue,
+  type UpstreamSyncStatus,
 } from './provider-settings'
 
 export function ProviderSettingsPanel({ request, t, locale, active = true, provider = '', navigation = 0, onPlugins }: {
@@ -116,6 +117,23 @@ export function ProviderSettingsPanel({ request, t, locale, active = true, provi
     return result
   }
 
+  async function syncUpstream(sourceId: string): Promise<{ version?: string | null; status?: UpstreamSyncStatus }> {
+    const syncPath = endpoint.current === '/api/plugins/provider-settings'
+      ? '/api/plugins/provider-settings/upstream-sync'
+      : '/api/provider-settings/upstream-sync'
+    try {
+      return await latest.current.request<{ version?: string | null; status?: UpstreamSyncStatus }>('POST', syncPath, { sourceId })
+    } catch (cause) {
+      const status = cause && typeof cause === 'object' && 'status' in cause ? cause.status : undefined
+      if (syncPath !== '/api/provider-settings/upstream-sync' || status !== 404) throw cause
+      return await latest.current.request<{ version?: string | null; status?: UpstreamSyncStatus }>(
+        'POST',
+        '/api/plugins/provider-settings/upstream-sync',
+        { sourceId },
+      )
+    }
+  }
+
   const selected = filter ? rows?.find(row => matchesProviderSettings(row, filter)) : undefined
   const selectedKey = selected ? providerSettingsKey(selected) : filter
   const options = [{ value: '', label: t('全部') }, ...(rows || []).map(row => ({
@@ -157,7 +175,7 @@ export function ProviderSettingsPanel({ request, t, locale, active = true, provi
     {(rows || []).map(row => {
       const key = providerSettingsKey(row)
       return <div key={key} hidden={Boolean(filter) && key !== selectedKey}>
-        <ProviderSettingsCard row={row} t={t} locale={locale} saveValues={saveValues} refresh={load}
+        <ProviderSettingsCard row={row} t={t} locale={locale} saveValues={saveValues} syncUpstream={syncUpstream} refresh={load}
           onDirtyChange={changed => markDirty(key, changed)} />
       </div>
     })}

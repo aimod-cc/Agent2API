@@ -259,7 +259,7 @@ export type PluginMutation = Pick<PluginsPayload, 'packs' | 'host' | 'adminPanel
   hostError?: string | null
 }
 
-export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded' | 'loading' | 'load_failed' | 'load_timeout' | 'legacy_unsupported'
+export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded' | 'loading' | 'load_failed' | 'load_timeout' | 'legacy_unsupported' | 'replaced_by_template'
 
 export type HiddenAccountProvider = {
   id: string
@@ -268,6 +268,7 @@ export type HiddenAccountProvider = {
   reason: HiddenAccountReason
   packId?: string | null
   startup?: PluginLoadStatus | null
+  templateKey?: string | null
 }
 
 export type HiddenAccountsSummary = {

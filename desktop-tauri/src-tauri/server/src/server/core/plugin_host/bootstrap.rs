@@ -299,7 +299,7 @@ impl GatewayCallbacks for StoreCallbacks {
             match key.as_str() {
                 "upstreamHeaders" if matches!(
                     crate::server::core::providers::kind_from_id(&provider),
-                    Some(ProviderKind::ClineFree | ProviderKind::ClinePass)
+                    Some(ProviderKind::ClineFree)
                 ) => {
                     let overrides: std::collections::BTreeMap<_, _> =
                         crate::server::config::cline_upstream_overrides().into_iter().collect();
@@ -326,6 +326,11 @@ impl GatewayCallbacks for StoreCallbacks {
                     });
                 }
                 _ => {}
+            }
+            if let Some(source_id) = super::provider_settings::upstream_source(&provider, &key) {
+                return Ok(crate::server::core::upstream_versions::cached_version(&source_id)
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null));
             }
             let owner = super::provider_settings::storage_provider(&provider, &key);
             self.check_provider(&owner)?;
@@ -444,6 +449,7 @@ async fn start_pack_tracked(
         Ok(host) => {
             let receipt = claim.and_then(|claim| claim.observe_loaded());
             loading.finish();
+            crate::server::core::upstream_versions::wake();
             Some((host, receipt))
         }
         Err(error) => { loading.fail(&error); None }

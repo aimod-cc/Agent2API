@@ -155,8 +155,8 @@ pub(super) fn build(params: &Value, session: &Session, state: &mut State, option
                 Some(super::catpaw::authorization(lease, &browser.url)?)
             }
             crate::server::core::plugin_host::wasm::managed_policy::CallbackKind::TraeCode => {
-                if browser.manual_callback {
-                    return Err(GatewayError::bad_request("Trae 无state官方回调不允许手工提交"));
+                if !browser.manual_callback {
+                    return Err(GatewayError::bad_request("Trae 授权步骤需要完整回调地址入口"));
                 }
                 super::trae::publication(&mut state.trae, lease, &browser.lease_id, &browser.url, &step.id)?;
                 None
@@ -167,7 +167,7 @@ pub(super) fn build(params: &Value, session: &Session, state: &mut State, option
         lease.official_state = official_state;
         step.lease = Some(browser.lease_id.clone());
         state.leases.retain(|id, _| id == &browser.lease_id);
-        step.browser = Some(Browser { url: browser.url, browser_mode: "external",
+        step.browser = Some(Browser { url: browser.url, browser_mode: session.browser_mode,
             manual_callback: browser.manual_callback, callback_input: "url" });
     }
     Ok(step)

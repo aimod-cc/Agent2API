@@ -331,6 +331,12 @@ impl Host {
             let mut nonce = [0u8; 32];
             getrandom::getrandom(&mut nonce).map_err(|_| super::error("无法生成安全的登录流程标识"))?;
             params["flow"] = json!(format!("login_{}", nonce.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
+            if runtime.shared.options.provider == "raccoon" && params["payload"]["mode"] == "external"
+                && params["payload"].get("callbackOrigin").is_none() {
+                let port = super::super::bootstrap::loopback_port();
+                if port == 0 { return Err(super::error("网关本机回调端口尚未就绪")); }
+                params["payload"]["callbackOrigin"] = json!(format!("http://127.0.0.1:{port}"));
+            }
             if runtime.shared.options.allows("login.callback.v1") {
                 let port = super::super::bootstrap::loopback_port();
                 if port == 0 { return Err(super::error("网关本机回调端口尚未就绪")); }

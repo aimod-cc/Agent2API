@@ -12,6 +12,9 @@ use crate::server::{access::local_session::{self, Source}, core::plugin_host::wa
 pub struct Intent { intent: String }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RetryStart { intent: String, #[serde(default)] restart_confirmed: bool }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Confirm { intent: String, confirmed: bool, #[serde(default)] restart_confirmed: bool }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,8 +69,8 @@ pub async fn cancel(ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderM
 
 pub async fn retry_start(ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
     let source = match source(peer, &headers) { Ok(source) => source, Err(message) => return management_error(403, message) };
-    let input: Intent = match parse(&body) { Ok(input) => input, Err(error) => return response(Err(error)) };
-    response(desktop_launch::retry_start(source, &input.intent).await)
+    let input: RetryStart = match parse(&body) { Ok(input) => input, Err(error) => return response(Err(error)) };
+    response(desktop_launch::retry_start(source, &input.intent, input.restart_confirmed).await)
 }
 
 pub async fn restore(ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {

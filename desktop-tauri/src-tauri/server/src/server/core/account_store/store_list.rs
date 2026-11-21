@@ -2,12 +2,26 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-use super::{store_view::account_list_visible, AccountStore};
+use super::{
+    policy_cooldown_view::decorate_with_cooldowns,
+    policy_cooldowns::PolicyCooldownState,
+    store_view::account_list_visible,
+    AccountStore,
+};
 use crate::server::core::{account_order, providers, routing};
 
 impl AccountStore {
-    pub(crate) fn account_list_snapshot(&self, index_only: bool, booting: bool) -> Value {
+    /// 供账号列表索引与分页接口复用同一份遍历逻辑：按需跳过整份账号数组与提供商汇总，避免拼好后再丢弃。
+    pub(crate) fn account_list_snapshot_with(
+        &self,
+        include_accounts: bool,
+        include_summary: bool,
+        index_only: bool,
+        booting: bool,
+        cooldowns: &PolicyCooldownState,
+    ) -> Value {
         let cached = self.routing_snapshot();
+        let now = crate::server::logging::now_ms();
         let mut counts = BTreeMap::new();
         let mut hidden = BTreeMap::new();
         let mut current_ids = Map::new();
@@ -16,11 +30,18 @@ impl AccountStore {
         for account in &cached.public_accounts {
             let provider = routing::provider_of(account);
             if !account_list_visible(provider, booting) {
-                *hidden.entry(provider.to_string()).or_insert(0usize) += 1;
+                if include_summary {
+                    *hidden.entry(provider.to_string()).or_insert(0usize) += 1;
+                }
                 continue;
             }
-            *counts.entry(provider.to_string()).or_insert(0usize) += 1;
+            if include_summary {
+                *counts.entry(provider.to_string()).or_insert(0usize) += 1;
+            }
             visible.push(account.as_ref());
+            if !include_summary {
+                continue;
+            }
             if account.get("enabled").and_then(Value::as_bool) == Some(false)
                 || account.get("hasCredentials").and_then(Value::as_bool) != Some(true) {
                 continue;
@@ -36,8 +57,6 @@ impl AccountStore {
                 current = Some(account.clone());
             }
         }
-        for provider in counts.keys() { current_ids.entry(provider.clone()).or_insert(Value::Null); }
-        let ids = counts.keys().cloned().collect::<Vec<_>>();
         let route_accounts = visible.iter().map(|account| {
             let mut fields = Map::new();
             for key in ["id", "provider", "priority", "addedAt", "isGuest", "usageConfigKey"] {
@@ -45,11 +64,24 @@ impl AccountStore {
             }
             Value::Object(fields)
         }).collect::<Vec<_>>();
-        let sorting = account_order::sorting(&route_accounts, crate::server::logging::now_ms());
+        let sorting = account_order::sorting(&route_accounts, now);
+        if !include_summary {
+            return json!({ "sorting": sorting });
+        }
+        for provider in counts.keys() { current_ids.entry(provider.clone()).or_insert(Value::Null); }
+        let ids = counts.keys().cloned().collect::<Vec<_>>();
+        let accounts = if include_accounts {
+            visible
+                .into_iter()
+                .map(|account| decorate_with_cooldowns(if index_only { account_index(account) } else { account.clone() }, cooldowns, "", now))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         json!({
             "currentAccountId": current.map(|account| account["id"].clone()),
             "currentAccountIds": current_ids,
-            "accounts": visible.into_iter().map(|account| self.decorate_policy_cooldown(if index_only { account_index(account) } else { account.clone() }, "")).collect::<Vec<_>>(),
+            "accounts": accounts,
             "providers": providers::summary_json(|id| counts.get(id).copied().unwrap_or(0), &ids),
             "hiddenAccounts": super::hidden_accounts::summary(hidden),
             "sorting": sorting,

@@ -1,4 +1,5 @@
 import { useAccountUsage } from '../hooks/useAccountUsage'
+import { credentialRefreshMessage } from '../../../ui-shared/plugin-login-refresh-message'
 import { useEffect, useState } from 'react'
 import { Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle , Input, Button } from '@ui'
 import { Icon } from '../components/Icon'
@@ -84,7 +85,7 @@ export function AccountSheet({
       onChanged()
       return true
     } catch (error) {
-      if (serverIdentity() === identity) store.toast(error instanceof Error ? error.message : String(error), 'err')
+      if (serverIdentity() === identity) store.toast(credentialRefreshMessage(error instanceof Error ? error.message : String(error), t), 'err')
       return false
     } finally {
       if (serverIdentity() === identity) setBusy('')

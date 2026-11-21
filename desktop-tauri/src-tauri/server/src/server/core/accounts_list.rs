@@ -43,15 +43,16 @@ pub struct AccountCounts {
 pub fn summary(store: &AccountStore) -> Value {
     let cached = store.routing_snapshot();
     let booting = plugin_host::startup::booting();
-    let mut snapshot = store.account_list_snapshot(true, booting);
+    let cooldowns = store.policy_cooldown_snapshot();
+    let mut snapshot = store.account_list_snapshot_with(true, true, true, booting, &cooldowns);
     let sources = limiter::sources::facts();
     let counters = limiter::counter::facts();
     let now = crate::server::logging::now_ms();
     let mut counts = AccountCounts::default();
     let mut list_limited = HashMap::new();
     for account in cached.public_accounts.iter().filter(|account| super::account_store::store_view::account_list_visible(routing::provider_of(account), booting)) {
-        let decorated = store.decorate_policy_cooldown(account.as_ref().clone(), "");
-        let limited = limited(&decorated, &sources, &counters, now);
+        let cooldown = cooldowns.cooldown_for(routing::provider_of(account), "", now);
+        let limited = limited_with_cooldown(account, cooldown.as_ref(), &sources, &counters, now);
         count(&mut counts, account, limited);
         if let Some(id) = routing::account_id(account) { list_limited.insert(id.to_string(), limited); }
     }
@@ -67,7 +68,8 @@ pub fn summary(store: &AccountStore) -> Value {
 
 pub fn page(store: &AccountStore, query: &AccountListQuery, ids_only: bool) -> Value {
     let booting = plugin_host::startup::booting();
-    let mut snapshot = store.account_list_snapshot(true, booting);
+    let cooldowns = store.policy_cooldown_snapshot();
+    let mut snapshot = store.account_list_snapshot_with(false, !ids_only, true, booting, &cooldowns);
     let cached = store.routing_snapshot();
     let mut accounts = cached.public_accounts.iter().filter(|account| super::account_store::store_view::account_list_visible(routing::provider_of(account), booting))
         .map(|account| account.as_ref()).collect::<Vec<_>>();
@@ -97,8 +99,8 @@ pub fn page(store: &AccountStore, query: &AccountListQuery, ids_only: bool) -> V
     for account in &accounts {
         let provider = routing::provider_of(account);
         let enabled = account["enabled"] != false;
-        let decorated = store.decorate_policy_cooldown((*account).clone(), "");
-        let is_limited = limited(&decorated, &sources, &counters, now);
+        let cooldown = cooldowns.cooldown_for(provider, "", now);
+        let is_limited = limited_with_cooldown(account, cooldown.as_ref(), &sources, &counters, now);
         if let Some(id) = routing::account_id(account) { list_limited.insert(id.to_string(), is_limited); }
         count(&mut summary, account, is_limited);
         let group_index = *group_indexes.entry(provider.to_string()).or_insert_with(|| {
@@ -174,7 +176,9 @@ pub fn page(store: &AccountStore, query: &AccountListQuery, ids_only: bool) -> V
     let size = query.page_size.clamp(1, 200);
     let offset = if display_total == 0 { 0 } else { query.offset.min((display_total - 1) / size * size) };
     snapshot["accounts"] = if query.metadata_only { json!([]) } else { json!(display.into_iter().skip(offset).take(size).map(|account| {
-        let mut account = store.decorate_policy_cooldown(super::account_store::refresh_public_account(account), "");
+        let mut account = super::account_store::policy_cooldown_view::decorate_with_cooldowns(
+            super::account_store::refresh_public_account(account), &cooldowns, "", now,
+        );
         if let Some(limited) = list_limited.get(routing::account_id(&account).unwrap_or("")) {
             account["listLimited"] = json!(limited);
         }
@@ -211,8 +215,18 @@ fn count(counts: &mut AccountCounts, account: &Value, limited: bool) {
 fn increment(value: &mut Value, key: &str) { value[key] = json!(value[key].as_u64().unwrap_or(0) + 1); }
 
 pub(crate) fn limited(account: &Value, sources: &limiter::sources::Facts, counters: &limiter::counter::Facts, now: i64) -> bool {
+    limited_with_cooldown(account, account.get("providerCooldown"), sources, counters, now)
+}
+
+pub(crate) fn limited_with_cooldown(
+    account: &Value,
+    provider_cooldown: Option<&Value>,
+    sources: &limiter::sources::Facts,
+    counters: &limiter::counter::Facts,
+    now: i64,
+) -> bool {
     account.pointer("/routingCooldowns/@account/resetAt").and_then(Value::as_i64).unwrap_or(0) > now
-        || account.pointer("/providerCooldown/resetAt").and_then(Value::as_i64).unwrap_or(0) > now
+        || provider_cooldown.and_then(|entry| entry.get("resetAt")).and_then(Value::as_i64).unwrap_or(0) > now
         || account["upstreamCooldownUntil"].as_i64().unwrap_or(0) > now
         || account["rateLimits"].as_object().into_iter().flat_map(|limits| limits.values())
         .any(|limit| limit["resetAt"].as_i64().unwrap_or(0) > now)

@@ -113,9 +113,12 @@ impl Runtime {
                 let method = input["method"].as_str().ok_or_else(|| wasmtime::Error::msg("Wasm 调用缺少方法"))?;
                 let result = caller.data_mut().context.invoke_at(method, input["params"].clone(), received).await;
                 let upstream_bytes = caller.data_mut().context.progress.take();
-                let remaining = caller.get_fuel()?;
-                let grant = if result.is_ok() { caller.data_mut().budget.replenish(remaining, upstream_bytes) } else { 0 };
-                if grant > 0 { caller.set_fuel(remaining.saturating_add(grant))?; }
+                if result.is_ok() && upstream_bytes > 0 && caller.data().budget.is_adaptive() {
+                    caller.data_mut().context.spin_calls = 0;
+                    let remaining = caller.get_fuel()?;
+                    let grant = caller.data_mut().budget.replenish(remaining, upstream_bytes);
+                    if grant > 0 { caller.set_fuel(remaining.saturating_add(grant))?; }
+                }
                 caller.data().capture(caller.get_fuel().ok(), None);
                 drop(input);
                 drop(bytes);
@@ -506,7 +509,8 @@ impl Runtime {
                         "authorization" | "x-api-key" | "api-key" | "cookie" | "proxy-authorization"));
                 }
             }
-            let limits = StoreLimitsBuilder::new().memory_size(self.shared.options.manifest.memory_mib * 1024 * 1024)
+            let memory_limit_mib = self.shared.options.effective_memory_mib(method == proto::methods::gateway::CONVERSATION);
+            let limits = StoreLimitsBuilder::new().memory_size(memory_limit_mib * 1024 * 1024)
                 .instances(1).memories(1).tables(2).table_elements(100_000).trap_on_grow_failure(true).build();
             let memory = capacity::MemoryBudget::new();
             memory.resize(2 * capacity::MIB)?;
@@ -556,7 +560,7 @@ impl Runtime {
                 }
                 Err(_) if store.data().limits.exhausted => {
                     let reason = store.data().limits.reason;
-                    let limit_mib = self.shared.options.manifest.memory_mib;
+                    let limit_mib = memory_limit_mib;
                     let input = store.data().input_bytes;
                     let (message, code) = match reason {
                         Some("table") => ("Wasm 插件表容量超限".to_string(), "plugin_resource_limit"),

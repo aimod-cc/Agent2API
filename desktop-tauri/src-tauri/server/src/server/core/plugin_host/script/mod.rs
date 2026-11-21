@@ -40,7 +40,7 @@ pub fn refresh_catalog() -> serde_json::Value {
 }
 pub(super) use trace::{find as capture_for_trace, register as register_trace};
 pub(super) use transport::{
-    clear as clear_transport, close as close_http, convert as convert_request, open, open_body_with_policy, open_frozen_once, open_pinned, RequestBody,
+    clear as clear_transport, close as close_http, convert as convert_request, open, open_body_with_policy, open_frozen_once, open_pinned, open_pinned_body, RequestBody,
     read as read_http, resolve_proxy, HttpDeadline, HttpHandle,
 };
 

@@ -102,7 +102,7 @@ pub async fn refresh(
             results.push(item);
             continue;
         }
-        let cline = matches!(kind, ProviderKind::ClineFree | ProviderKind::ClinePass);
+        let cline = matches!(kind, ProviderKind::ClineFree);
         if cline {
             if let Some(previous) = &cline_result {
                 // 两个池共用同一次远程拉取（接口一次返回两池）：第二家直接沿用
@@ -298,7 +298,7 @@ pub fn reschedule(interval_ms: i64) -> Result<(), String> {
     for kind in implemented_kinds() {
         if is_executable_provider(kind_id(kind)) { continue; }
         if !adapter_for(kind).supports_model_refresh() { continue; }
-        let scope = if matches!(kind, ProviderKind::ClineFree | ProviderKind::ClinePass) {
+        let scope = if matches!(kind, ProviderKind::ClineFree) {
             "cline"
         } else { kind_id(kind) };
         task_state::reschedule(&format!("modelRefresh:{scope}"), interval_ms)?;

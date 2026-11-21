@@ -50,9 +50,10 @@
       }
     }
     document.documentElement.lang = locale;
-    // 简体没有词典目录（查不到即显示简体原文）；其余语言注入 manifest + 各域文件。
+    // 简体没有词典目录（查不到即显示简体原文）；其余语言直接注入合并词典。
     if (locale === 'zh-Hans') return;
-    document.write('<script src="i18n/manifest.js"><\/script>');
+    window.__WB_I18N_INJECTED = true;
+    document.write('<script src="i18n/combined/' + locale + '.js"><\/script>');
   })();
 </script>
 <script src="i18n.js"></script>

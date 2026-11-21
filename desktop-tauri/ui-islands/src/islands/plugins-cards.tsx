@@ -64,6 +64,10 @@ export function PluginUpdateDetails({ pack, update, operation, disabled, onUpdat
   </div>
 }
 
+function BetaBadge() {
+  return <Badge variant='warning' shape='tag' className='font-normal'>{t('beta 版')}</Badge>
+}
+
 export function StorePluginCard({ item, target, operation, disabled, selection, onInstall, onNotes, onDetails }: {
   item: StorePlugin
   target: string
@@ -79,7 +83,7 @@ export function StorePluginCard({ item, target, operation, disabled, selection, 
   return <PluginStoreCard t={t} name={pluginName(item.id, item.name)} description={pluginDescription(item.id, item.description)}
     version={item.version} icon={item.icon} artwork={item.id === 'agent2api-web-providers' ? 'web' : 'providers'}
     status='missing' selection={selection} onDetails={onDetails}
-    badges={<>{item.prerelease ? <Badge variant='warning' shape='tag' className='min-h-4 px-1.5 text-[10px] font-normal'>{t('beta 版')}</Badge> : null}
+    badges={<>{item.prerelease ? <BetaBadge /> : null}
       {!item.version ? <Badge variant='outline' shape='tag'>{t('暂未发布')}</Badge> : null}</>}
     actions={<PluginGetButton t={t} disabled={disabled || operation?.active === true || !installable} onClick={onInstall} />}
     footerAction={item.version ? <Button variant='link' size='xs' onClick={onNotes}>{t('更新日志')}</Button> : null}
@@ -118,7 +122,7 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
     badges={<>
       {pack.updateRequired ? <Badge variant='destructive' shape='tag'>{t('接口不兼容')}</Badge>
         : update?.available ? <Badge variant='brand' shape='tag'>{t('有更新')}{update.latest ? ` v${update.latest}` : ''}</Badge> : null}
-      {pack.version.includes('-') ? <Badge variant='warning' shape='tag' className='min-h-4 px-1.5 text-[10px] font-normal'>{t('beta 版')}</Badge> : null}
+      {pack.version.includes('-') ? <BetaBadge /> : null}
       {pack.unavailableReason ? <Badge variant='secondary' shape='tag'>{legacy ? t('旧插件已停止支持') : t('暂未开放')}</Badge> : null}
       {!pack.entryPresent ? <Badge variant='destructive' shape='tag'>{t('文件缺失')}</Badge> : null}
     </>}

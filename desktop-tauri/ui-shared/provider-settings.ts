@@ -1,15 +1,34 @@
 import { documentText, type PluginDocumentText } from './provider-docs'
 
 export type ProviderSettingValue = string | number | boolean | null
+export type UpstreamSyncStatus = {
+  sourceId: string
+  version?: string | null
+  tag?: string
+  repository?: string
+  publishedAt?: string
+  syncedAt?: number
+  lastAttemptAt?: number
+  lastManualAt?: number
+  nextRunAt?: number
+  cooldownRemainingSeconds?: number
+  intervalHours: number
+  minHours: number
+  maxHours: number
+  defaultHours: number
+  syncing?: boolean
+  lastError?: string | null
+}
 export type ProviderSettingField = {
   key: string
   label: PluginDocumentText
   description?: PluginDocumentText | null
-  type: 'string' | 'number' | 'boolean' | 'select'
+  type: 'string' | 'number' | 'boolean' | 'select' | 'upstream_version'
   default: ProviderSettingValue
   minimum?: number | null
   maximum?: number | null
   max_length?: number | null
+  source_id?: string | null
   options: Array<{ value: string; label: PluginDocumentText }>
 }
 export type ProviderSettingsRow = {
@@ -31,10 +50,11 @@ export type ProviderSettingsRow = {
   effective?: Record<string, ProviderSettingValue>
   invalid?: Record<string, boolean>
   overrides?: Record<string, { source: string; value: ProviderSettingValue }>
+  upstreamSync?: Record<string, UpstreamSyncStatus>
   revision?: string
   saved?: boolean
 }
-export type ProviderSettingsRequest = <T>(method: 'GET' | 'PATCH', path: string, body?: unknown) => Promise<T>
+export type ProviderSettingsRequest = <T>(method: 'GET' | 'PATCH' | 'POST', path: string, body?: unknown) => Promise<T>
 export type ProviderSettingsTranslate = (key: string, params?: Record<string, string | number>) => string
 
 export function providerSettingsKey(row: ProviderSettingsRow): string {

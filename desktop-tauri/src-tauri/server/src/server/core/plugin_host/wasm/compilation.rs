@@ -11,6 +11,7 @@ mod private;
 
 static ALLOCATION: AtomicU8 = AtomicU8::new(0);
 pub(super) const MAX_WASM_STACK_BYTES: usize = 512 * 1024;
+const MAX_WASM_MEMORY_BYTES: usize = super::manifest::MAX_MEMORY_MIB * 1024 * 1024;
 
 pub(super) fn allocation() -> &'static str {
     match ALLOCATION.load(Ordering::Acquire) {
@@ -25,7 +26,7 @@ fn engine() -> Result<Engine, String> {
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
         config.async_support(true).consume_fuel(true).max_wasm_stack(MAX_WASM_STACK_BYTES).async_stack_zeroing(true)
-            .memory_reservation(128 * 1024 * 1024).memory_guard_size(64 * 1024);
+            .memory_reservation(MAX_WASM_MEMORY_BYTES as u64).memory_guard_size(64 * 1024);
         let mut fallback = config.clone();
         let pooling = cfg!(all(target_pointer_width = "64", target_os = "linux"));
         // Windows 表池会提前提交全部表空间；仅 Linux 使用大型底层池。
@@ -33,10 +34,10 @@ fn engine() -> Result<Engine, String> {
             let count = crate::server::config::runtime_capacity::POOL_EXECUTIONS as u32;
             let mut pool = PoolingAllocationConfig::default();
             pool.total_core_instances(count).total_memories(count).total_tables(count * 2).total_stacks(count)
-                .max_memory_size(128 * 1024 * 1024).max_tables_per_module(2).table_elements(100_000)
+                .max_memory_size(MAX_WASM_MEMORY_BYTES).max_tables_per_module(2).table_elements(100_000)
                 .max_unused_warm_slots(8).linear_memory_keep_resident(0)
                 .table_keep_resident(0).async_stack_keep_resident(0).decommit_batch_size(1);
-            config.memory_reservation(128 * 1024 * 1024).memory_guard_size(64 * 1024)
+            config.memory_reservation(MAX_WASM_MEMORY_BYTES as u64).memory_guard_size(64 * 1024)
                 .allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
         }
         let directory = crate::server::config::config_dir().join("wasm-cache");

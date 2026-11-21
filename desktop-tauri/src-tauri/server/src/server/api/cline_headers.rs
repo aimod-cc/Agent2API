@@ -153,14 +153,13 @@ async fn headers_json(state: &ServerState) -> Value {
 /// 失败 / 插件不在时返回两份空表：这条端点是**只读展示**，不该因为插件没装
 /// 就整页报错 —— `overrides` 仍要能读能改（那是网关自己的配置）。
 async fn plugin_header_tables(state: &ServerState) -> (Map<String, Value>, Map<String, Value>) {
-    let Some(adapter) = [
+    let provider = crate::server::core::providers::kind_id(
         crate::server::core::providers::ProviderKind::ClineFree,
-        crate::server::core::providers::ProviderKind::ClinePass,
-    ].into_iter().find_map(|kind| {
-        let provider = crate::server::core::providers::kind_id(kind);
-        crate::server::core::plugin_host::serves_provider(provider)
-            .then(|| adapter::adapter_by_id(provider)).flatten()
-    }) else {
+    );
+    let Some(adapter) = crate::server::core::plugin_host::serves_provider(provider)
+        .then(|| adapter::adapter_by_id(provider))
+        .flatten()
+    else {
         return (Map::new(), Map::new());
     };
     match adapter

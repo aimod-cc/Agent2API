@@ -146,7 +146,7 @@ impl TraeExecution {
             return Err(unavailable());
         }
         call.runtime_matches(self.identity(), self.generation)?;
-        call.with_trae_local_source(|| {
+        call.with_trae_login_source(|| {
             let _lifecycle = self.host.lifecycle.try_lock().map_err(|_| unavailable())?;
             let slot = self.host.embedded.runtime.try_read().map_err(|_| unavailable())?;
             if !current(&self.host, "trae", self.generation)

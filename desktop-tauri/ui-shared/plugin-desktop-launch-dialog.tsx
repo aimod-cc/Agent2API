@@ -33,6 +33,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   const resultRef = React.useRef<LaunchResult | null>(null)
   const pending = React.useRef(false)
   const [restoreConfirm, setRestoreConfirm] = React.useState(false)
+  const [restartConfirm, setRestartConfirm] = React.useState(false)
   const selection: LaunchSelection = { provider, account, client }
   const [queuedClient, setQueuedClient] = React.useState('')
   const selected = clients.find(item => item.id === client)
@@ -102,6 +103,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
     sent.current.clear()
     setUnknown(false)
     setRestoreConfirm(false)
+    setRestartConfirm(false)
     setShowPath(false)
     if (recoveryBackup) {
       accept(await request('POST', `${BASE}/recovery-prepare`, { backup: recoveryBackup }, { retry: 'never' }))
@@ -157,7 +159,9 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
     await action(async () => {
       try {
         const value = await request('POST', `${BASE}/${kind}`, { intent: result.intent,
-          ...(kind === 'confirm' ? { confirmed: true, restartConfirmed: true } : kind === 'restore' ? { confirmed: true } : {}) }, { retry: 'never' })
+          ...(kind === 'confirm' ? { confirmed: true, restartConfirmed: result.requiresRestart }
+            : kind === 'restore' ? { confirmed: true }
+            : result.running ? { restartConfirmed: true } : {}) }, { retry: 'never' })
         accept(value)
         if (kind !== 'confirm') sent.current.delete(key)
       } catch (error) {
@@ -189,9 +193,9 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
 
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
     <DialogContent className='desktop-launch-dialog w-[min(560px,calc(100vw-32px))]'>
-      <DialogHeader className='py-4'><DialogTitle>{recoveryBackup ? t('恢复原凭证') : t('启动客户端')}</DialogTitle></DialogHeader>
+      <DialogHeader className='py-4'><DialogTitle>{recoveryBackup ? t('恢复原凭证') : result?.hotSwitch ? t('切换客户端账号') : t('启动客户端')}</DialogTitle></DialogHeader>
       <DialogBody className='gap-4 py-4'>
-        <DialogDescription>{recoveryBackup ? t('关闭客户端并恢复上次切换前的登录凭证') : t('将本机客户端切换到此账号后启动')}</DialogDescription>
+        <DialogDescription>{recoveryBackup ? t('关闭客户端并恢复上次切换前的登录凭证') : result?.hotSwitch ? t('在线切换当前客户端的登录账号，无需重启') : t('将本机客户端切换到此账号后启动')}</DialogDescription>
         <dl className='grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm'>
           <dt className='text-muted-foreground'>{t('账号')}</dt><dd className='break-words'>{name}</dd>
           <dt className='text-muted-foreground'>{t('客户端')}</dt><dd>
@@ -233,8 +237,10 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
             </div>
             <p className='text-xs text-muted-foreground'>{recoveryBackup
               ? t('仅恢复备份中的登录凭证，完成后客户端保持关闭')
-              : t('确认后将备份并替换上述登录凭证；不会改变反代优先级')}</p>
-            {result.requiresRestart && !recoveryBackup ? <Alert variant='warning'>{t('客户端正在运行，继续会关闭并重启，请先保存未完成的内容')}</Alert> : null}
+              : result.hotSwitch
+                ? t('确认后将备份并替换上述登录凭证，仅重载后台服务，已打开的窗口与内容保持不变')
+                : t('确认后将备份并替换上述登录凭证；不会改变反代优先级')}</p>
+            {result.requiresRestart && !result.hotSwitch && !recoveryBackup ? <Alert variant='warning'>{t('客户端正在运行，继续会关闭并重启，请先保存未完成的内容')}</Alert> : null}
             {result.pendingBackup && !recoveryBackup ? <Alert variant='warning'>{t('上次切换未完整结束，请先恢复原凭证')}</Alert> : null}
           </> : <div role='status' className='flex flex-col gap-2'>
             <p className='flex items-center gap-2 text-sm'>{processing ? <Spinner className='size-4' /> : null}{launchPhaseText(result.phase, t)}</p>
@@ -244,21 +250,28 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
         </> : null}
         {busy && !processing ? <p role='status' className='flex items-center gap-2 text-xs text-muted-foreground'><Spinner />{t('正在读取客户端状态')}</p> : null}
         {restoreConfirm ? <Alert variant='warning'>{t('恢复会关闭客户端，请先保存未完成的内容；恢复完成后不会自动启动')}</Alert> : null}
+        {restartConfirm ? <Alert variant='warning'>{t('重启会关闭当前客户端，请先保存未完成的内容')}</Alert> : null}
         {notice ? <Alert variant='warning'>{notice}</Alert> : null}
         {unknown && result ? <Button size='sm' variant='outline' className='self-start' disabled={busy} onClick={() => void readStatus()}>{t('查询本次状态')}</Button> : null}
       </DialogBody>
       <DialogFooter className='flex-wrap gap-2 py-4'>
         {processing && !busy ? <Button variant='outline' onClick={() => void cancel()}>{t('取消')}</Button> : null}
         {restoreConfirm && !locked ? <Button variant='outline' onClick={() => setRestoreConfirm(false)}>{t('取消')}</Button> : null}
+        {restartConfirm && !locked ? <Button variant='outline' onClick={() => setRestartConfirm(false)}>{t('取消')}</Button> : null}
         <Button variant='outline' onClick={onClose}>{t('关闭')}</Button>
-        {result && !locked && !unknown && result.canRestore && !restoreConfirm ? <Button variant='outline'
+        {result && !locked && !unknown && result.canRestore && !restoreConfirm && !restartConfirm ? <Button variant='outline'
           onClick={() => setRestoreConfirm(true)}>{t('恢复原凭证')}</Button> : null}
         {restoreConfirm && !locked && !unknown ? <Button onClick={() => { setRestoreConfirm(false); void execute('restore') }}>
           {t('关闭客户端并恢复原凭证')}</Button> : null}
-        {result?.canRetryStart && !locked && !unknown && !restoreConfirm ? <Button onClick={() => void execute('retry-start')}>{t('重试启动')}</Button> : null}
-        {result?.phase === 'awaiting_confirmation' && !result.pendingBackup && !showPath && !restoreConfirm ? <Button
+        {result?.canRetryStart && !locked && !unknown && !restoreConfirm && !restartConfirm ? (
+          result.running ? <Button onClick={() => setRestartConfirm(true)}>{t('关闭并重启客户端')}</Button>
+            : <Button onClick={() => void execute('retry-start')}>{t('重试启动')}</Button>
+        ) : null}
+        {restartConfirm && !locked && !unknown ? <Button onClick={() => { setRestartConfirm(false); void execute('retry-start') }}>
+          {t('确认关闭并重启')}</Button> : null}
+        {result?.phase === 'awaiting_confirmation' && !result.pendingBackup && !showPath && !restoreConfirm && !restartConfirm ? <Button
           disabled={locked || unknown || sent.current.has(`confirm:${result.intent}`) || result.remainingMs === 0}
-          onClick={() => void execute('confirm')}>{t('切换并启动')}</Button> : null}
+          onClick={() => void execute('confirm')}>{result.hotSwitch ? t('立即切换') : result.requiresRestart ? t('切换并重启') : t('切换并启动')}</Button> : null}
       </DialogFooter>
     </DialogContent>
   </Dialog>

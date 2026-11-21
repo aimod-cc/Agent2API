@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Input, SegmentedControl, Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle, Switch , Label, Card } from '@ui'
 import { PageAutoRefresh, usePageAutoRefresh } from '../components/PageAutoRefresh'
-import { usePageRefreshTimer } from '../../../ui-shared/page-auto-refresh-timer'
+import { subscribeScopedLiveRefresh } from '../../../ui-shared/page-live-refresh'
+import { openPanelEvents } from '../api/client'
 import { PageIntro, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { store } from '../state/store'
 import { fetchLogs } from '../api/gateway'
@@ -26,7 +27,7 @@ const VIEWS = [
 export function LogsPage() {
   const auto = usePageAutoRefresh('logsAutoRefresh')
   const [view, setView] = useState<LogView>('important')
-  const [range, setRange] = useState<DateRange>('all')
+  const [range, setRange] = useState<DateRange>('today')
   const [dates, setDates] = useState<CustomDates>(() => readCustomRange(CUSTOM_RANGE_KEY))
   const [level, setLevel] = useState('')
   const [keyword, setKeyword] = useState('')
@@ -45,6 +46,7 @@ export function LogsPage() {
   stateRef.current = { view, level, search, aggregate, page, range, dates }
   const pollingRef = useRef(false)
   const loadingRef = useRef(0)
+  const liveRef = useRef<{ markLoaded: () => void } | null>(null)
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(keyword.trim()), 300)
@@ -60,6 +62,7 @@ export function LogsPage() {
     }
     const seq = ++seqRef.current
     loadingRef.current += 1
+    liveRef.current?.markLoaded()
     if (!silent) setLoading(true)
     try {
       const result = await fetchLogs({
@@ -93,14 +96,28 @@ export function LogsPage() {
     return () => { ++seqRef.current }
   }, [view, level, search, aggregate, range, dates, load])
 
-  usePageRefreshTimer(async () => {
-    if (pollingRef.current || loadingRef.current > 0) return
-    pollingRef.current = true
-    try {
-      await load(false, true)
-    } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
-    finally { pollingRef.current = false }
-  }, auto.enabled, auto.ms)
+  useEffect(() => {
+    const controller = subscribeScopedLiveRefresh({
+      scope: 'logs',
+      enabled: auto.enabled,
+      intervalMs: auto.ms,
+      isActive: () => !document.hidden,
+      open: (_path, signal) => openPanelEvents(signal, true, 'logs'),
+      onRefresh: async () => {
+        if (pollingRef.current || loadingRef.current > 0) return
+        pollingRef.current = true
+        try {
+          await load(false, true)
+        } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
+        finally { pollingRef.current = false }
+      },
+    })
+    liveRef.current = controller
+    return () => {
+      liveRef.current = null
+      controller.stop()
+    }
+  }, [auto.enabled, auto.ms, load])
 
   const pull = usePullToRefresh({ onRefresh: () => load(true), scrollRef: bodyRef })
   const groups = logGroups(data)

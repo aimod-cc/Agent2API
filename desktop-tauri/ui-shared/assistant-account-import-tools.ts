@@ -35,7 +35,7 @@ const READ_DEFAULT = 20_000
 const READ_MAX = 40_000
 
 /** 模型侧的一段提示：不认识的提供商时可以照着问用户 */
-const PROVIDER_HINT = 'workbuddy / workbuddy-intl（WorkBuddy）、raccoon（小浣熊）、catpaw、autoclaw / autoclaw-intl、cline-free / cline-pass、zcode / zcode-intl、loomy、commandcode、officeace、orcaterm、chatglm（智谱清言）、modelscope / modelscope-intl、atomcode、doubaowork（豆包工作）、deepseek-web'
+const PROVIDER_HINT = 'workbuddy / workbuddy-intl（WorkBuddy）、raccoon（小浣熊）、catpaw、autoclaw / autoclaw-intl、cline-free、zcode / zcode-intl、loomy、commandcode、officeace、orcaterm、chatglm（智谱清言）、modelscope / modelscope-intl、atomcode、doubaowork（豆包工作）、deepseek-web'
 
 export type AccountImportApi = {
   /** 发一条管理请求（桌面与手机各自注入，见两端的工具表） */

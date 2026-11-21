@@ -52,6 +52,8 @@ pub(super) struct Field {
     pub maximum: Option<f64>,
     #[serde(default)]
     pub options: Vec<Choice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -116,6 +118,22 @@ impl Field {
             }
             "boolean" if value.is_boolean() => Ok(value.clone()),
             "select" if self.options.iter().any(|option| option.value == *value) => Ok(value.clone()),
+            "upstream_version" => {
+                let hours = value
+                    .as_i64()
+                    .or_else(|| value.as_u64().and_then(|n| i64::try_from(n).ok()))
+                    .ok_or("定时拉取间隔必须是整数小时")?;
+                let min = crate::server::core::upstream_versions::MIN_INTERVAL_HOURS;
+                let max = crate::server::core::upstream_versions::MAX_INTERVAL_HOURS;
+                if !(min..=max).contains(&hours) {
+                    return Err(format!("定时拉取间隔必须是 {min}–{max} 小时的整数"));
+                }
+                if hours == crate::server::core::upstream_versions::DEFAULT_INTERVAL_HOURS {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::from(hours))
+                }
+            }
             _ => Err("设置值不符合插件声明的类型或选项".into()),
         }
     }
@@ -139,10 +157,11 @@ impl Schema {
                 return Err("插件设置选项值不能重复".into());
             }
             if !setting_key(&field.key) || !keys.insert(&field.key) || !text(&field.label, false) || !text(&field.description, true)
-                || !matches!(field.kind.as_str(), "string" | "number" | "boolean" | "select")
+                || !matches!(field.kind.as_str(), "string" | "number" | "boolean" | "select" | "upstream_version")
                 || field.kind != "string" && (field.trim || field.empty_is_default || field.min_length.is_some() || field.max_length.is_some() || field.pattern.is_some())
                 || field.kind != "number" && (field.minimum.is_some() || field.maximum.is_some())
                 || field.kind != "select" && !field.options.is_empty()
+                || field.kind != "upstream_version" && field.source_id.is_some()
                 || field.min_length.unwrap_or(0) > field.max_length.unwrap_or(8192) || field.max_length.unwrap_or(8192) > 8192
                 || field.minimum.zip(field.maximum).is_some_and(|(min, max)| min > max)
                 || field.options.len() > 64 || field.kind == "select" && field.options.is_empty()
@@ -153,7 +172,15 @@ impl Schema {
             if let Some(pattern) = &field.pattern {
                 if pattern.len() > 1024 || regex::Regex::new(pattern).is_err() { return Err("插件设置校验规则无效".into()); }
             }
-            if field.normalize(&field.default)? != field.default { return Err("插件设置默认值不是规范值".into()); }
+            if field.kind == "upstream_version" {
+                if !field.source_id.as_deref().is_some_and(crate::server::core::upstream_versions::valid_source_id)
+                    || !field.default.as_str().is_some_and(crate::server::core::upstream_versions::valid_version)
+                {
+                    return Err("上游版本同步设置缺少有效来源标识或内置保底版本号".into());
+                }
+            } else if field.normalize(&field.default)? != field.default {
+                return Err("插件设置默认值不是规范值".into());
+            }
         }
         Ok(())
     }

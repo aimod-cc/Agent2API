@@ -206,9 +206,7 @@ fn run_gateway(
     console_signals: bool,
     mut report: impl FnMut(GatewayEvent) -> Result<(), String>,
 ) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
+    let runtime = agent2api_server::build_runtime()
         .map_err(|error| format!("创建 Tokio 运行时失败: {error}"))?;
     let result = runtime.block_on(async {
         let signal_job = if console_signals {

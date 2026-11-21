@@ -11,7 +11,8 @@ fn blocked() -> &'static Mutex<HashMap<String, String>> {
 
 pub(super) fn requires_action(code: Option<&str>) -> bool {
     matches!(code, Some("account_origin_authorization_required" | "account_origin_proxy_unsupported"
-        | "codearts_refresh_registration_required" | "codearts_refresh_unconfirmed"))
+        | "codearts_refresh_registration_required" | "codearts_refresh_unconfirmed"
+        | "codearts_refresh_binding_changed"))
 }
 
 pub(super) fn settled(job: &jobs::Job, code: Option<&str>) {

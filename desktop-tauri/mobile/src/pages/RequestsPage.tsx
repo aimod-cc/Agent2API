@@ -4,11 +4,12 @@ import { ProviderLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
 import { Alert, Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle, SheetFooter, Button, Card, SegmentedControl } from '@ui'
 import { store, useStore } from '../state/store'
-import { fetchRequests, type RequestPage, type RequestRow } from '../api/gateway'
+import { fetchRequestDetail, fetchRequests, type RequestPage, type RequestRow } from '../api/gateway'
 import { ellipsisMiddle, formatClock, formatDuration, formatInt } from '../lib/format'
 import { providerLabel } from '../lib/providers'
 import { PageAutoRefresh, usePageAutoRefresh } from '../components/PageAutoRefresh'
-import { usePageRefreshTimer } from '../../../ui-shared/page-auto-refresh-timer'
+import { subscribeScopedLiveRefresh } from '../../../ui-shared/page-live-refresh'
+import { openPanelEvents } from '../api/client'
 import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
 import { MetricGrid, MetricCard } from '@ui'
@@ -44,7 +45,8 @@ export function RequestsPage() {
   const { route } = useStore()
   const sourceQuery = route.params || EMPTY_SOURCE_QUERY
   const routeDates = validCustomRange({ start: sourceQuery.startDate, end: sourceQuery.endDate })
-  const [range, setRange] = useState<DateRange>(routeDates ? 'custom' : 'all')
+  const hasSourceQuery = Object.keys(sourceQuery).length > 0
+  const [range, setRange] = useState<DateRange>(routeDates ? 'custom' : hasSourceQuery ? 'all' : 'today')
   const [dates, setDates] = useState<CustomDates>(() => routeDates || readCustomRange(CUSTOM_RANGE_KEY))
   const [filter, setFilter] = useState<Filter>('all')
   const [page, setPage] = useState<RequestPage | null>(null)
@@ -56,13 +58,20 @@ export function RequestsPage() {
   const queryKeyRef = useRef('')
   const seqRef = useRef(0)
   const loadingRef = useRef(0)
+  const liveRef = useRef<{ markLoaded: () => void } | null>(null)
+  const extraCountRef = useRef(0)
+  const loadingMoreRef = useRef(false)
+  const detailOpenRef = useRef(false)
+  extraCountRef.current = extra.length
+  loadingMoreRef.current = loadingMore
+  detailOpenRef.current = Boolean(detail)
   const bodyRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (routeParamsRef.current === route.params) return
     routeParamsRef.current = route.params
     const custom = validCustomRange({ start: sourceQuery.startDate, end: sourceQuery.endDate })
-    setRange(custom ? 'custom' : 'all')
+    setRange(custom ? 'custom' : Object.keys(sourceQuery).length > 0 ? 'all' : 'today')
     setDates(custom || readCustomRange(CUSTOM_RANGE_KEY))
     setExtra([])
   }, [route.params, sourceQuery])
@@ -88,9 +97,10 @@ export function RequestsPage() {
   const load = useCallback(async () => {
     const seq = ++seqRef.current
     loadingRef.current += 1
+    liveRef.current?.markLoaded()
     const requested = queryKeyRef.current
     try {
-      const next = await fetchRequests({ ...queryRef.current, limit: PAGE_SIZE })
+      const next = await fetchRequests({ ...queryRef.current, limit: PAGE_SIZE, view: 'list' })
       if (seq !== seqRef.current || requested !== queryKeyRef.current) return
       setPage(next)
       setExtra([])
@@ -111,10 +121,24 @@ export function RequestsPage() {
     void load()
     return () => { ++seqRef.current }
   }, [queryKey, load])
-  usePageRefreshTimer(async () => {
-    if (loadingRef.current || loadingMore || extra.length || detail || (bodyRef.current?.scrollTop || 0) > 20) return
-    await load()
-  }, auto.enabled, auto.ms)
+  useEffect(() => {
+    const controller = subscribeScopedLiveRefresh({
+      scope: 'requests',
+      enabled: auto.enabled,
+      intervalMs: auto.ms,
+      isActive: () => !document.hidden,
+      open: (_path, signal) => openPanelEvents(signal, true, 'requests'),
+      onRefresh: async () => {
+        if (loadingRef.current || loadingMoreRef.current || extraCountRef.current || detailOpenRef.current || (bodyRef.current?.scrollTop || 0) > 20) return
+        await load()
+      },
+    })
+    liveRef.current = controller
+    return () => {
+      liveRef.current = null
+      controller.stop()
+    }
+  }, [auto.enabled, auto.ms, load])
 
   const pull = usePullToRefresh({ onRefresh: load, scrollRef: bodyRef })
 
@@ -133,7 +157,7 @@ export function RequestsPage() {
     try {
       // offset 用已加载的原始条数：服务端分页按未过滤的行算，
       // 「有重试 / 在途」这类客户端二次过滤不影响翻页基准
-      const next = await fetchRequests({ ...queryRef.current, offset: rows.length, limit: PAGE_SIZE })
+      const next = await fetchRequests({ ...queryRef.current, offset: rows.length, limit: PAGE_SIZE, view: 'list' })
       if (seq !== seqRef.current || requested !== queryKeyRef.current) return
       setExtra(prev => [...prev, ...(next.entries || [])])
     } catch (failure) {
@@ -329,6 +353,9 @@ function buildNote(row: RequestRow): { text: string; tone: 'mute' | 'warn' | 'ba
   if (hits.length) {
     return { text: t('脱敏命中：{words}', { words: hits.map(item => item.word).join('、') }), tone: 'mute' }
   }
+  if (row.hasSensitiveHits) {
+    return { text: t('命中敏感词脱敏规则'), tone: 'mute' }
+  }
   if (row.clientModel && row.upstreamModel && row.clientModel !== row.upstreamModel) {
     return { text: t('模型映射：{from} → {to}', { from: row.clientModel, to: row.upstreamModel }), tone: 'mute' }
   }
@@ -336,15 +363,28 @@ function buildNote(row: RequestRow): { text: string; tone: 'mute' | 'warn' | 'ba
 }
 
 function RequestSheet({ row, onClose }: { row: RequestRow | null; onClose: () => void }) {
-  const details = Array.isArray(row?.attemptDetails) ? row?.attemptDetails || [] : []
+  const [loaded, setLoaded] = useState<RequestRow | null>(row)
+  useEffect(() => {
+    setLoaded(row)
+    if (!row || row.detailsLoaded !== false || (!row.rowId && !row.id)) return
+    const controller = new AbortController()
+    void fetchRequestDetail({ rowId: row.rowId, id: row.id, ts: row.ts }, controller.signal)
+      .then(detail => {
+        if (!controller.signal.aborted && detail) setLoaded(current => current ? { ...current, ...detail, detailsLoaded: true } : detail)
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [row])
+  const current = loaded || row
+  const details = Array.isArray(current?.attemptDetails) ? current?.attemptDetails || [] : []
   return (
-    <Sheet open={Boolean(row)} onOpenChange={next => { if (!next) onClose() }}>
+    <Sheet open={Boolean(current)} onOpenChange={next => { if (!next) onClose() }}>
       <SheetContent>
         <SheetHeader>
           <SheetTitle>{t('请求详情')}</SheetTitle>
         </SheetHeader>
         <SheetBody>
-          {row ? (
+          {current ? (
             <>
               <MetricGrid className='m-kv'>
                 <MetricCard className='m-kv-cell'>
@@ -353,79 +393,79 @@ function RequestSheet({ row, onClose }: { row: RequestRow | null; onClose: () =>
                     className='v'
                     style={{
                       color:
-                        !row.status
+                        !current.status
                           ? 'var(--m-warn)'
-                          : row.status < 400
+                          : current.status < 400
                             ? 'var(--m-ok)'
                             : 'var(--m-danger)',
                     }}
                   >
-                    {row.status || t('在途')}
+                    {current.status || t('在途')}
                   </div>
                 </MetricCard>
                 <MetricCard className='m-kv-cell'>
                   <div className='k'>{t('用时')}</div>
-                  <div className='v'>{formatDuration(row.durationMs)}</div>
+                  <div className='v'>{formatDuration(current.durationMs)}</div>
                 </MetricCard>
                 <MetricCard className='m-kv-cell'>
                   <div className='k'>{t('输入 Token')}</div>
-                  <div className='v'>{formatInt(Number(row.promptTokens) || 0)}</div>
+                  <div className='v'>{formatInt(Number(current.promptTokens) || 0)}</div>
                 </MetricCard>
                 <MetricCard className='m-kv-cell'>
                   <div className='k'>{t('输出 Token')}</div>
-                  <div className='v'>{formatInt(Number(row.completionTokens) || 0)}</div>
+                  <div className='v'>{formatInt(Number(current.completionTokens) || 0)}</div>
                 </MetricCard>
               </MetricGrid>
 
-              {visionDetail(row.route) ? <div className='rounded-lg border border-hairline p-3'><VisionRequestDetail route={row.route} t={t} /></div> : null}
+              {visionDetail(current.route) ? <div className='rounded-lg border border-hairline p-3'><VisionRequestDetail route={current.route} t={t} /></div> : null}
               <div className='rounded-lg border border-hairline p-3'>
-                <ClientIdentificationDetail key={row.id || row.ts} entry={row} api={clientIdentificationApi} t={t} />
+                <ClientIdentificationDetail key={current.id || current.ts} entry={current} api={clientIdentificationApi} t={t} />
               </div>
               <div className='m-rows'>
-                <div className='m-row'><span className='m-k'>{t('客户端')}</span><span className='m-v'>{requestClientLabel(row, t)}</span></div>
-                <div className='m-row'><span className='m-k'>{t('API Key')}</span><span className='m-v'>{requestKeyName(row)}</span></div>
+                <div className='m-row'><span className='m-k'>{t('客户端')}</span><span className='m-v'>{requestClientLabel(current, t)}</span></div>
+                <div className='m-row'><span className='m-k'>{t('API Key')}</span><span className='m-v'>{requestKeyName(current)}</span></div>
                 <div className='m-row'>
                   <span className='m-k'>{t('模型')}</span>
                   <span className='m-v m-mono' style={{ fontSize: 11 }}>
-                    {row.model || '—'}
+                    {current.model || '—'}
                   </span>
                 </div>
-                {row.clientModel ? (
+                {current.clientModel ? (
                   <div className='m-row'>
                     <span className='m-k'>{t('客户端请求的模型')}</span>
                     <span className='m-v m-mono' style={{ fontSize: 11 }}>
-                      {row.clientModel}
+                      {current.clientModel}
                     </span>
                   </div>
                 ) : null}
-                {row.upstreamModel ? (
+                {current.upstreamModel ? (
                   <div className='m-row'>
                     <span className='m-k'>{t('发给上游的模型')}</span>
                     <span className='m-v m-mono' style={{ fontSize: 11 }}>
-                      {row.upstreamModel}
+                      {current.upstreamModel}
                     </span>
                   </div>
                 ) : null}
                 <div className='m-row'>
                   <span className='m-k'>{t('提供商')}</span>
-                  <span className='m-v'>{providerLabel(row.provider, row.providerLabel)}</span>
+                  <span className='m-v'>{providerLabel(current.provider, current.providerLabel)}</span>
                 </div>
                 <div className='m-row'>
                   <span className='m-k'>{t('账号')}</span>
-                  <span className='m-v'>{row.accountName || '—'}</span>
+                  <span className='m-v'>{current.accountName || '—'}</span>
                 </div>
                 <div className='m-row'>
                   <span className='m-k'>{t('尝试次数')}</span>
-                  <span className='m-v'>{row.attempts || 1}</span>
+                  <span className='m-v'>{current.attempts || 1}</span>
                 </div>
                 <div className='m-row'>
                   <span className='m-k'>{t('首响')}</span>
-                  <span className='m-v'>{formatDuration(row.firstResponseMs ?? null)}</span>
+                  <span className='m-v'>{formatDuration(current.firstResponseMs ?? null)}</span>
                 </div>
                 <div className='m-row'>
                   <span className='m-k'>{t('时间')}</span>
                   <span className='m-v m-mono' style={{ fontSize: 11 }}>
-                    {row.ts ? new Date(row.ts).toLocaleString('zh-CN', { hour12: false }) : '—'}
+                    {current.ts ? new Date(current.ts).toLocaleString('zh-CN', { hour12: false }) : '—'}
                   </span>
                 </div>
               </div>
@@ -452,7 +492,7 @@ function RequestSheet({ row, onClose }: { row: RequestRow | null; onClose: () =>
                 </>
               ) : null}
 
-              {row.error ? <Alert variant='destructive'>{row.error}</Alert> : null}
+              {current.error ? <Alert variant='destructive'>{current.error}</Alert> : null}
             </>
           ) : null}
         </SheetBody>

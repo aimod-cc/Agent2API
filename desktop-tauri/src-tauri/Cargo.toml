@@ -204,7 +204,8 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
 panic = "abort"
-codegen-units = 1
-lto = true
+# 保持较优体积优化的同时放开并行编译与 ThinLTO，避免巨型单 crate 把单核和链接时间拖到数十分钟
+codegen-units = 8
+lto = "thin"
 opt-level = "s"
 strip = true

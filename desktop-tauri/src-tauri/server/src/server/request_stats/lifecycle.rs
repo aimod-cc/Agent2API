@@ -46,7 +46,7 @@ impl RequestStats {
         if id.is_empty() { return; }
         let bounds = self.retention_bounds();
         let guard = self.guard();
-        let _ = self.with_conn_mut(&guard, |conn| {
+        let ok = self.with_conn_mut(&guard, |conn| {
             let tx = conn.transaction()?;
             sql::update_running_progress(&tx, id, progress)?;
             let mut entries = {
@@ -69,6 +69,9 @@ impl RequestStats {
             }
             daily::delete_daily_before(&tx, &bounds.daily_key)?;
             tx.commit()
-        });
+        }).is_some();
+        if ok {
+            crate::server::core::panel_events::notify_requests();
+        }
     }
 }

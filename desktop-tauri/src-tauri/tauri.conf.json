@@ -22,7 +22,6 @@
       "nsis"
     ],
     "resources": [
-      "../ui",
       "../../licenses",
       "../../LICENSE"
     ],

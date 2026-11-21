@@ -37,9 +37,24 @@ use std::sync::OnceLock;
 
 use tokio::runtime::{Handle, Runtime};
 
+/// 工作线程与阻塞池的栈大小（8 MiB）：
+/// Thin LTO / 调试构建下加载与执行 Wasm 插件会超出默认的 2 MiB 栈空间。
+pub const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 /// 惰性全局运行时：只承接「在非 Tokio 上下文里发起的后台任务」，
 /// 正常路径（handler / 既有任务体内）不会碰到它。
 static GLOBAL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+/// 构造网关共享配置的多线程 Tokio 运行时（工作线程与阻塞池均使用 8 MiB 栈）。
+///
+/// 桌面端、headless 入口与本 crate 的兜底运行时共用同一构造器，
+/// 避免某一宿主形态遗漏栈配置。
+pub fn build_runtime() -> std::io::Result<Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .enable_all()
+        .build()
+}
 
 /// 项目统一的 spawn 入口：桌面与 headless 共用（原
 /// `tauri::async_runtime::spawn` 的替身，见 crate 文档头）。
@@ -56,9 +71,6 @@ where
 
 fn global_runtime() -> &'static Runtime {
     GLOBAL_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("创建后台 Tokio 运行时失败")
+        build_runtime().expect("创建后台 Tokio 运行时失败")
     })
 }

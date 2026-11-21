@@ -55,10 +55,10 @@ pub async fn prepare(manager: Source, db: Db, id: String) -> Result<Value, Strin
         .map_err(|_| "本机恢复进程检查中断")??;
     let operation = Arc::new(Operation {
         id: super::operations::random_id()?, manager, binding, db, executable: PathBuf::from(executable), targets: Arc::new(targets), setting,
-        restart: running, initial_running: running, pending_backup: Some(id),
+        restart: running, hot_switch: false, initial_running: running, pending_backup: Some(id),
         cancel: CancellationToken::new(), deadline: Instant::now() + std::time::Duration::from_secs(180),
         state: std::sync::Mutex::new(State { phase: "awaiting_confirmation", message: String::new(), confirmed: false, worker: false,
-            committed: false, started: false, restored: false, backup: None, error: false }), changed: Notify::new(),
+            committed: false, started: false, restored: false, client_running: running, backup: None, error: false }), changed: Notify::new(),
         expected: std::sync::Mutex::new(None), recovery_only: true,
     });
     super::operations::insert(operation.clone())?;

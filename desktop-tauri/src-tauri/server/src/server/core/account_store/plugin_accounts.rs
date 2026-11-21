@@ -455,7 +455,7 @@ impl AccountStore {
                     || crate::server::core::providers::subscriptions::contains(&record.provider())
                     || crate::server::core::plugin_host::script::known_provider(&record.provider())
                     || record.is_desktop() && matches!(record.provider().as_str(),
-                        "raccoon" | "kiro" | "autoclaw" | "autoclaw-intl" | "cline-free" | "cline-pass")
+                        "raccoon" | "kiro" | "autoclaw" | "autoclaw-intl" | "cline-free")
                         && public["needsRelogin"] == false {
                     for key in ["needsRelogin", "needsReloginReason"] {
                         if let Some(value) = public.get(key) { record.set(key, value.clone()); }

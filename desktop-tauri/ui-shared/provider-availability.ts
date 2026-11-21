@@ -7,10 +7,9 @@
 // `script::catalog::recommendations`），后端同一份名单已放开 —— 两边必须一致，
 // 只放开后端会让可用账号在添加页消失。Claude、ChatGPT、Codex 已由本体执行；
 // Copilot 和 Gemini 的订阅身份仍停用，不与同品牌插件身份混用。
+// Cline Pass 插件已下线并改由内置 API 模板 `clinepass` 提供。
 export const SUSPENDED_PROVIDER_IDS: ReadonlySet<string> = new Set([
-  // 千问办公国际版：登录链路被上游挡住（只认它自己的回调地址），
-  // 添加不了账号，先从可见列表摘掉；国内版 (`qwenwork`) 不受影响。
-  'qwenwork-intl',
+  'cline-pass',
   'qwenwork-enterprise',
   'copilot-subscription',
   'gemini-subscription',

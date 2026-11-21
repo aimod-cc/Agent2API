@@ -111,7 +111,10 @@ impl AuthCodeReceipt {
     }
 }
 
-/// 请求解析器与queue同时产生，不能由插件JSON、普通URL回调或按leaseId构造。
+#[derive(Clone, Copy)]
+enum CallbackSource { Listener, Authenticated }
+
+/// 仅由本轮接收器或已鉴权的当前登录步骤产生，不能由插件JSON重建。
 pub(super) struct QueuedCallback {
     receiver: Weak<ReceiverOwner>,
     session: Weak<Session>,
@@ -119,6 +122,7 @@ pub(super) struct QueuedCallback {
     lease: String,
     step: String,
     input: callback::Input,
+    source: CallbackSource,
 }
 
 pub(super) fn applies(provider: &str, method: u64) -> bool {
@@ -379,6 +383,15 @@ fn queue(
     receiver: &Weak<ReceiverOwner>,
     input: callback::Input,
 ) -> Result<QueuedCallback, GatewayError> {
+    queue_from(session, receiver, input, CallbackSource::Listener)
+}
+
+fn queue_from(
+    session: &Arc<Session>,
+    receiver: &Weak<ReceiverOwner>,
+    input: callback::Input,
+    source: CallbackSource,
+) -> Result<QueuedCallback, GatewayError> {
     let owner = receiver.upgrade().ok_or_else(unavailable)?;
     let mut state = session.state.lock().map_err(|_| unavailable())?;
     let id = state.trae.current.clone().ok_or_else(unavailable)?;
@@ -407,7 +420,27 @@ fn queue(
         lease: id,
         step,
         input,
+        source,
     })
+}
+
+pub(super) fn manual_callback(task: &super::LoginTaskHandle, interaction: &str, raw: &str) -> Result<QueuedCallback, GatewayError> {
+    let session = super::session(task)?;
+    let (receiver, callback) = {
+        let state = session.state.lock().map_err(|_| unavailable())?;
+        if state.step.as_ref().is_none_or(|step| step.id != interaction || step.status != "ready")
+            || session.local_source.as_ref().is_none_or(|source| !source.is_current()) { return Err(unavailable()); }
+        let context = state.trae.context.as_ref().ok_or_else(unavailable)?;
+        (context.receiver.clone(), context.protocol.callback.clone())
+    };
+    if raw.is_empty() || raw.len() > 8192 || raw.contains('\\') || raw.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return Err(invalid());
+    }
+    let url = url::Url::parse(raw).map_err(|_| invalid())?;
+    if url.fragment().is_some() || !url.username().is_empty() || url.password().is_some()
+        || raw.split_once('?').map(|(base, _)| base) != Some(callback.as_str()) { return Err(invalid()); }
+    let input = callback::parse(url.query().ok_or_else(invalid)?)?;
+    queue_from(&session, &receiver, input, CallbackSource::Authenticated)
 }
 
 pub(super) fn claim(call: &Call, queued: QueuedCallback) -> Result<AuthCodeReceipt, GatewayError> {
@@ -415,6 +448,8 @@ pub(super) fn claim(call: &Call, queued: QueuedCallback) -> Result<AuthCodeRecei
     let owner = queued.receiver.upgrade().ok_or_else(unavailable)?;
     let mut state = call.session.state.lock().map_err(|_| unavailable())?;
     if !call.session.valid()
+        || matches!(queued.source, CallbackSource::Authenticated)
+            && call.session.local_source.as_ref().is_none_or(|source| !source.is_current())
         || !applies(call.provider(), call.method_index())
         || !call.is_callback()
         || state.active.as_deref() != Some(call.id())

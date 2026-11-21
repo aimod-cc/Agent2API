@@ -204,6 +204,9 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 换机时还会被旧凭据覆盖。保留键的身份让 `cloud_sync::snapshot` 的键筛选
     // 天然排除它，不必再维护一份「别同步这个键」的清单。
     "cloudSync",
+    // 上游客户端版本号的持久化缓存、同步排期与手动冷却（core::upstream_versions）。
+    // 属于本机同步状态而非配置项；不进云同步，也不能在修改普通配置时被误删。
+    "upstreamVersionCache",
 ];
 
 /// 这个键是否属于「其它零散状态」（即不归网关配置管）。

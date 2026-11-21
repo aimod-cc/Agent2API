@@ -899,6 +899,7 @@ async function syncRequestsBadge() {
       status: 'error',
       start: lastSeenReqTs,
       limit: 1,
+      view: 'list',
     });
     // 等待期间进了请求日志页：这次结果已过期，别拿旧数把刚清掉的角标又点亮
     if (currentPage === 'requests') return;
@@ -923,7 +924,7 @@ async function syncRunningRequests() {
   if (currentPage === 'requests') return;
   runningQueryBusy = true;
   try {
-    const result = await api.getStatsRequests({ status: 'running', limit: 1 });
+    const result = await api.getStatsRequests({ status: 'running', limit: 1, view: 'list' });
     runningRequests = Number(result?.matched) || 0;
   } catch {
     return; // 保持上一次的显示：查询偶尔失败不该反过来抹掉已有提示
@@ -1191,7 +1192,9 @@ async function runAccountAction(action, id) {
       toast(wbI18n.t('账号已删除'));
     }
   } catch (error) {
-    toast(wbI18n.t('操作失败：{message}', { message: error.message }), 'err');
+    const message = typeof window.wbAccountsView?.refreshFailureMessage === 'function'
+      ? window.wbAccountsView.refreshFailureMessage(error.message) : wbI18n.t(error.message);
+    toast(wbI18n.t('操作失败：{message}', { message }), 'err');
   } finally {
     releaseBusy();
   }

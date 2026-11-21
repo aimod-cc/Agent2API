@@ -105,19 +105,11 @@ async fn handle(mut socket: TcpStream, flow: Arc<Flow>) {
 }
 
 async fn reply(socket: &mut TcpStream, accepted: bool) {
-    let (status, message) = if accepted {
-        (
-            "200 OK",
-            "已收到 ChatGPT 授权回调，但登录尚未完成。Agent2API 还需向 OpenAI 换取登录凭证，请返回软件查看最终结果。可以关闭此页面。",
-        )
-    } else {
-        (
-            "400 Bad Request",
-            "回调地址无效或不属于本次 ChatGPT 登录。请返回 Agent2API 重新授权。",
-        )
-    };
-    let body = format!("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>Agent2API</title><body><p>{message}</p></body></html>");
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}", body.len());
+    let response = crate::server::core::login::callback_page::raw_receipt_response(
+        accepted,
+        super::ID,
+        "回调地址无效或不属于本次 ChatGPT 登录",
+    );
     let _ = socket.write_all(response.as_bytes()).await;
     let _ = socket.shutdown().await;
 }

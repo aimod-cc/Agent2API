@@ -17,11 +17,12 @@ type Interaction = {
   qr?: { url: string; expiresAt: number } | null
 }
 
-export function PluginLoginInteraction({ flow, request, t, openExternal, managed }: {
+export function PluginLoginInteraction({ flow, request, t, openExternal, openEmbedded, managed }: {
   flow: string
   request: LoginRequest
   t: (key: string, vars?: Record<string, string | number>) => string
   openExternal: (url: string) => void | Promise<void>
+  openEmbedded?: (flow: string, interaction: string) => void | Promise<void>
   managed?: ManagedLoginScope
 }) {
   const [interaction, setInteraction] = React.useState<Interaction | SmsInteraction | ManagedInteraction | null>(null)
@@ -180,7 +181,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, managed
         submitOwner.current = value ? owner : null
         generation.current += 1; submitting.current = value
         if (value) { read.current?.abort(); read.current = null }
-      }} openExternal={openExternal} t={t} />
+      }} openExternal={openExternal} openEmbedded={openEmbedded} t={t} />
   }
   if (interaction.type === 'sms') return <SmsLoginInteraction key={flow} flow={flow} interaction={interaction}
     request={request} refresh={refresh} openExternal={openExternal} onBusy={value => { generation.current += 1; submitting.current = value }} t={t} />

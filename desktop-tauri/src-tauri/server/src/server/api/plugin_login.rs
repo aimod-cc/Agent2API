@@ -1,25 +1,25 @@
-use axum::{body::Bytes, extract::{OriginalUri, Query, State}, http::HeaderMap, response::{IntoResponse, Response}};
+use axum::{body::Bytes, extract::{OriginalUri, Query, State}, http::HeaderMap, response::Response};
 use serde_json::{json, Value};
 use crate::server::{errors::management_error, http::{ok_json, parse_body}, ServerState};
 
 pub async fn callback(State(state): State<ServerState>, OriginalUri(uri): OriginalUri,
     headers: HeaderMap, Query(query): Query<std::collections::HashMap<String, String>>) -> Response {
+    use crate::server::core::login::callback_page;
+
     let flow = query.get("state").map(String::as_str).unwrap_or("");
-    let Some(task) = state.login().tasks().get(flow) else { return management_error(404, "登录流程已过期") };
-    if !crate::server::core::plugin_host::wasm::has_capability(&task.snapshot().provider, "login.callback.v1") {
-        return management_error(403, "此流程未声明本机回调能力");
+    let Some(task) = state.login().tasks().get(flow) else {
+        return callback_page::expired_response(None);
+    };
+    let provider = task.snapshot().provider;
+    if !crate::server::core::plugin_host::wasm::has_capability(&provider, "login.callback.v1") {
+        return callback_page::error_response(403, Some(&provider), "此流程未声明本机回调能力");
     }
     let callback = match super::session::original_callback_url(&uri, &headers) {
         Ok(url) => url,
-        Err(error) => return management_error(error.status_code, error.message),
+        Err(error) => return callback_page::error_response(error.status_code, Some(&provider), &error.message),
     };
     let result = state.login().submit_login_callback(flow, &callback).await;
-    let text = if result.is_ok() { "授权回调已交给插件处理，请返回面板查看登录结果。" }
-        else { "授权回调未完成，请返回面板查看原因或重新登录。" };
-    let mut response = text.into_response();
-    response.headers_mut().insert("cache-control", axum::http::HeaderValue::from_static("no-store"));
-    response.headers_mut().insert("referrer-policy", axum::http::HeaderValue::from_static("no-referrer"));
-    response
+    callback_page::submission_response(result, Some(&provider))
 }
 
 pub async fn get(State(state): State<ServerState>, Query(query): Query<std::collections::HashMap<String, String>>) -> Response {
@@ -53,12 +53,15 @@ pub async fn get(State(state): State<ServerState>, Query(query): Query<std::coll
     }
 }
 
-pub async fn submit(State(state): State<ServerState>, body: Bytes) -> Response {
+pub async fn submit(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > 256 * 1024 { return management_error(413, "登录交互输入过大") }
     let value = parse_body(&body).unwrap_or(Value::Null);
     let flow = value["state"].as_str().unwrap_or("");
     let Some(task) = state.login().tasks().get(flow) else { return management_error(404, "登录任务不存在或已过期") };
     if task.snapshot().managed {
+        if let Err(error) = crate::server::core::login::managed::check_source(&task, &headers) {
+            return management_error(error.status_code, error.message);
+        }
         let result = crate::spawn_task(async move {
             let _operation = task.operation.try_lock().map_err(|_|
                 crate::server::errors::GatewayError::with_status(409, "当前登录步骤正在处理，请等待完成，不要重复提交"))?;

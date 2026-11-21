@@ -19,7 +19,8 @@
 //! 出现「发新版后页面引用了旧 js」，也不必每次打开都重下几 MB。
 //! 压缩由 `compression` 中间件统一处理，这里只声明 `Vary: Accept-Encoding`。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, Response, StatusCode};
@@ -31,6 +32,14 @@ use crate::server::errors;
 const CACHE_CONTROL: &str = "no-cache";
 /// 同一路径的正文随客户端是否接受 gzip 而不同，缓存必须按这个头分桶。
 const VARY: &str = "Accept-Encoding";
+
+/// 桌面端内置静态资源提供方（直接读取随程序打包的嵌入资源，免去硬盘第二份副本）。
+pub trait EmbeddedUiAssets: Send + Sync {
+    /// 返回指定规范化键（如 `/index.html`）的 ETag；不存在时返回 `None`。
+    fn etag(&self, key: &str) -> Option<String>;
+    /// 读取指定规范化键对应的原始字节内容。
+    fn get(&self, key: &str) -> Option<Vec<u8>>;
+}
 
 /// 判定路径是否属于「接口保留前缀」：静态服务绝不碰它们，
 /// 未注册的接口路径继续走原来的 404 文案（Node 版行为）。
@@ -50,22 +59,46 @@ pub async fn serve(request: Request<Body>, ui_dir: PathBuf) -> AxumResponse {
     if is_api_path(&path) {
         return not_found(request).await;
     }
-    let if_none_match = request
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let if_none_match = extract_if_none_match(&request);
     let Some(file_path) = resolve_file(&ui_dir, &path) else {
         return not_found(request).await;
     };
     read_response(&file_path, if_none_match.as_deref()).await
 }
 
-/// 把 URL 路径解析到 `ui/` 内的具体文件（`None` = 不存在 / 非法）。
-///
-/// 逐段归一化而不是字符串拼接：`..`、内嵌点段、重复斜杠都被消化掉，
-/// 归一化结果仍带 `..` 前缀的（试图逃出根）一律拒绝。
-fn resolve_file(ui_dir: &PathBuf, url_path: &str) -> Option<PathBuf> {
+/// 静态服务入口（桌面端内嵌资源）：与磁盘路径共享一致的缓存、MIME 与桥接注入语义。
+pub async fn serve_embedded(
+    request: Request<Body>,
+    assets: Arc<dyn EmbeddedUiAssets>,
+) -> AxumResponse {
+    let path = request.uri().path().to_string();
+    if is_api_path(&path) {
+        return not_found(request).await;
+    }
+    let if_none_match = extract_if_none_match(&request);
+    let Some((key, etag)) = resolve_embedded_key(&*assets, &path) else {
+        return not_found(request).await;
+    };
+    if if_none_match.as_deref().is_some_and(|value| etag_matches(value, &etag)) {
+        return not_modified_response(&etag);
+    }
+    let Some(bytes) = assets.get(&key) else {
+        return errors::not_found_response("GET", "static");
+    };
+    let is_index = key == "/index.html";
+    let mime = mime_of(Path::new(&key));
+    ok_asset_response(bytes, is_index, &mime, &etag)
+}
+
+fn extract_if_none_match(request: &Request<Body>) -> Option<String> {
+    request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn normalize_segments(url_path: &str) -> Option<Vec<&str>> {
     // 只取路径段，忽略查询串（axum 的 uri().path() 已不含 query，双保险）
     let url_path = url_path.split('?').next().unwrap_or("");
     let mut segments: Vec<&str> = Vec::new();
@@ -75,19 +108,50 @@ fn resolve_file(ui_dir: &PathBuf, url_path: &str) -> Option<PathBuf> {
             ".." => {
                 segments.pop()?;
             }
-            other => segments.push(other),
+            other => {
+                // 任何一段都不该再带路径分隔符（Windows 反斜杠也算）
+                if other.contains('/') || other.contains('\\') {
+                    return None;
+                }
+                segments.push(other);
+            }
         }
     }
-    let mut file_path = ui_dir.clone();
+    Some(segments)
+}
+
+fn resolve_embedded_key(assets: &dyn EmbeddedUiAssets, url_path: &str) -> Option<(String, String)> {
+    let segments = normalize_segments(url_path)?;
+    if segments.is_empty() {
+        let key = "/index.html".to_string();
+        return assets.etag(&key).map(|etag| (key, etag));
+    }
+    let key = format!("/{}", segments.join("/"));
+    if let Some(etag) = assets.etag(&key) {
+        return Some((key, etag));
+    }
+    let no_extension = segments.last().is_some_and(|segment| !segment.contains('.'));
+    if no_extension {
+        let html_key = format!("{key}.html");
+        if let Some(etag) = assets.etag(&html_key) {
+            return Some((html_key, etag));
+        }
+    }
+    None
+}
+
+/// 把 URL 路径解析到 `ui/` 内的具体文件（`None` = 不存在 / 非法）。
+///
+/// 逐段归一化而不是字符串拼接：`..`、内嵌点段、重复斜杠都被消化掉，
+/// 归一化结果仍带 `..` 前缀的（试图逃出根）一律拒绝。
+fn resolve_file(ui_dir: &Path, url_path: &str) -> Option<PathBuf> {
+    let segments = normalize_segments(url_path)?;
+    let mut file_path = ui_dir.to_path_buf();
     if segments.is_empty() {
         file_path.push("index.html");
         return file_path.is_file().then_some(file_path);
     }
     for segment in &segments {
-        // 任何一段都不该再带路径分隔符（Windows 反斜杠也算）
-        if segment.contains('/') || segment.contains('\\') {
-            return None;
-        }
         file_path.push(segment);
     }
     if file_path.is_file() {
@@ -110,20 +174,14 @@ fn resolve_file(ui_dir: &PathBuf, url_path: &str) -> Option<PathBuf> {
 ///
 /// ETag 命中时直接回 304，不读文件正文 —— 这是「第二次打开面板不再重下
 /// 几 MB 资源」的关键路径。
-async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> AxumResponse {
+async fn read_response(file_path: &Path, if_none_match: Option<&str>) -> AxumResponse {
     let metadata = match tokio::fs::metadata(file_path).await {
         Ok(metadata) => metadata,
         Err(_) => return errors::not_found_response("GET", "static"),
     };
     let etag = etag_of(&metadata);
     if if_none_match.is_some_and(|value| etag_matches(value, &etag)) {
-        return Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
-            .header(header::ETAG, &etag)
-            .header(header::CACHE_CONTROL, CACHE_CONTROL)
-            .header(header::VARY, VARY)
-            .body(Body::empty())
-            .unwrap_or_else(|_| errors::not_found_response("GET", "static"));
+        return not_modified_response(&etag);
     }
     let bytes = match tokio::fs::read(file_path).await {
         Ok(bytes) => bytes,
@@ -135,21 +193,35 @@ async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> Axum
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == "index.html");
+    let mime = mime_of(file_path);
+    ok_asset_response(bytes, is_index, &mime, &etag)
+}
+
+fn not_modified_response(etag: &str) -> AxumResponse {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, CACHE_CONTROL)
+        .header(header::VARY, VARY)
+        .body(Body::empty())
+        .unwrap_or_else(|_| errors::not_found_response("GET", "static"))
+}
+
+fn ok_asset_response(bytes: Vec<u8>, is_index: bool, mime: &str, etag: &str) -> AxumResponse {
     let body = if is_index {
         inject_web_shim(&bytes)
     } else {
         bytes
     };
-    let mime = mime_of(file_path);
-    let response = Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
         .header(header::CACHE_CONTROL, CACHE_CONTROL)
-        .header(header::ETAG, &etag)
+        .header(header::ETAG, etag)
         .header(header::VARY, VARY)
         .header(header::CONTENT_LENGTH, body.len())
-        .body(Body::from(body));
-    response.unwrap_or_else(|_| errors::not_found_response("GET", "static"))
+        .body(Body::from(body))
+        .unwrap_or_else(|_| errors::not_found_response("GET", "static"))
 }
 
 /// 文件版本标识：程序版本 + 修改时间 + 长度。
@@ -201,7 +273,7 @@ fn inject_web_shim(html: &[u8]) -> Vec<u8> {
 }
 
 /// 扩展名 → content-type（界面用到的固定集合，其余按二进制流处理）
-fn mime_of(file_path: &PathBuf) -> String {
+fn mime_of(file_path: &Path) -> String {
     let extension = file_path
         .extension()
         .and_then(|ext| ext.to_str())

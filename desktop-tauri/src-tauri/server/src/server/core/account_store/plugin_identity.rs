@@ -172,7 +172,7 @@ fn known_desktop_id(provider: &str, identity: &str, fields: &Map<String, Value>)
     let expected = match kind_from_id(provider) {
         Some(ProviderKind::CatPaw) => "desktop-auth".to_string(),
         Some(ProviderKind::Raccoon) => "raccoon-desktop".to_string(),
-        Some(ProviderKind::AutoClaw | ProviderKind::AutoClawIntl | ProviderKind::ClineFree | ProviderKind::ClinePass) => {
+        Some(ProviderKind::AutoClaw | ProviderKind::AutoClawIntl | ProviderKind::ClineFree) => {
             format!("{provider}-desktop")
         }
         _ => return None,

@@ -48,8 +48,9 @@ impl Context {
                 return Err(proto::WireError::with_code("本机启动资格检查只能读取账号，不允许刷新或修改", "forbidden"));
             }
         }
-        self.calls += 1;
-        if self.calls > 100_000 { return Err(proto::WireError::with_code("插件调用次数超出上限", "plugin_resource_limit")); }
+        self.calls = self.calls.saturating_add(1);
+        self.spin_calls = self.spin_calls.saturating_add(1);
+        if self.spin_calls > 100_000 { return Err(proto::WireError::with_code("插件调用次数超出上限", "plugin_resource_limit")); }
         if method != "clock.now" && !params.is_object() { return Err(super::error("插件能力参数必须是 JSON 对象")); }
         // started 由 ABI 入口在解码前记录；权限、账号读取及正文准备不能另起计时。
         let opening = matches!(method, "http.open" | "http.open_account");
@@ -434,8 +435,10 @@ impl Context {
                         let session = self.codearts_session.as_ref().ok_or_else(|| super::error("对话缺少本次 CodeArts 心跳会话"))?;
                         if params["headers"]["User-Session-Id"].as_str() != Some(session.id.as_str()) { return Err(super::error("CodeArts 对话的会话编号与心跳不符")); }
                         let client = session.client.client().map_err(|_| super::error("CodeArts 原出口已关闭"))?.clone();
+                        let body = super::http::body(self, &params, deadline)?;
+                        deadline.check()?;
                         self.guard_http_submission(&params)?;
-                        let (result,handle) = script::open_pinned(&params,client,deadline.cap_at(self.call_deadline)).await?;
+                        let (result,handle) = script::open_pinned_body(&params, body, client, deadline.cap_at(self.call_deadline)).await?;
                         return self.keep_http(result,handle,deadline);
                     }
                     let body = super::http::body(self, &params, deadline)?;

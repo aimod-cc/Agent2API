@@ -228,7 +228,8 @@ export function hiddenAccounts(): HiddenAccountsSummary {
     if (!item || typeof item.id !== 'string' || !item.id) continue
     const reason = item.reason === 'not_installed' || item.reason === 'pack_disabled'
       || item.reason === 'provider_disabled' || item.reason === 'loading' || item.reason === 'load_failed'
-      || item.reason === 'load_timeout' ? item.reason : 'not_loaded'
+      || item.reason === 'load_timeout' || item.reason === 'legacy_unsupported'
+      || item.reason === 'replaced_by_template' ? item.reason : 'not_loaded'
     details.set(item.id, {
       id: item.id,
       label: typeof item.label === 'string' && item.label ? item.label : item.id,
@@ -236,6 +237,7 @@ export function hiddenAccounts(): HiddenAccountsSummary {
       reason,
       packId: item.packId,
       startup: item.startup,
+      templateKey: typeof item.templateKey === 'string' && item.templateKey ? item.templateKey : null,
     })
   }
   const providers = Object.entries(byProvider).map(([id, count]): HiddenAccountProvider => {
@@ -247,6 +249,7 @@ export function hiddenAccounts(): HiddenAccountsSummary {
       reason: detail?.reason || 'not_loaded',
       packId: detail?.packId,
       startup: detail?.startup,
+      templateKey: detail?.templateKey,
     }
   }).sort((a, b) => b.count - a.count)
   const total = Number(hidden?.total)

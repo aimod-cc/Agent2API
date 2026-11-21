@@ -30,7 +30,10 @@ pub(super) async fn readiness(store: &AccountStore, provider: &str, account: &st
 fn codearts(error: SlotFailure) -> GatewayError {
     match error {
         SlotFailure::Missing | SlotFailure::Account(Error::Conflict(Conflict::UnestablishedVersion)) => registration("codearts"),
-        SlotFailure::NotReady | SlotFailure::ReceiptChanged => unconfirmed("codearts"),
+        SlotFailure::NotReady => unconfirmed("codearts"),
+        SlotFailure::ReceiptChanged => GatewayError::with_status(409,
+            "刷新失败，账号与续期记录不一致，尚未向官方发送请求。")
+            .with_code("codearts_refresh_binding_changed"),
         SlotFailure::RequiresNewAuthorization => GatewayError::bad_request("CodeArts 原登录授权已失效，需要重新登录；不会用临时凭据续期延长旧授权")
             .with_code("refresh_token_expired"),
         _ => unavailable("codearts"),
@@ -38,7 +41,7 @@ fn codearts(error: SlotFailure) -> GatewayError {
 }
 
 pub(super) fn registration(_provider: &str) -> GatewayError {
-    GatewayError::with_status(409, "CodeArts 当前账号没有可用的受控续期登记。请在官方重新获取有效凭据并更新此账号；需要自动续期时，通过 CodeArts 显式登记入口确认完整原 OAuth 材料，余额查询不会自行补建登记")
+    GatewayError::with_status(409, "CodeArts 账号尚未授权刷新 Token，请通过「CodeArts 网页登录」完成授权。")
         .with_code("codearts_refresh_registration_required")
 }
 

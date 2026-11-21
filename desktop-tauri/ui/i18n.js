@@ -12,10 +12,9 @@
  * 是划算的取舍。
  *
  * ── 词典从哪来、什么时候到 ────────────────────────────────────
- * 词典**不在**本文件里。index.html / login.html 的 head 引导脚本按
- * `workbuddy-desktop-locale` 解析出的语言，只 document.write 注入 i18n/manifest.js
- * —— 那是域清单（window.__WB_I18N_DOMAINS）；各域词典文件由本脚本在执行时补写
- * （此刻清单已就位、页面仍在解析期，写出的 <script> 插在本脚本之后、业务脚本之前）。
+ * 词典**不在**本文件里。主面板（index.html）与手机端（m.html / apk.html）的
+ * head 引导脚本按 `workbuddy-desktop-locale` 解析出的语言，直接 document.write
+ * 注入对应的 `i18n/combined/<locale>.js`；登录页（login.html）只取用到的两个域。
  * 这些词典脚本（构建产物，见 desktop-tauri/i18n/）会往 window.wbI18nDict 上
  * Object.assign，且都在任何业务脚本之前执行完毕；即便某条缺失或某域文件 404，
  * t() 也只是回落简体，页面不会报错。
@@ -158,16 +157,10 @@
   const current = locale()
   document.documentElement.lang = current
 
-  // 各域词典注入：手机端 head 只写 manifest.js（域清单），各域文件挪到这里补写
-  // —— 本脚本静态排在 manifest.js 之后执行，此刻清单已就位；页面仍在解析期，
-  // 写出的 <script> 会插在本脚本之后、所有业务脚本之前。
-  // 主面板与登录页已经由 head 引导脚本自己注入（合并词典 / 登录页的两个域），
-  // 用 __WB_I18N_INJECTED 标记跳过这里；简体没有词典目录，也跳过。
+  // 兜底注入合并词典：主面板、手机端、登录页都已经在 head 里自行注入所需词典并置
+  // `__WB_I18N_INJECTED = true`；若未来有页面未预先注入，则在这里一次性补写合并词典。
   if (!window.__WB_I18N_INJECTED && current !== 'zh-Hans' && document.readyState === 'loading') {
-    const domains = window.__WB_I18N_DOMAINS || []
-    for (const domain of domains) {
-      document.write('<script src="i18n/' + current + '/' + domain + '.js"><\/script>')
-    }
+    document.write('<script src="i18n/combined/' + current + '.js"><\/script>')
   }
 
   window.wbI18n = {

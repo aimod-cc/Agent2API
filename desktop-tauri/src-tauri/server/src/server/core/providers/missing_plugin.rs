@@ -39,6 +39,9 @@ use crate::server::errors::GatewayError;
 /// 未安装插件时的通用提示（`label` 由调用方拼进来）。
 fn missing_plugin_message(kind: ProviderKind, action: &str) -> String {
     let provider = super::kind_id(kind);
+    if super::availability::is_replaced_by_template(provider) {
+        return "Cline 订阅池插件已下线并改由内置「Cline Pass」API 模板提供，请在「添加账号 → API 模板」中选择 Cline Pass 后重新填写 API Key".to_string();
+    }
     if let Some(reason) = crate::server::core::plugin_host::provider_compatibility_error(provider) {
         return reason;
     }

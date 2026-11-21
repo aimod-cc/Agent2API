@@ -103,7 +103,7 @@ async fn start(context: &Context) -> Result<Value,proto::WireError> {
         if let Ok(mut items) = candidates().lock() { items.retain(|_, candidate| candidate.flow != flow_id); }
         if let Ok(mut items) = accepted().lock() { items.retain(|_, accepted| accepted.2 > tokio::time::Instant::now() && accepted.0.strong_count() > 0 && !accepted.4.is_cancelled()); }
     });
-    Ok(json!({"flow":id,"url":url,"poll_interval_ms":1500,"external_browser":true,"allowed_hosts":["huaweicloud.com"],
+    Ok(json!({"flow":id,"url":url,"poll_interval_ms":1500,"external_browser":false,"allowed_hosts":["huaweicloud.com"],
         "instructions":"请完成华为云官方登录，完成后自动添加账号。远程面板可粘贴浏览器最后的本机回调地址；临时兜底登录无法自动续期。"}))
 }
 

@@ -70,6 +70,6 @@ async fn serve(mut stream: tokio::net::TcpStream,flow: &Flow) -> Result<(),proto
     let redirect = values["redirect"].as_str().filter(|redirect| trusted(redirect)).map(str::to_string);
     flow.sender.try_send(values).map_err(|_| invalid())?;
     let response = if let Some(redirect) = redirect { format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") }
-        else { let body = "<!doctype html><meta charset=utf-8><title>CodeArts</title><p>登录信息已接收，请回到 Agent2API。</p>"; format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",body.len()) };
+        else { crate::server::core::login::callback_page::raw_receipt_response(true, "codearts", "") };
     stream.write_all(response.as_bytes()).await.map_err(|_| invalid())
 }

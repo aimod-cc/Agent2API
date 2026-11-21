@@ -17,12 +17,15 @@ export type PanelEventOptions = {
   changed: (changes: PanelChanges) => void
   fallback: () => Promise<unknown> | unknown
   connection?: (status: PanelConnection) => void
+  baseline?: PanelRevisions | null
+  onRevisions?: (revisions: PanelRevisions) => void
+  onInitialReady?: (revisions: PanelRevisions) => void
 }
 
 const allChanges = (): PanelChanges => ({ accounts: true, balances: true, usage: true, connections: true, proxies: true })
 const fields: Array<keyof PanelRevisions> = ['accounts', 'balances', 'usage', 'connections', 'proxies']
 
-async function readEvents(response: Response, signal: AbortSignal, receive: (event: string, data: string) => void) {
+export async function readSseEvents(response: Response, signal: AbortSignal, receive: (event: string, data: string) => void) {
   const reader = response.body?.getReader()
   if (!reader) throw new Error('实时通知响应为空')
   const decoder = new TextDecoder()
@@ -93,7 +96,7 @@ export function subscribePanelEvents(options: PanelEventOptions): () => void {
   let lastSeen = 0
   let lastFallback = 0
   let fallbackBusy = false
-  let revisions: PanelRevisions | null = null
+  let revisions: PanelRevisions | null = options.baseline ?? null
   let status: PanelConnection = 'paused'
   let pending: PanelChanges = { accounts: false, balances: false, usage: false, connections: false, proxies: false }
 
@@ -124,10 +127,17 @@ export function subscribePanelEvents(options: PanelEventOptions): () => void {
     if (event === 'heartbeat') { touch(); return }
     if (event !== 'ready' && event !== 'change') return
     const next = revisionsOf(data)
-    const changes = event === 'ready' || !revisions ? allChanges()
-      : Object.fromEntries(fields.map(field => [field, revisions![field] !== next[field]])) as PanelChanges
+    const previous = revisions
     revisions = next
+    options.onRevisions?.(next)
     touch()
+    // 首次建连的 ready 只记录基线版本号，避免与进页时各自发起的首屏查询叠成全量重刷
+    if (event === 'ready' && !previous) {
+      options.onInitialReady?.(next)
+      return
+    }
+    const changes = !previous ? allChanges()
+      : Object.fromEntries(fields.map(field => [field, previous[field] !== next[field]])) as PanelChanges
     queue(changes)
   }
   const connect = async () => {
@@ -146,7 +156,7 @@ export function subscribePanelEvents(options: PanelEventOptions): () => void {
         await response.body?.cancel().catch(() => {})
         throw new Error('实时通知连接不可用')
       }
-      await readEvents(response, source.signal, receive)
+      await readSseEvents(response, source.signal, receive)
     } catch { /* 断线不清空页面；下一次连接补读最新数据。 */ }
     finally {
       if (controller !== source) return
@@ -172,7 +182,6 @@ export function subscribePanelEvents(options: PanelEventOptions): () => void {
   }
   const sessionChanged = () => {
     pause()
-    revisions = null
     retryDelay = 1000
     if (!document.hidden) void connect()
   }

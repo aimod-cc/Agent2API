@@ -17,6 +17,8 @@ pub const CDN_PLUGIN_CATALOG_URL: &str = "https://cdn.agent2api.dev/agent2api/fe
 pub const CDN_COMMUNITY_CATALOG_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/community/catalog.json";
 pub const CDN_COMMUNITY_DISTRIBUTION_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/community/distribution.json";
 pub const CDN_COMMUNITY_REGISTRY_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/community/registry.json";
+pub const CDN_UPSTREAM_VERSIONS_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/providers/upstream-versions.json";
+pub const API_UPSTREAM_VERSIONS_URL: &str = "https://agent2api.dev/api/providers/upstream-versions";
 
 pub struct JsonResponse {
     pub value: Value,
@@ -69,7 +71,9 @@ pub fn api_url(value: &str) -> bool {
     trusted_url(value) && url::Url::parse(value).is_ok_and(|url| {
         let origin = url.origin().ascii_serialization();
         if origin == ORIGIN {
-            url.path().starts_with("/api/updates/") || url.path().starts_with("/api/plugins/")
+            url.path().starts_with("/api/updates/")
+                || url.path().starts_with("/api/plugins/")
+                || url.path().starts_with("/api/providers/")
         } else if origin == CDN_ORIGIN {
             url.path().starts_with("/agent2api/feeds/") && url.query().is_none()
         } else {

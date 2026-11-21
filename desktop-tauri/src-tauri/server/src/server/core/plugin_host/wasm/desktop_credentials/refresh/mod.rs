@@ -21,7 +21,6 @@ pub(in crate::server::core::plugin_host::wasm) fn helper(provider: &str) -> Opti
         "autoclaw" => Some("desktop.refresh.autoclaw.v1"),
         "autoclaw-intl" => Some("desktop.refresh.autoclaw-intl.v1"),
         "cline-free" => Some("desktop.refresh.cline-free.v1"),
-        "cline-pass" => Some("desktop.refresh.cline-pass.v1"),
         _ => None,
     }
 }
@@ -102,6 +101,16 @@ pub(in crate::server::core::plugin_host::wasm) async fn invoke(context: &mut Con
         let current = source::Source::read(&job.provider,&job.reference)?;
         if current.revision() != source.revision() { return Ok(json!({"updated":false,"sourceRevision":current.revision()})); }
         if !current.refreshable() { return Err(proto::WireError::with_code("本机登录态缺少续期材料，请重新登录官方客户端", "desktop_refresh_material_missing")); }
+        if matches!(job.provider.as_str(), "autoclaw" | "autoclaw-intl") {
+            // 本机文件锁已串行化换证和写回，历史失败不限制后续调度。
+            let next = protocols::refresh(&job, &current.credentials).await?;
+            job.current()?;
+            let reference = job.reference.clone();
+            let result = crate::server::core::blocking::run(move || current.persist(&next, &reference)).await
+                .map_err(|_| invalid())??;
+            if result["updated"] != true { return Err(changed()); }
+            return Ok(result);
+        }
         let store = plugin_accounts::shared().ok_or_else(invalid)?;
         let before = store.plugin_state_strict(&job.provider,&job.account,"host.desktop-refresh.v1").map_err(|_| invalid())?;
         let stamp = current.refresh_stamp();

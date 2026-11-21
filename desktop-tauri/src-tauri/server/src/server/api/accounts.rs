@@ -134,9 +134,7 @@ async fn add_plugin_account(
         password: proxy.password.clone(),
     });
 
-    let source = if payload.get("importDesktop").and_then(Value::as_bool).unwrap_or(false) {
-        agent2api_provider_protocol::NormalizeSource::Desktop
-    } else if let Some(content) = payload
+    let source = if let Some(content) = payload
         .get("authFileContent")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
@@ -160,6 +158,8 @@ async fn add_plugin_account(
                 .and_then(Value::as_str)
                 .map(str::to_string),
         }
+    } else if payload.get("importDesktop").and_then(Value::as_bool).unwrap_or(false) {
+        agent2api_provider_protocol::NormalizeSource::Desktop
     } else {
         // 新 runtime 的手动归一器只吃自身凭证/方法参数，不把网关代理配置混入
         // RAW 认证输入。旧插件仍收到原 payload，保留历史归一合同。
@@ -427,6 +427,7 @@ pub async fn dispatch(
         ("POST", "import") => return import_accounts(&state, body).await,
         ("POST", "current") => return set_current(&state, body).await,
         ("POST", "batch") => return batch_accounts(&state, body).await,
+        ("POST", "retired/remove") => return remove_retired_accounts(&state, body),
         // 整队重排（账号页分组模式：拖组 / 拖行之后把新顺序整条交上来）
         ("POST", "reorder") => return reorder_accounts(&state, body).await,
         ("POST", "refresh") => return refresh_account(&state, body).await,
@@ -790,13 +791,16 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         // Cline：实现已整体搬到插件（设备授权登录、凭证解析、续期、目录、
         // 伪装头、余额、转发），这里只留拒绝路径 —— 装上插件时上面的
         // `serves_provider` 分流会先带走。
-        Some(
-            crate::server::core::providers::ProviderKind::ClineFree
-            | crate::server::core::providers::ProviderKind::ClinePass,
-        ) => {
+        Some(crate::server::core::providers::ProviderKind::ClineFree) => {
             return management_error(
                 503,
                 "Cline 的账号管理需要安装提供商插件：本版本不再内置该家的设备授权登录与凭证解析实现",
+            );
+        }
+        Some(crate::server::core::providers::ProviderKind::ClinePass) => {
+            return management_error(
+                410,
+                "Cline 订阅池插件已下线，请改用「添加账号 → API 模板 → Cline Pass」填入 API Key 使用",
             );
         }
         // ZCode（两个地区）：实现已整体搬到插件（CLI 轮询登录、编码套餐凭证
@@ -1692,6 +1696,25 @@ pub fn delete_account(state: &ServerState, id: &str) -> Response {
         Ok(()) => {
             ok_json(json!({ "list": state.store().list_visible_accounts() }))
         }
+        Err(error) => store_error(error),
+    }
+}
+
+pub fn remove_retired_accounts(state: &ServerState, body: &Bytes) -> Response {
+    let payload = match parse_json_body(body, "请求内容不是有效 JSON") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let provider = payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if !crate::server::core::providers::availability::is_replaced_by_template(provider) {
+        return management_error(400, "该提供商不支持作为已下线旧账号批量清理");
+    }
+    match state.store().remove_retired_provider(provider) {
+        Ok(result) => ok_json(result),
         Err(error) => store_error(error),
     }
 }

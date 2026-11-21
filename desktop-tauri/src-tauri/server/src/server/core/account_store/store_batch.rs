@@ -458,4 +458,19 @@ impl AccountStore {
         }
         Ok(json!({ "removed": removed, "failed": failed, "list": snapshot }))
     }
+
+    /// 清理已由内置 API 模板替代的旧提供商残留账号（由用户在界面明确确认后触发）。
+    pub fn remove_retired_provider(&self, provider: &str) -> Result<Value, AccountStoreError> {
+        let ids: Vec<String> = self
+            .read_state()
+            .accounts
+            .iter()
+            .filter(|record| record.provider() == provider)
+            .map(|record| record.id().to_string())
+            .collect();
+        if ids.is_empty() {
+            return Ok(json!({ "removed": [], "failed": [], "list": self.list_visible_accounts() }));
+        }
+        self.batch_remove(&ids)
+    }
 }

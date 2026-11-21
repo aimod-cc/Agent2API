@@ -122,7 +122,7 @@ pub mod priority;
 pub mod qoder_accounts;
 pub mod raccoon_accounts;
 pub(crate) mod policy_cooldowns;
-mod policy_cooldown_view;
+pub(crate) mod policy_cooldown_view;
 mod read_rows;
 mod read_state;
 pub mod sql;

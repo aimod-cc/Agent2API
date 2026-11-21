@@ -8,6 +8,7 @@ import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
 import { visionDetail } from '../../../../ui-shared/request-vision-detail'
 
 export type RequestEntry = {
+  rowId?: number
   id?: string; ts?: number; status?: number; error?: string | null
   provider?: string; providerLabel?: string; accountId?: string; accountName?: string
   model?: string; clientModel?: string; upstreamModel?: string
@@ -19,6 +20,14 @@ export type RequestEntry = {
   credit?: number | null
   route?: unknown
   attempts?: number; attemptDetails?: unknown[]; sensitiveHits?: unknown[]
+  detailsLoaded?: boolean
+  hasRoute?: boolean
+  visionMode?: string
+  hasProcessFacts?: boolean
+  internalRetries?: number
+  hasSensitiveHits?: boolean
+  hasClientEvidence?: boolean
+  clientUserAgent?: string
   /** 模型测试发起的请求（后端 `is_test`；此前落盘的老行没有这个键） */
   isTest?: boolean
   phase?: string; phaseElapsedMs?: number | null; phaseStartedAt?: number | null
@@ -141,7 +150,7 @@ export function isRunning(entry: RequestEntry): boolean {
  * 没有 id 的旧行退回 ts；两者都缺给空串 —— 标签仍会渲染（面板给「未采集」的兜底文案），只是
  * 反查不到数据，比不渲染更不容易让人以为界面坏了。
  */
-const rowKey = (entry: RequestEntry): string => String(entry?.id || entry?.ts || '')
+const rowKey = (entry: RequestEntry): string => String(entry?.id || entry?.rowId || entry?.ts || '')
 
 /** 这条请求里所有尝试明细的内部重试总次数（没有明细时为 0） */
 function countRetries(entry: RequestEntry): number {
@@ -255,11 +264,10 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
             title={t('面板内发起的模型调用，消耗额度并记录 Key，不计入生产报表')}>{clientRequestLabel(entry)}</Badge>,
         )
       }
-      // 判据交给悬停面板模块（它要读明细内部字段）；兜底成 attempts > 1：模块没就绪时至少换过
-      // 号的请求仍能显示标签，而不是整列静默变空
-      const showChain = shared().wbRequestHover?.hasProcessFacts?.(entry) ?? attempts > 1
+      // 判据优先走列表轻量字段，兜底回悬停面板模块与 attempts > 1
+      const showChain = entry.hasProcessFacts ?? shared().wbRequestHover?.hasProcessFacts?.(entry) ?? attempts > 1
       if (showChain) {
-        const count = attempts > 1 ? attempts : countRetries(entry)
+        const count = attempts > 1 ? attempts : (Number(entry.internalRetries) || countRetries(entry))
         tags.push(
           // Badge 借 render 渲染成**真 button**：悬停面板的委托按 `[data-req-hover]` 找锚点、
           // 键盘可达靠 focusin 委托，span 两样都给不了。事件与 data-* 由 Base UI 合并到这颗
@@ -270,11 +278,9 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
           </Badge>,
         )
       }
-      // 敏感词命中：判据是「命中表非空」。标签只写一个「敏」字（这一列只有 52px，三个字会把
-      // 标签撑得比「重试 N」还宽）；完整含义交给悬停面板，aria-label 补上完整说法。
-      // 紫色档（sensitive）是这次给组件库补的：它既不是「失败」也不是「国际版」，
-      // 是第三类事实；详情弹窗的展开形态读的是同一档，两处不会再有色差
-      if (Array.isArray(entry.sensitiveHits) && entry.sensitiveHits.length) {
+      // 敏感词命中：优先认列表轻量标记，详情存在时再读明细数组
+      const hasSensitive = entry.hasSensitiveHits ?? (Array.isArray(entry.sensitiveHits) && entry.sensitiveHits.length > 0)
+      if (hasSensitive) {
         tags.push(
           <Badge key='sensitive' variant='sensitive' shape='tag' render={<Button size='default' variant='ghost' type='button' />}
             className='req-hover-tag' data-req-hover='sensitive' data-req-id={identity}
@@ -351,7 +357,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
     case 'client': {
       const label = clientRequestLabel(entry)
       return <span key={key} className={className}
-        title={entry.clientEvidence?.userAgent || t('来源客户端：{client}', { client: label })}>{label}</span>
+        title={entry.clientEvidence?.userAgent || entry.clientUserAgent || t('来源客户端：{client}', { client: label })}>{label}</span>
     }
 
     case 'apiKey': {
@@ -391,7 +397,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
       if (isRunning(entry)) return <span key={key} className={className} />
       // 失败请求不记录用量（后端 normalize 已把 credit 清成 None）：这里与
       // 「用量」列用同一句说明，避免把「失败清零」误读成「这一家没上报」。
-      if (!isOk(entry) && visionDetail(entry.route)?.mode !== 'assist_call') {
+      if (!isOk(entry) && entry.visionMode !== 'assist_call' && visionDetail(entry.route)?.mode !== 'assist_call') {
         return <span key={key} className={`${className} is-empty`} title={t('失败请求不记录用量')}>—</span>
       }
       const value = entry.credit
@@ -412,7 +418,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
       // 进行中：用量要等收尾才记账，此刻没有任何读数可给 —— 留空比「-」更准确
       if (isRunning(entry)) return <span key={key} className={className} />
       // 失败请求的 token 由后端一律清零，写「0」会让人以为真的消耗了这些量
-      if (!isOk(entry) && visionDetail(entry.route)?.mode !== 'assist_call') {
+      if (!isOk(entry) && entry.visionMode !== 'assist_call' && visionDetail(entry.route)?.mode !== 'assist_call') {
         return (
           <span key={key} className={className} title={t('失败请求不记录用量')}>
             <span className='req-usage-line'>in: - / out: - / all: -</span>
@@ -443,7 +449,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
 
     case 'detail': {
       const id = entry.id ? String(entry.id) : ''
-      if (!id && !entry.clientEvidence) return <span key={key} className={`req-none ${base} ta-${align}`}>-</span>
+      if (!id && !entry.hasClientEvidence && !entry.clientEvidence) return <span key={key} className={`req-none ${base} ta-${align}`}>-</span>
       return (
         <span key={key} className={className}>
           <Button size='sm' variant='outline' className='req-detail-btn' title={t('请求详情')}

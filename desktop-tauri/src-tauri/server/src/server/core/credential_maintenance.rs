@@ -188,28 +188,39 @@ pub async fn refresh_accounts(store: &AccountStore, selected: Option<&[String]>,
             ));
             continue;
         }
-        // 判不出来（没有过期信息 / 账号不存在 / 没有 refreshToken）一律 false
-        if !forced.iter().any(|account_id| account_id == &id) && !adapter.credentials_expiring_async(store, &id).await {
-            slots[index] = Some(skipped(&id, provider, "凭证未过期或临期"));
-            continue;
+        if !forced.iter().any(|account_id| account_id == &id) {
+            match adapter.check_credentials_expiring(store, &id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    slots[index] = Some(skipped(&id, provider, "凭证未过期或临期"));
+                    continue;
+                }
+                Err(error) => {
+                    slots[index] = Some(json!({
+                        "id": id,
+                        "provider": provider,
+                        "status": STATUS_FAILED,
+                        "message": crate::server::core::maintenance::types::safe_message(&error.message),
+                        "code": error.code,
+                    }));
+                    continue;
+                }
+            }
         }
         pending.push((index, id, provider.to_string(), adapter));
     }
 
     if pending.is_empty() {
-        // 绝大多数轮次走到这里（没有临期账号）：只留一行 verbose，
-        // 不写日志库 —— 每 10 分钟一条「什么都没做」的记录会把日志页淹掉
         logging::verbose(
             "[Accounts]",
-            &format!("凭证自动维护：无需刷新的账号（共 {} 个）", accounts.len()),
+            &format!("凭证自动维护：本轮没有可续期的账号（共 {} 个）", accounts.len()),
         );
-        return slots.into_iter().flatten().collect();
+    } else {
+        logging::verbose(
+            "[Accounts]",
+            &format!("检测到 {} 个临期账号，开始自动刷新凭证…", pending.len()),
+        );
     }
-
-    logging::verbose(
-        "[Accounts]",
-        &format!("检测到 {} 个临期账号，开始自动刷新凭证…", pending.len()),
-    );
     for (index, id, provider, adapter) in pending {
         if store.needs_relogin(&id) {
             slots[index] = Some(skipped(&id, &provider, "登录授权已失效，需要重新登录该账号"));

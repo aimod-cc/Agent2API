@@ -76,6 +76,11 @@ pub(in crate::server::core::plugin_host) async fn open_pinned(params: &Value, cl
     open_with_client(params, None, Some(client), false, deadline).await
 }
 
+pub(in crate::server::core::plugin_host) async fn open_pinned_body(params: &Value, body: Option<RequestBody>,
+    client: reqwest::Client, deadline: HttpDeadline) -> Result<(Value, HttpHandle), proto::WireError> {
+    open_with_client(params, body, Some(client), false, deadline).await
+}
+
 // 仅宿主可传整个冻结包装、原强执行占用和非Clone发送票；JSON不能替换它们。
 // 本分支同步登记唯一worker后独立发送；外层只等结果，取消/trap不丢已execute的future。
 pub(in crate::server::core::plugin_host) async fn open_frozen_once<F>(params: &Value, body: bytes::Bytes,

@@ -42,7 +42,7 @@ export type DynamicLoginWait = {
   session?: { accountUid?: string; accountId?: string; nickname?: string; provider?: string; proxySaved?: boolean; warning?: string } | null
 }
 
-export type LoginInput = { provider: string; methodIndex: number; inputs: Record<string, string>; proxy?: unknown; requestId?: string }
+export type LoginInput = { provider: string; methodIndex: number; inputs: Record<string, string>; proxy?: unknown; requestId?: string; callbackOrigin?: string }
 
 function requireAvailableProvider(provider: string): void {
   if (isSuspendedProvider(provider)) {
@@ -57,7 +57,7 @@ export function readDynamicMethods(provider: string, signal?: AbortSignal): Prom
 
 export function startDynamicLogin(input: LoginInput, signal?: AbortSignal): Promise<DynamicLoginStart> {
   requireAvailableProvider(input.provider)
-  return apiCall('/api/session/login/start', { method: 'POST', body: input, quiet: true, signal })
+  return apiCall('/api/session/login/start', { method: 'POST', body: { ...input, mode: 'external' }, quiet: true, signal })
 }
 
 export async function waitDynamicLogin(state: string, owner?: ManagedLoginWaitOwner, signal?: AbortSignal): Promise<DynamicLoginWait> {
@@ -86,7 +86,7 @@ export function dynamicLoginError(error: unknown): string {
   return error instanceof Error ? loginText(error.message) : t('未知错误')
 }
 
-export async function addDynamicApiAccount(input: LoginInput & { name?: string; importDesktop?: boolean }): Promise<string> {
+export async function addDynamicApiAccount(input: LoginInput & { name?: string; importDesktop?: boolean; authFileB64?: string; authFileContent?: string; authFileName?: string }): Promise<string> {
   requireAvailableProvider(input.provider)
   const identity = serverIdentity()
   const result = await apiCall<{ account?: { id?: string; provider?: string }; proxySaved?: boolean; warning?: string }>(

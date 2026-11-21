@@ -358,18 +358,105 @@ fn asset_name(item: &Value) -> &str {
     item.get("name").and_then(Value::as_str).unwrap_or("")
 }
 
+const MAC_ARM_TAGS: &[&str] = &["aarch64", "arm64", "apple-silicon"];
+const MAC_X64_TAGS: &[&str] = &["x86_64", "x86-64", "x64", "amd64"];
+const MAC_UNIVERSAL_TAGS: &[&str] = &["universal"];
+
+/// 按分隔符边界匹配架构标记，避免把无关词根里的子串误认成芯片标识。
+fn matches_arch_tag(name: &str, tag: &str) -> bool {
+    let mut offset = 0;
+    while let Some(found) = name[offset..].find(tag) {
+        let start = offset + found;
+        let end = start + tag.len();
+        let before_ok = name[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        let after_ok = name[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        offset = start + tag.len().max(1);
+    }
+    false
+}
+
+/// 判定当前 macOS 宿主是否为 Apple Silicon（含在 Rosetta 2 下运行 x64 二进制的情况）。
+fn macos_is_arm64() -> bool {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        true
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        use std::sync::OnceLock;
+        static TRANSLATED: OnceLock<bool> = OnceLock::new();
+        *TRANSLATED.get_or_init(|| {
+            // Rosetta 2 转译进程下 compile-time 仍是 x86_64，通过 sysctl 识别真实 Apple 芯片以便升级回原生包。
+            std::process::Command::new("/usr/sbin/sysctl")
+                .args(["-n", "sysctl.proc_translated"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "1")
+        })
+    }
+    #[cfg(not(all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    {
+        false
+    }
+}
+
+fn find_macos_by_tags<'a>(candidates: &[&'a Value], tags: &[&str]) -> Option<&'a Value> {
+    candidates
+        .iter()
+        .find(|item| {
+            let name = asset_name(item).to_lowercase();
+            tags.iter().any(|tag| matches_arch_tag(&name, tag))
+        })
+        .copied()
+}
+
+fn is_untagged_macos_dmg(item: &Value) -> bool {
+    let name = asset_name(item).to_lowercase();
+    !MAC_ARM_TAGS
+        .iter()
+        .chain(MAC_X64_TAGS)
+        .chain(MAC_UNIVERSAL_TAGS)
+        .any(|tag| matches_arch_tag(&name, tag))
+}
+
+fn pick_macos_preferred<'a>(candidates: &[&'a Value], arm64: bool) -> Option<&'a Value> {
+    let primary = if arm64 { MAC_ARM_TAGS } else { MAC_X64_TAGS };
+    if let Some(found) = find_macos_by_tags(candidates, primary) {
+        return Some(found);
+    }
+    if let Some(found) = find_macos_by_tags(candidates, MAC_UNIVERSAL_TAGS) {
+        return Some(found);
+    }
+    if let Some(found) = candidates.iter().find(|item| is_untagged_macos_dmg(item)).copied() {
+        return Some(found);
+    }
+    // Intel 绝不能回退下载仅含 ARM64 的 dmg；Apple Silicon 必要时可借 Rosetta 跑 x64。
+    if arm64 {
+        return find_macos_by_tags(candidates, MAC_X64_TAGS);
+    }
+    None
+}
+
 /// 多个候选资产之间的择优顺序（按平台分流）。
 ///
 /// ── Windows：优先 NSIS 安装器 ────────────────────────────────
 /// NSIS 的产物名带 `-setup`，Release 里偶尔还会附一个裸 exe（免安装的
 /// 主程序），那不是安装器 —— 装它不会建快捷方式、也不会登记卸载项。
 ///
-/// ── macOS：按芯片优先级 ─────────────────────────────────────
-/// 一次 macOS 构建可能上传 aarch64 / x86_64 / universal 三种 dmg：
-///   - `universal` 两种芯片都能跑，最优；
-///   - `aarch64` 是 Apple Silicon 原生；
-///   - `x86_64` 只在 Intel 上能跑（Apple Silicon 要靠 Rosetta 转译）。
-/// 三个都没有（用户手工命名的资产）时退回第一个 —— 至少是个 dmg。
+/// ── macOS：按本机真实芯片择优 ─────────────────────────────────
+/// 兼容两种发布形态（当前 `universal.dmg` 与未来分芯片 `aarch64.dmg` / `x64.dmg`）：
+///   - Apple Silicon（含 Rosetta 转译）：原生 ARM64 优先 → `universal` → 未标架构 → x64 兜底；
+///   - Intel：原生 x64 优先 → `universal` → 未标架构；绝不选仅有 ARM64 标记的包。
 ///
 /// ── Linux（桌面壳）：按架构，其次发行版标记 ──────────────────
 /// 同一次 Linux 构建会出 amd64 与 arm64 两套产物（deb / AppImage 各一份），
@@ -378,15 +465,7 @@ fn asset_name(item: &Value) -> &str {
 /// 就退回第一个 —— 至少是同后缀的产物。
 fn pick_preferred<'a>(candidates: &[&'a Value]) -> Option<&'a Value> {
     if cfg!(target_os = "macos") {
-        for keyword in ["universal", "aarch64", "arm64", "x86_64", "x64"] {
-            if let Some(found) = candidates
-                .iter()
-                .find(|item| asset_name(item).to_lowercase().contains(keyword))
-            {
-                return Some(*found);
-            }
-        }
-        return candidates.first().copied();
+        return pick_macos_preferred(candidates, macos_is_arm64());
     }
     if cfg!(target_os = "linux") {
         // 本机架构的两种写法：`std::env::consts::ARCH` 给的是 x86_64 / aarch64，

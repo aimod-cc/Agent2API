@@ -32,10 +32,10 @@ export function DesktopLaunchButton({ account }: { account: AccountRecord }) {
   return <>
     <Button variant='outline' size='xs' disabled={unavailable || activeLaunch !== null && activeLaunch !== account.id} title={unavailable
       ? t('该账号没有可切换的完整凭证，请重新登录或导入完整凭证')
-      : t('切换为此账号并启动本机客户端')} onClick={() => {
+      : t('切换本机客户端到此账号')} onClick={() => {
         if (activeLaunch !== null && activeLaunch !== account.id) return
         activeLaunch = account.id; publish(); setOpen(true)
-      }}>{t('启动')}</Button>
+      }}>{t('切号')}</Button>
     {open ? <PluginDesktopLaunchDialog provider={provider} account={account.id} name={displayNameOf(account)} clients={clients}
       request={request} pickProgram={path => {
         const pick = native.workbuddyDesktop?.pickDesktopClient
