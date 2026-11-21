@@ -893,63 +893,6 @@ fn last_resort(
         .map(|(_, account)| Value::clone(account))
 }
 
-/// 兜底选路：按路由组 / 提供商的**原始顺序**，把后面还没试过的服务逐个走下去。
-///
-/// ── 它和正常选路的分工 ────────────────────────────────────────────
-/// `plan_route` 只肯用「此刻干净」的候选：冷却、限制器、熔断、余额不足、
-/// 并发满、已试过，全都会被剔出去。剔到池子空了，`last_resort` 再挑一个
-/// 「估算冷却里最早恢复」的；还是挑不到，请求就断在最后那次上游错误上。
-///
-/// 那些剔除条件几乎全是**我们自己记的账**（冷却时长、熔断状态、估算恢复
-/// 时间、限制器读数）。用自己的账本把一条请求判死，等于「自己的记账把自己
-/// 的活掐了」。所以这一层只看两条：账号没被禁用、还取得到凭证；顺序也不
-/// 重新计算，就按配置里写的组内顺序（成员 → 账号）走，本请求已试过的跳过。
-///
-/// 越界的只有**我们自己**的判断；上游明确说过「现在别来」的仍不碰
-/// （`scoped_accounts` 已按 `upstreamCooldownUntil` 过滤）。
-pub(super) fn fallback_sweep(
-    service: &UpstreamService,
-    providers: &[&str],
-    keys: &routing::CooldownKeys<'_>,
-    tried_ids: &[String],
-    pinned: Option<&str>,
-    request_routing: &super::route_context::RequestRouting,
-) -> Option<Value> {
-    // 排障开关：`AGENT2API_FALLBACK=0` 关掉兜底，回到「按账本判死」的老行为。
-    if std::env::var("AGENT2API_FALLBACK").ok().as_deref() == Some("0") { return None; }
-    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
-    let mut best: Option<(i64, usize, Value)> = None;
-    for (index, account) in accounts.into_iter().enumerate() {
-        if matches!(account.get("enabled"), Some(Value::Bool(false))) { continue; }
-        let key = crate::server::core::routing_groups::attempt_key(&account);
-        if !key.is_empty() && tried_ids.iter().any(|tried| tried == &key) { continue; }
-        let Some(id) = routing::account_id(&account).map(str::to_string) else { continue; };
-        // 没有会话记录 = 取不到凭证，发出去必然 401；它连「最坏的选择」都算不上
-        if service.store.get_session_by_id(&id).is_none() { continue; }
-        let priority = account.get("routingPriority").or_else(|| account.get("priority"))
-            .and_then(Value::as_i64).unwrap_or(i64::MAX);
-        if best.as_ref().map_or(true, |(known, at, _)| (priority, index) < (*known, *at)) {
-            best = Some((priority, index, account));
-        }
-    }
-    best.map(|(_, _, account)| account)
-}
-
-/// 把 `fallback_sweep` 挑出来的账号记录拼成可直接发送的 [`RouteTarget`]。
-///
-/// 代理、`proxyError` 提示、账号级 decision 都由 [`with_proxy_notice`] 补齐，
-/// 与正常选路走同一段代码 —— 兜底不应在「怎么发」上跟主路径有任何差别，
-/// 差别只在「挑谁」。
-pub(super) fn target_from_account(
-    service: &UpstreamService,
-    account: Value,
-    decision: Option<Value>,
-) -> Option<RouteTarget> {
-    let id = routing::account_id(&account).map(str::to_string)?;
-    let entry = service.store.get_session_by_id(&id)?;
-    Some(with_proxy_notice(account, entry.proxy, entry.proxy_error, id, decision))
-}
-
 /// 选路决策快照（请求日志「路由回放」的数据源）。
 ///
 /// ── 为什么不再截断到 12 条（2026-11-21 修正）─────────────────────

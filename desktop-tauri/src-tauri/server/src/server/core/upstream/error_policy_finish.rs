@@ -110,8 +110,15 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             ctx.telemetry.note_error_policy(json!({ "reason": "该账号需要重新登录" }));
         }
     }
+    // ── 兜底总闸：不让「规则动作」决定收尾 ────────────────────────────
+    // 用户的诉求只有一句：**不管什么错误，先给当前对象记一次限流，再换下一个**，
+    // 只要队列里还有真正可用（有凭证、已启用、没被限制器拦、没在熔断 / 冷却里）
+    // 的候选。所以「规则动作是直接返回错误」在这里只留一条日志，不再提前收尾 ——
+    // 决定收尾的判据只剩下面那一个：「下一个」确实不存在。
     if !decision.switches() {
-        return stop(&format!("规则「{}」的动作是「直接返回错误」，不换对象", decision.rule.name));
+        logging::console_line("[Upstream]", &format!(
+            "规则「{}」本来会直接返回错误（HTTP {}），兜底改为继续换下一个可用对象",
+            decision.rule.name, error.status_code));
     }
     if decision.scope == crate::server::config::error_policy::CooldownScope::Account {
         if let Some(id) = target.account_id.as_deref() {
@@ -135,32 +142,20 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
         error_policy::exclude_provider(service, providers, keys.request_model(), &target.provider, tried, ctx.pinned_account, &ctx.routing);
     }
     if let Some(id) = target.attempt_key() { tried.retain(|other| other != &id); tried.push(id); }
-    let picked = rotate::pick_next_account(service, providers, keys, tried, ctx.pinned_account, &ctx.routing);
-    let next = match picked {
-        Some(next) => next,
-        None => {
-            // ── 兜底：正常选路已经把整个池子剔空了 ───────────────────────
-            // 到这一步说明 `plan_route` + `last_resort` 都拿不出对象（冷却、
-            // 限制器、熔断、并发、余额全剔完）。这不是「没有账号」，而是
-            // 「我们的账本认为没有账号」。所以按配置里的原始顺序再走一遍，
-            // 只跳过禁用 / 无凭证 / 本请求已试过的 —— 宁可撞一次，也别把
-            // 请求断在这。
-            let fallback = rotate::fallback_sweep(service, providers, keys, tried, ctx.pinned_account, &ctx.routing);
-            let Some(fallback) = fallback else {
-                return stop(&format!("本队列已没有下一个可发对象（本轮已试 {} 个，兜底遍历也已试完）", tried.len()));
-            };
-            logging::console_line("[Upstream]", &format!(
-                "⚠️ 常规选路已无候选，按兜底顺序（路由组 / 提供商原始顺序，忽略冷却与限制器）继续：{}",
-                super::account_display(&fallback)));
-            let key = crate::server::core::routing_groups::attempt_key(&fallback);
-            if !key.is_empty() && !tried.contains(&key) { tried.push(key); }
-            logging::console_line("[Upstream]", &format!("兜底顺延到 {}（换号 {}/{}）",
-                super::account_display(&fallback), switch_total - *switches_left, switch_total));
-            return true;
-        }
+    let Some(next) = rotate::pick_next_account(service, providers, keys, tried, ctx.pinned_account, &ctx.routing) else {
+        // 这一句是「池子里到底还有没有下一个」的唯一权威答案：`plan_route`
+        // 只记录候选，能不能真的拿出一个对象由这次查找决定。走到这里说明剩下
+        // 的候选**确实不可用**（限制器拦下 / 熔断中 / 冷却中 / 已禁用 / 无凭证），
+        // 不是规则把它挡了 —— 兜底也不越过这几条。
+        return stop(&format!(
+            "本队列已没有下一个可用对象（本轮已试 {} 个）：剩下的都在冷却、被限制器拦、熔断中、已禁用或无凭证",
+            tried.len()));
     };
+    // 换号预算用尽同样不作为收尾理由：预算只是「别一口气试太多」的软闸，
+    // 真正的硬闸是转发层的 `MAX_ROUTE_ATTEMPTS`（100 次）。
     if !super::provider_loop::take_switch(switches_left, switch_total) {
-        return stop(&format!("换号次数已用尽（上限 {switch_total}）"));
+        logging::console_line("[Upstream]", &format!(
+            "换号预算已用尽（上限 {switch_total}），兜底继续换下一个可用对象"));
     }
     logging::console_line("[Upstream]", &format!("统一错误规则「{}」：HTTP {}，顺延到 {}（换号 {}/{}）",
         decision.rule.name, error.status_code, super::account_display(&next), switch_total - *switches_left, switch_total));
