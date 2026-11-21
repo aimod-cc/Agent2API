@@ -108,7 +108,9 @@ impl Default for ErrorSettings {
             rules_version: RULES_VERSION,
             resends: 0, switches: MAX_SWITCHES, interval_seconds: 5, wait_budget_seconds: 30, cooldown_floor_seconds: 30,
             backoff: true, backoff_seconds: 30, backoff_cap_seconds: 300, sink: true, sink_seconds: 1800,
-            breaker: false, breaker_failures: 5, breaker_seconds: 60, breaker_successes: 2,
+            // 熔断默认打开：失败的账号连续失败到阈值后先退出轮转，让队列里
+            // 其他家先接活 —— 冷却只是「过一会儿再试」，熔断才是「先别用它」。
+            breaker: true, breaker_failures: 3, breaker_seconds: 120, breaker_successes: 2,
             rules: default_rules(), overrides: Vec::new(),
         }
     }
@@ -236,6 +238,15 @@ mod tests {
         assert_eq!(rule.action, ErrorAction::RefreshThenSwitch, "401 仍然先续期");
         assert_ne!(rule.cooldown, CooldownMode::None, "401 续期失败后要冷却账号");
         assert_eq!(rule.scope, CooldownScope::Account, "401 是账号级的失效");
+    }
+
+    /// 熔断默认打开、阈值要短：失败的账号先退出轮转，而不是冷却一到期就回到队首。
+    #[test]
+    fn breaker_is_on_by_default() {
+        let settings = ErrorSettings::default();
+        assert!(settings.breaker, "失败的账号要能被熔断摘出轮转");
+        assert!(settings.breaker_failures <= 3, "阈值要短，才拦得住反复撞墙的账号");
+        assert!(settings.validate().is_ok(), "默认设置必须自身合法");
     }
 
     /// 请求有误 / 内容被拒默认也换号（并留短冷却）；显式配成 ReturnError 依然合法。

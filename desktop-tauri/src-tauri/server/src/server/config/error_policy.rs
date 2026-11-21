@@ -98,10 +98,20 @@ fn upgrade_rules(mut settings: ErrorSettings) -> ErrorSettings {
             rule.action = ErrorAction::SwitchAccount;
         }
     }
+    // 熔断从 v3 起是默认口径（而不是只对「连接或服务异常」生效的那一档）：
+    // 存盘里仍是关闭的，说明当年跑的就是旧口径，跟着升级打开 —— 否则升级了
+    // 二进制，失败的账号照样冷却一到期就回到队首。
+    let mut breaker_turned_on = false;
+    if !settings.breaker {
+        settings.breaker = true;
+        settings.breaker_failures = settings.breaker_failures.clamp(1, 3);
+        breaker_turned_on = true;
+    }
     let versioned = settings.rules_version;
     settings.rules_version = RULES_VERSION;
     crate::server::logging::console_line("[Config]", &format!(
-        "错误处理规则已从旧版本（v{versioned}）升级到 v{RULES_VERSION}：{cooled} 条规则补上冷却，未知错误恢复换号"
+        "错误处理规则已从旧版本（v{versioned}）升级到 v{RULES_VERSION}：{cooled} 条规则补上冷却，未知错误恢复换号{}",
+        if breaker_turned_on { "，熔断打开（连续失败阈值 3）" } else { "" }
     ));
     settings
 }
