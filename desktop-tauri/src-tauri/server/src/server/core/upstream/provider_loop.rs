@@ -798,7 +798,7 @@ async fn attempt_queue(
                     return Ok(outcome);
                 },
                 Err(error) => {
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     // 手动终止优先（与无状态路径同一判定与理由）：不把已受理的
                     // 终止当成「这一轮失败」去顺延下一个账号
@@ -887,7 +887,7 @@ async fn attempt_queue(
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
                 Err(error) => {
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     // ── 这一支以前「忙 / 插件协议错 / 插件崩了」一律直接抛回下游 ──
                     // 现在只有「响应字节已经在往客户端写」（`plugin_response_started`）
@@ -1189,7 +1189,7 @@ async fn attempt_queue(
                         }
                         return Err(exhausted_error(Some(error), tried_ids.len()));
                     }
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if defer_to_next_account(
                         service,
                         provider_ids,
@@ -1231,7 +1231,7 @@ async fn attempt_queue(
                     if !tried_ids.contains(&attempt_key) {
                         tried_ids.push(attempt_key.clone());
                     }
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if target.account_id.as_deref().is_some_and(|id| rotate::allows_route_skip(service, id))
                         && rotate::pick_next_account(service, provider_ids, &cooldown_keys,
                             &tried_ids, ctx.pinned_account, &ctx.routing).is_some()
@@ -1423,7 +1423,7 @@ async fn attempt_queue(
                     break (response, wire_model, plan.response, antigravity_session);
                 }
                 Err(failure) => {
-                    if ctx.telemetry.replay_guard().blocked() {
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &failure.error) {
                         ctx.telemetry.finish_last_attempt(Some(i64::from(failure.error.status_code)), Some(&failure.error.message));
                         return Err(failure.error);
                     }
@@ -1594,7 +1594,9 @@ async fn attempt_queue(
                         Some(i64::from(failure.error.status_code)),
                         Some(&failure.error.message),
                     );
-                    if ctx.telemetry.replay_guard().blocked() { return Err(failure.error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &failure.error) {
+                        return Err(failure.error);
+                    }
                     let mut error = failure.error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
                         &target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
@@ -1937,6 +1939,34 @@ fn exhausted_error(last: Option<GatewayError>, tried: usize) -> GatewayError {
     .with_retry_after_seconds(error.retry_after_secs.unwrap_or(1))
 }
 
+/// 上游**明确拒收**这一轮之后，解除请求级的「禁止重放」位，让队列继续（2026-11-21 加）。
+///
+/// ── 这是 WorkBuddy 那条 400 的真正卡点 ───────────────────────────────
+/// 插件家（`workbuddy` / `raccoon` / `loomy` 这类 WASM 对话）在**提交前**就会
+/// `freeze()` 请求级的 ReplayGuard（`wasm/conversation/workbuddy_http.rs`），把
+/// `blocked` 永久置 true。上游回 400 之后，本函数这些分支一进来就看到
+/// `blocked() == true` → `return Err(error)`，于是：
+/// 队列里还有十几个可用候选一个都不试、`finish_failure` 根本没跑（明细里
+/// `errorPolicy` 是 null，日志里没有「错误结算」）、下游直接收到 400。
+///
+/// 判据刻意写死成「上游当场拒收」这一档：400 / 401 / 402 / 403 / 404 / 405 /
+/// 406 / 409 / 410 / 413 / 415 / 422 / 429 / 501。这些状态说明请求**没有**进
+/// 上游执行队列，重放不会造成重复执行 / 重复计费；超时、5xx、无响应（0）不在此列
+/// —— 那些可能已经执行了，仍按「禁止重放」原样收尾。
+fn reopen_after_rejection(ctx: &ProviderContext<'_>, error: &crate::server::errors::GatewayError) -> bool {
+    if !ctx.telemetry.replay_guard().blocked() { return false; }
+    if ctx.telemetry.response_started() || ctx.telemetry.is_cancelled() { return false; }
+    if !matches!(error.status_code, 400 | 401 | 402 | 403 | 404 | 405 | 406 | 409 | 410 | 413 | 415 | 422 | 429 | 501) {
+        return false;
+    }
+    ctx.telemetry.replay_guard().confirm_not_sent();
+    logging::log_with_level("[Upstream]", &format!(
+        "上游当场拒收（HTTP {} {}）：这一轮没有执行，已解除「禁止重放」，继续顺延下一家",
+        error.status_code, error.message), "warn");
+    true
+}
+
+
 /// 门控后的 Chat 响应形态：`Live` = 未消费的 `Response`（原样直通）；
 /// `Held` = 预读产物（用预读字节 + 剩余流重建，见 `upstream::refusal`）。
 enum Gate {
@@ -2173,7 +2203,8 @@ async fn attempt_custom(
                 return Ok(outcome);
             }
             Err(mut error) => {
-                if ctx.telemetry.replay_guard().blocked() || ctx.telemetry.response_started() {
+                let blocked = ctx.telemetry.replay_guard().blocked();
+                if (blocked && !reopen_after_rejection(ctx, &error)) || ctx.telemetry.response_started() {
                     ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
                     return Err(error);
                 }
