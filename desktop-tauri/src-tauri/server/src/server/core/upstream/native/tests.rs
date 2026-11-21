@@ -115,9 +115,11 @@ async fn lone_cr_survives_transport_splits_and_model_rewriting() {
         ))
         .await;
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("sig+/=="));
-        assert!(output.contains("opaque+/=="));
-        assert!(output.contains("\"model\":\"alias\""));
+        let expected = text.replace("\"model\":\"wire\"", "\"model\":\"alias\"");
+        assert_eq!(
+            output, expected,
+            "complete SSE sequence changed at chunk size {size}"
+        );
         assert_eq!(telemetry.snapshot().total_tokens, 68);
         assert!(telemetry.snapshot().error.is_none());
     }

@@ -749,9 +749,31 @@ fn phone(s: &str, a: usize, b: usize) -> bool {
     true
 }
 pub(super) fn numeric_arrays(s: &str) -> Vec<(usize, usize)> {
+    // Exempt numeric data only in a complete JSON document, not prose brackets.
+    if !s.trim_start().starts_with(['[', '{'])
+        || serde_json::from_str::<serde::de::IgnoredAny>(s).is_err()
+    {
+        return Vec::new();
+    }
     let mut ranges = Vec::new();
     let mut start = None;
+    let (mut quoted, mut escaped) = (false, false);
     for (i, byte) in s.bytes().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            quoted = true;
+            start = None;
+            continue;
+        }
         match byte {
             b'[' => start = Some(i),
             b']' => {

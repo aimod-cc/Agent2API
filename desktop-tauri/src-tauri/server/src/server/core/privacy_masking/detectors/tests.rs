@@ -158,16 +158,39 @@ fn numeric_arrays_are_indexed_once_and_preserved() {
 }
 
 #[test]
+fn numeric_exemptions_require_json_and_never_ignore_quoted_text() {
+    let phone = ["139", "0000", "9931"].join("");
+    for input in [
+        format!("phone [{phone}]"),
+        format!("notify [{phone}, {phone}]"),
+        serde_json::json!({"note": format!("[{phone}]")}).to_string(),
+    ] {
+        assert!(super::guards::numeric_arrays(&input).is_empty());
+        assert!(
+            ranges(&input, false, true, false).contains(&phone.as_str()),
+            "unmasked prose: {input}"
+        );
+    }
+    let number = phone.parse::<u64>().unwrap();
+    let data = serde_json::json!({"data": [[number], [number]]}).to_string();
+    assert_eq!(super::guards::numeric_arrays(&data).len(), 2);
+    assert!(ranges(&data, false, true, false).is_empty());
+}
+#[test]
 fn repaired_iban_match_resumes_before_the_unconsumed_suffix() {
     let iban = "DE89 3704 0044 0532 0130 00";
-    let input = format!("{iban} {iban}");
-    assert_eq!(
-        ranges(&input, false, true, false)
-            .iter()
-            .filter(|&&hit| hit == iban)
-            .count(),
-        2
-    );
+    for (first, second) in [
+        (iban, iban),
+        ("BE68 5390 0754 7034", "DE89 3704 0044 0532 0130 00"),
+    ] {
+        let input = format!("{first} {second}");
+        let hits = ranges(&input, false, true, false);
+        assert_eq!(
+            hits.iter().filter(|&&hit| hit == first).count(),
+            if first == second { 2 } else { 1 }
+        );
+        assert!(hits.contains(&second), "second grouped IBAN was skipped");
+    }
 }
 
 #[test]

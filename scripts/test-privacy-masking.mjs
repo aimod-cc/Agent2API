@@ -23,6 +23,15 @@ let echoPrompt = false
 let echoToolResult = false
 let compactBudgetReply = false
 let reviewMode = ''
+let jsonReplyStyle = ''
+const structuredReply = text => {
+  const document = JSON.stringify({ value: text })
+  if (jsonReplyStyle === 'truncated') return document.slice(0,-2)
+  if (jsonReplyStyle === 'fenced') return '```json' + String.fromCharCode(10) + document + String.fromCharCode(10) + '```'
+  if (jsonReplyStyle === 'plain') return 'Result: ' + text
+  if (jsonReplyStyle === 'verbatim') return "{ \n \"z\" : 123456789012345678901234567890, \"z\": 2, \"a\": 3 }\n"
+  return document
+}
 const toolHistoryId = 'call_local'
 const encodedWord = 'EncodedMediaFixture0'
 const lookupId = ['736a9b08', '170a', '4b11', '97ef', '02329fbd984a'].join('-')
@@ -41,6 +50,8 @@ const toolSecretKeys = ['Authorization', 'Cookie', 'key', 'pass', 'sessionToken'
 let holdReply
 const promptOnly = 'prompt-only-' + randomUUID()
 const reviewFault = process.env.AGENT2API_PRIVACY_TEST_NEGATIVE === '1'
+const stallFault = process.env.AGENT2API_PRIVACY_TEST_STALL === '1'
+const mcpFault = process.env.AGENT2API_PRIVACY_TEST_MCP_UNMASKED === '1'
 const syntheticPhone = '+86' + ['139', '0000', '9931'].join('')
 const paths = { chat_completions: '/v1/chat/completions', responses: '/v1/responses', anthropic: '/v1/messages' }
 const textPart = text => ({ type: 'text', text })
@@ -77,7 +88,7 @@ const upstream = createServer(async (req, res) => {
         : messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(part => part.type === 'tool_result')
     const toolOutput = protocol === 'responses' ? history?.output : history?.content
     const resultText = typeof toolOutput === 'string' ? toolOutput : toolOutput?.find(part => part.type === 'text' || part.type === 'input_text')?.text
-    const reply = reviewMode === 'structured' ? JSON.stringify({ value: text }) : compactBudgetReply ? 'budget accepted' : echoToolResult ? resultText : (foreign ? foreign + ' | ' : '') + text + (echoPrompt ? ' | ' + prompt : '')
+    const reply = reviewMode === 'structured' ? structuredReply(text) : compactBudgetReply ? 'budget accepted' : echoToolResult ? resultText : (foreign ? foreign + ' | ' : '') + text + (echoPrompt ? ' | ' + prompt : '')
     const msg = { id: 'msg_local', type: 'message', role: 'assistant', model: body.model,
       content: [textPart(reply), { type: 'tool_use', name: 'echo', id: 'call_local', input: tool }],
       stop_reason: 'tool_use', stop_sequence: null, usage: { input_tokens: 3, output_tokens: 2 } }
@@ -142,6 +153,10 @@ const upstream = createServer(async (req, res) => {
     }
     if (reviewMode === 'bom') wire = String.fromCodePoint(0xfeff) + wire
     if (reviewMode === 'lone-cr') wire = wire.replaceAll('\r\n', '\r')
+    if (reviewMode === 'wait-cap' && stallFault) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' }).flushHeaders()
+      return // Negative control: the client deadline must not count as a gateway stream error.
+    }
     if (reviewMode === 'wait-cap') {
       const delta = text => frame(null, chat('chat.completion.chunk', { index: 0, delta: { content: text }, finish_reason: null }))
       wire = delta(pieces[0]) + ': keepalive\r\n\r\n'.repeat(64) + delta(pieces[1]) + 'data: [DONE]\r\n\r\n'
@@ -178,9 +193,9 @@ try {
   child.stderr.on('data', x => { output = (output + x).slice(-8000) })
   let processError
   child.on('error', error => { processError = error })
-  const call = (path, method = 'GET', payload, authorized = true, extra = {}) => fetch('http://127.0.0.1:' + port + path, {
+  const call = (path, method = 'GET', payload, authorized = true, extra = {}, signal = AbortSignal.timeout(10000)) => fetch('http://127.0.0.1:' + port + path, {
     method, headers: { 'content-type': 'application/json', ...(authorized ? { 'x-api-key': key } : {}), ...extra },
-    body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(10000),
+    body: payload === undefined ? undefined : JSON.stringify(payload), signal,
   })
   const json = async (...values) => {
     const result = await call(...values), text = await result.text()
@@ -488,7 +503,7 @@ try {
   async function reviewRegression(name, run) {
     try { await run(); console.log('PASS REVIEW', name) }
     catch (error) { reviewFailures.push({ name, error: error.message }); console.log('FAIL REVIEW', name) }
-    finally { echoToolResult = false; reviewMode = '' }
+    finally { echoToolResult = false; reviewMode = ''; jsonReplyStyle = '' }
   }
   const sendText = async (text, policy) => {
     await savePrivacy(policy)
@@ -646,9 +661,26 @@ try {
     ])
     assert.deepEqual(attempts.map(response => response.status).sort(), [200,409], 'revision compare must be atomic under simultaneous writes')
   })
-  const eventValues = raw => raw.trimStart().split(/\r\n|\r|\n/)
-    .filter(line => line.startsWith('data:')).map(line => line.slice(5).trim())
-    .filter(line => line && line !== '[DONE]').map(JSON.parse)
+  const eventValues = raw => {
+    const events = []; let data = []
+    const text = raw.startsWith(String.fromCodePoint(0xfeff)) ? raw.slice(1) : raw
+    for (const line of text.split(/\r\n|\r|\n/)) {
+      if (!line) {
+        if (data.length) {
+          const joined = data.join(String.fromCharCode(10))
+          if (joined.trim() !== '[DONE]') events.push(JSON.parse(joined))
+          data = []
+        }
+      } else if (line.startsWith('data:')) {
+        data.push(line.slice(5).replace(/^ /,''))
+      }
+    }
+    assert.equal(data.length, 0, 'SSE ended before an empty-line frame delimiter')
+    return events
+  }
+  assert.deepEqual(eventValues('data: {\"value\":'+String.fromCharCode(13)+'data: 1}'+String.fromCharCode(13,13)), [{value:1}])
+  assert.throws(() => eventValues('data: {}'+String.fromCharCode(13)+'data: {}'+String.fromCharCode(13)), /JSON|delimiter/, 'missing SSE blank lines must turn the gate red')
+
   await reviewRegression('whole-word dates respect surrounding letters', async () => {
     const day = ['1990','05','20'].join('-')
     const wire = await sendText('item' + day + 'draft | ' + day, { ...disabled, terms: [day], terms_whole: true })
@@ -662,9 +694,11 @@ try {
   })
   await reviewRegression('adjacent repaired IBANs are both masked', async () => {
     const iban = ['GB82','WEST','1234','5698','7654','32'].join('')
-    const wire = await sendText(iban + ' ' + iban, { ...disabled, personal: true })
-    const values = wire.split(' ')
-    assert.equal(values.length, 2); values.forEach(value => assert.match(value, placeholderOnly))
+    for(const pair of [[iban,iban],["BE68 5390 0754 7034","DE89 3704 0044 0532 0130 00"]]) {
+      const wire = await sendText(pair.join(' '), { ...disabled, personal: true })
+      const values = wire.split(' ')
+      assert.equal(values.length, 2); values.forEach(value => assert.match(value, placeholderOnly))
+    }
   })
   await reviewRegression('short regex values apply and empty capture groups do not', async () => {
     assert.match(await sendText('abc', { ...secretsOnly, rules: [{ regex: '^abc$' }] }), placeholderOnly)
@@ -691,8 +725,12 @@ try {
     await savePrivacy({ ...disabled, terms: originals })
     const request = body('responses', true); request.input[0].content = originals.join(' | ')
     reviewMode = 'mcp-events'
+    if (mcpFault) await savePrivacy(disabled) // The upstream-plaintext assertion must catch this.
     const response = await call(paths.responses, 'POST', request); assert(response.ok)
     const events = eventValues(await response.text())
+    const sent = seen.at(-1).text.split(' | '); assert.equal(sent.length,2)
+    sent.forEach(value => assert.match(value, placeholderOnly, 'MCP fixture received unmasked plaintext'))
+    assert(!originals.some(value => seen.at(-1).text.includes(value)))
     for (const output_index of [0,1]) {
       const delta = events.filter(event => event.type === 'response.mcp_call_arguments.delta' && event.output_index === output_index).map(event => event.delta).join('')
       assert.equal(JSON.parse(delta).value, originals[output_index])
@@ -740,8 +778,10 @@ try {
   })
   await reviewRegression('SSE pending-token cap reports an actual stream error', async () => {
     await savePrivacy(enabled); reviewMode = 'wait-cap'
-    const response = await call(paths.chat_completions, 'POST', body('chat_completions', true)); assert(response.ok)
+    const deadline = AbortSignal.timeout(stallFault ? 250 : 10000)
+    const response = await call(paths.chat_completions, 'POST', body('chat_completions', true), true, {}, deadline); assert(response.ok)
     await assert.rejects(response.text(), /terminated|socket|other side closed|fetch failed|aborted/i)
+    assert.equal(deadline.aborted, false, 'client deadline is not an upstream stream failure')
   })
   await reviewRegression('title routing uses the original content before masking', async () => {
     const providerId = providerIds.chat_completions
@@ -776,6 +816,42 @@ try {
         assert(!raw.includes('{{A2A_'),'vision result retained request placeholder')
       }
     } finally { const latest=(await json('/api/vision-compatibility')).data;await json('/api/vision-compatibility','PUT',{revision:latest.revision,config:old.config}) }
+  })
+  await reviewRegression('prose brackets never exempt personal numbers as JSON data', async () => {
+    const phone=syntheticPhone.slice(3), card=['4111','1111','1111','1111'].join('')
+    const prefix=['110105','19491231','003'].join(''), weights=[7,9,10,5,8,4,2,1,6,3,7,9,10,5,8,4,2]
+    const id=prefix+'10X98765432'[[...prefix].reduce((sum,value,i)=>sum+Number(value)*weights[i],0)%11]
+    for(const value of [phone,card,id]) {
+      const wire=await sendText('contact ['+value+']', {...disabled,personal:true})
+      assert(!wire.includes(value));assert.match(wire.slice('contact ['.length,-1),placeholderOnly)
+    }
+    const quoted=JSON.stringify({note:'['+phone+']'})
+    const wire=await sendText(quoted,{...disabled,personal:true});assert(!wire.includes(phone))
+  })
+  const structuredWire = async (protocol, stream, secret, style) => {
+    jsonReplyStyle=style;reviewMode='structured'
+    const request=body(protocol,stream)
+    if(protocol==='responses'){request.input[0].content=secret;request.text={format:{type:'json_object'}}}
+    else {request.messages[0].content=secret;if(protocol==='chat_completions')request.response_format={type:'json_object'};else request.output_config={format:{type:'json_schema',schema:{type:'object',properties:{value:{type:'string'}},required:['value'],additionalProperties:false}}}}
+    const response=await call(paths[protocol],'POST',request),raw=await response.text();assert(response.ok,protocol+' structured upstream response was discarded: '+raw.slice(0,150))
+    const captured=seen.at(-1).text;assert.match(captured,placeholderOnly,'structured fixture received plaintext')
+    if(!stream){const value=JSON.parse(raw);return protocol==='chat_completions'?value.choices[0].message.content:protocol==='responses'?value.output[0].content[0].text:value.content[0].text}
+    const events=eventValues(raw)
+    if(protocol==='responses'){const complete=events.find(event=>event.type==='response.completed');assert(complete,'missing structured completion event');return {delta:events.filter(event=>event.type==='response.output_text.delta').map(event=>event.delta).join(''),done:complete.response.output[0].content[0].text}}
+    return events.map(event=>protocol==='chat_completions'?event.choices?.[0]?.delta?.content??'':event.delta?.text??'').join('')
+  }
+  await reviewRegression('incomplete fenced and unsupported JSON output is still delivered',async()=>{
+    const secret='A'+String.fromCharCode(34)+'B'+String.fromCharCode(92)+'C';await savePrivacy({...disabled,terms:[secret]})
+    const encoded=JSON.stringify(secret).slice(1,-1)
+    for(const style of ['truncated','fenced','plain'])for(const protocol of Object.keys(paths))for(const stream of [false,true]){
+      const returned=await structuredWire(protocol,stream,secret,style)
+      for(const value of typeof returned==='string'?[returned]:[returned.delta,returned.done]){assert(!value.includes('{{A2A_'));assert(value.includes(encoded),'structured fallback did not JSON-escape '+protocol+' '+style)}
+    }
+  })
+  await reviewRegression('JSON output without this request tokens is byte exact',async()=>{
+    const secret='untouched-fixture';await savePrivacy({...disabled,terms:[secret]})
+    jsonReplyStyle='verbatim';const verbatim=structuredReply('ignored')
+    for(const protocol of Object.keys(paths))for(const stream of [false,true]){const returned=await structuredWire(protocol,stream,secret,'verbatim');for(const value of typeof returned==='string'?[returned]:[returned.delta,returned.done])assert.equal(value,verbatim,'untouched JSON was reformatted or lost precision')}
   })
   const beforeBlocks = seen.length
   const blocked = await call('/v1/images/generations', 'POST', { prompt: content })

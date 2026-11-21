@@ -54,9 +54,16 @@ impl Transform<'_> {
                     if s.is_empty() {
                         return Ok(());
                     }
-                    let mut decoded = serde_json::from_str::<Value>(s).map_err(|_| ())?;
+                    let Ok(mut decoded) = serde_json::from_str::<Value>(s) else {
+                        // A truncated or unsupported JSON-mode response still belongs
+                        // to the caller. Preserve it and escape any restored fragments.
+                        return restore.apply(s, true);
+                    };
+                    let original = decoded.clone();
                     restore_json(restore, &mut decoded)?;
-                    *s = serde_json::to_string(&decoded).map_err(|_| ())?;
+                    if original != decoded {
+                        *s = serde_json::to_string(&decoded).map_err(|_| ())?;
+                    }
                     Ok(())
                 });
             }
