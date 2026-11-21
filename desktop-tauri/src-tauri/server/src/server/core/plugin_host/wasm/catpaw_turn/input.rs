@@ -11,7 +11,6 @@ pub(super) const SOURCE: &str = "CatX";
 pub(super) const MODE: &str = "CATX_APP";
 pub(super) const PERMISSION: &str = "unsafeBypassPermissions";
 pub(super) const TOOL_VERSION: &str = "2.0.2";
-pub(super) const MAX_MESSAGES: usize = 512;
 const MAX_DIRECTIVES: usize = 2 * 1024 * 1024;
 
 pub(super) struct PreparedInput {
@@ -80,8 +79,9 @@ impl PreparedInput {
         tools(&constraints["tool_configs"], &constraints["tool_choice"])?;
         let message_count = params["message_count"]
             .as_u64()
-            .filter(|count| (1..=MAX_MESSAGES as u64).contains(count))
-            .ok_or_else(error::invalid)? as usize;
+            .and_then(|count| usize::try_from(count).ok())
+            .filter(|count| *count >= 1)
+            .ok_or_else(error::invalid)?;
         Ok(Self {
             constraints: json!({ "model_type": model, "model_name": name,
             "effort": effort, "context": context, "tool_configs": constraints["tool_configs"],

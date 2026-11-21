@@ -316,7 +316,7 @@ fn material(context: &Context, params: &Value, url: String) -> Result<Material, 
         .map_err(|_| invalid())?;
     let mut nodes = 0;
     shape(&value, 0, &mut nodes)?;
-    if value["stream"] != true || !value["messages"].as_array().is_some_and(|rows| !rows.is_empty() && rows.len() <= 512)
+    if value["stream"] != true || !value["messages"].as_array().is_some_and(|rows| !rows.is_empty())
         || !value["model"].as_str().is_some_and(|model| !model.trim().is_empty() && model.len() <= 1024 && !model.chars().any(char::is_control)) {
         return Err(invalid());
     }

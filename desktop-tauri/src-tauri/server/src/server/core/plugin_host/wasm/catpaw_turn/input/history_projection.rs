@@ -33,7 +33,7 @@ struct Message {
 }
 
 pub(super) fn project(raw: &[Value], prepared: &PreparedInput, ids: &Correlation) -> Result<Projection, proto::WireError> {
-    if raw.is_empty() || raw.len() > 512 || ids.messages.len() != prepared.message_count { return Err(mismatch()); }
+    if raw.is_empty() || ids.messages.len() != prepared.message_count { return Err(mismatch()); }
     let mut seen = BTreeSet::new();
     for id in &ids.messages {
         if !json_text::identifier(id, 256) || id == &ids.conversation || id == &ids.turn || id == &ids.response || !seen.insert(id) { return Err(mismatch()); }

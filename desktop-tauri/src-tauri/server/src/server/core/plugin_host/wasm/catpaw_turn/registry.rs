@@ -95,6 +95,10 @@ struct SettlementState {
 pub(super) fn prepare(registry: &Arc<Registry>, source: SourceRef, account: RowSource, params: Value) -> Result<Value, proto::WireError> {
     source::check(&source, &account)?;
     let mut prepared = PreparedInput::parse(&params, source.client_stream())?;
+    // 不再用固定条数上限拦截长对话，但关联 ID 数量不能超过已受体积/节点保护的原始消息数，避免按外部数字预分配内存。
+    if prepared.message_count > source.material().messages().len() {
+        return Err(error::invalid());
+    }
     let wants_tools = source.material().messages().iter().rev()
         .find(|message| !matches!(message["role"].as_str(), Some("system" | "developer")))
         .is_some_and(|message| message["role"] == "tool");

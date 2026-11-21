@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use agent2api_provider_protocol as proto;
 use serde_json::Value;
 
-use super::{error, json_text, tool_name, Correlation, PreparedInput, MAX_MESSAGES};
+use super::{error, json_text, tool_name, Correlation, PreparedInput};
 
 pub(super) fn check(
     value: &Value,
@@ -14,9 +14,7 @@ pub(super) fn check(
     let messages = value
         .as_array()
         .filter(|items| {
-            !items.is_empty()
-                && items.len() <= MAX_MESSAGES
-                && items.len() <= prepared.message_count
+            !items.is_empty() && items.len() <= prepared.message_count
         })
         .ok_or_else(error::invalid)?;
     let mut message_ids = BTreeSet::new();
