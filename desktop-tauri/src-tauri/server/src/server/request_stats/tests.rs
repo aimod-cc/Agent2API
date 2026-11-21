@@ -177,6 +177,7 @@ fn all_filters_compose_without_losing_the_new_fields() {
         status: Some("ok".into()),
         start: Some(now),
         end: Some(now + 5),
+        list_only: false,
     };
     let page = stats.query_requests(&query);
     assert_eq!(page["total"], 5);
