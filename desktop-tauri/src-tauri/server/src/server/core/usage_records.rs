@@ -188,6 +188,37 @@ pub fn balance_facts() -> HashMap<String, BalanceFact> {
 
 // ─── 写 ──────────────────────────────────────────────────────
 
+/// 上游明确说「余额/积分不足」时，把账号余额读数**按 0 落一次**。
+///
+/// 为什么不信本地的余额查询：积分靠上游接口读，字段形状一变、或者把「钱包」
+/// 当成积分池，就会读出一个明显偏高的数字。限制器和低余额跳过都按这个数字
+/// 判断，于是账号一直显得「有钱」——每条请求都被派上去，再稳定吃一次 402
+/// `积分余额不足`。上游的 402 是比本地读数**更权威的事实**：这里把它直接落成
+/// 0，余额列跟着显示 0、低余额规则立刻拦下它，等下一次成功查询（或用户充值
+/// 后重新读到真余额）再自动恢复 —— 不需要人去手动改数。
+///
+/// 只覆盖余额（`totalLeft` / `available`），不动 `query_config` 与查询配置，
+/// 所以下一次查询照常进行，读数一旦对得上就把 0 顶掉。
+pub fn force_zero_balance(account_id: &str, reason: &str) {
+    if account_id.is_empty() { return; }
+    let current = load(account_id);
+    let unit = current.usage.as_ref().and_then(|usage| usage.get("unit")).and_then(Value::as_str)
+        .filter(|unit| !unit.is_empty()).unwrap_or("积分");
+    let usage = serde_json::json!({
+        "unit": unit,
+        "available": 0.0,
+        "remaining": 0.0,
+        "totalLeft": 0.0,
+        "note": reason,
+        "forcedZeroAt": logging::now_ms(),
+    });
+    let outcome = UsageOutcome { usage: Some(usage), error: None, code: None, diagnostics: None };
+    // 失败不当错误：写不进去只是这次没落上 0，冷却与熔断仍然照常生效。
+    if !write_result(account_id, &outcome, &current.query_config, "upstream-balance-zero") {
+        logging::verbose("[Usage]", &format!("账号 {account_id} 的余额按 0 落库失败（上游已报余额不足）"));
+    }
+}
+
 /// 记一笔「尝试开始」（心跳路径在**发请求之前**调用，见模块头）。
 /// 只推进时间戳，不动上一次的结果 —— 查询还没回来，旧读数仍是最新事实。
 pub fn mark_attempt(account_id: &str) {
