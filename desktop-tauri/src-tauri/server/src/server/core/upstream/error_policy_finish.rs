@@ -17,6 +17,10 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     if let Some(candidate) = target.attempt_key() {
         service.route.sticky_forget(conv_key, sticky_model, &candidate, sticky_generation);
     }
+    // 面包屑：这一行出现 ⇒ 统一错误规则确实跑到了；没出现 ⇒ 这个错误是某个
+    // 早退分支直接抛回下游的（那时明细里的 `errorPolicy` 会是 null）。
+    logging::stage(format!("错误结算 provider={} status={} 模型={}",
+        target.provider, error.status_code, target.account.as_ref().and_then(|a| a["routingModel"].as_str()).unwrap_or("-")));
     let model = error.routing_error.as_ref().map(|decision| decision.model.clone()).unwrap_or_else(|| {
         target.account.as_ref().map(|account| keys.for_account(account)).unwrap_or_else(|| keys.for_provider(&target.provider))
     });
@@ -24,6 +28,21 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     let decision = error.routing_error.clone().unwrap_or_else(|| error_policy::for_error_with(&ctx.error_policy, &target.provider, &model, error, false));
     error_policy::attach(error, &decision);
     error_policy::note(ctx.telemetry, &decision, None);
+    // ── 「为什么没有再往下换一个」必须留在控制台 ─────────────────────
+    // 以前这些理由只写进 `note_error_policy`（随 attempt 明细落库）。可一旦
+    // attempt 记录先被 `finish_last_attempt` 收尾，note 就无处可写 —— 库里的
+    // `errorPolicy` 成了 null，面板上只剩「上游 400」，看不出是「规则不让换」
+    // 还是「确实没有下一个」。实测 22:49 那条 400 就是这样：账号被铺了冷却
+    // （说明这里跑过了），但明细里 policy=null，谁也没法解释为什么停住。
+    let model_label = model.clone();
+    // 错误正文先取成字符串：闭包不能借用 `error`（后面还要改 `retry_after_secs`）。
+    let head = format!("HTTP {} {}", error.status_code, error.message);
+    let stop = |reason: &str| {
+        ctx.telemetry.note_error_policy(json!({ "reason": reason }));
+        logging::console_line("[Upstream]", &format!(
+            "未继续顺延（{head} · 模型 {model_label}）：{reason}"));
+        false
+    };
     // ── 「这家吃不下这份请求」要把整家铺上冷却，而不是只罚撞墙的那个账号 ──
     // provider_local 的 400（网页工具预算超限、该家不接受的参数）与账号无关：
     // 同一家的另一个账号拿到的是同一份 body、同一个预算，撞的是同一堵墙。只给
@@ -39,7 +58,12 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             error_policy::remember_cooldown(service, settings, id, &model, error, &decision);
         }
     }
-    if decision.hard_stop || ctx.telemetry.replay_guard().blocked() || ctx.telemetry.is_cancelled() || ctx.telemetry.response_started() { return false; }
+    if decision.hard_stop {
+        return stop(&format!("规则「{}」判定为硬终止，不再换对象", decision.rule.name));
+    }
+    if ctx.telemetry.replay_guard().blocked() || ctx.telemetry.is_cancelled() || ctx.telemetry.response_started() {
+        return stop("回放拦截 / 已取消 / 响应已开始下发");
+    }
     if let Some(account) = target.account_id.as_deref() {
         if let Some(entry) = error_policy::remember_cooldown(service, settings, account, &model, error, &decision) {
             let reset = entry["resetAt"].as_i64().unwrap_or(0);
@@ -86,7 +110,9 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             ctx.telemetry.note_error_policy(json!({ "reason": "该账号需要重新登录" }));
         }
     }
-    if !decision.switches() { return false; }
+    if !decision.switches() {
+        return stop(&format!("规则「{}」的动作是「直接返回错误」，不换对象", decision.rule.name));
+    }
     if decision.scope == crate::server::config::error_policy::CooldownScope::Account {
         if let Some(id) = target.account_id.as_deref() {
             for candidate in rotate::scoped_accounts(service, providers, keys.request_model(), ctx.pinned_account, Some(&ctx.routing)) {
@@ -99,21 +125,24 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     }
     if let Some(account) = target.account_id.as_deref() {
         if !rotate::allows_route_skip(service, account) {
-            ctx.telemetry.note_error_policy(json!({ "reason": "当前账号已关闭失败换号" })); return false;
+            return stop("该账号在设置里关了「失败换号」");
         }
     }
     if ctx.pinned_account.is_some() || ctx.routing.requires_account() {
-        ctx.telemetry.note_error_policy(json!({ "reason": "本次请求明确指定账号，未更换指定对象" })); return false;
+        return stop("本次请求明确指定账号，不允许换对象");
     }
     if decision.skips_provider() {
         error_policy::exclude_provider(service, providers, keys.request_model(), &target.provider, tried, ctx.pinned_account, &ctx.routing);
     }
     if let Some(id) = target.attempt_key() { tried.retain(|other| other != &id); tried.push(id); }
     let Some(next) = rotate::pick_next_account(service, providers, keys, tried, ctx.pinned_account, &ctx.routing) else {
-        ctx.telemetry.note_error_policy(json!({ "reason": "当前路由没有其他可用对象" })); return false;
+        // 这一句是「池子里到底还有没有下一个」的唯一权威答案：`plan_route`
+        // 只记录候选，能不能真的拿出一个对象由这次查找决定。
+        return stop(&format!(
+            "本队列已没有下一个可发对象（本轮已试 {} 个）", tried.len()));
     };
     if !super::provider_loop::take_switch(switches_left, switch_total) {
-        ctx.telemetry.note_error_policy(json!({ "reason": "换账号次数已用尽，未继续发送" })); return false;
+        return stop(&format!("换号次数已用尽（上限 {switch_total}）"));
     }
     logging::console_line("[Upstream]", &format!("统一错误规则「{}」：HTTP {}，顺延到 {}（换号 {}/{}）",
         decision.rule.name, error.status_code, super::account_display(&next), switch_total - *switches_left, switch_total));
