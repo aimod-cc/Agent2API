@@ -55,7 +55,13 @@ pub(crate) fn decide_with(snapshot: &config::ErrorPolicySnapshot, provider: &str
     status: u16, body: &Value, local: bool, explicit_stop: bool) -> ErrorDecision {
     let settings = &snapshot.settings;
     let code = evidence::machine_code(body);
-    let kind = evidence::kind(provider, class, status, &code);
+    let mut kind = evidence::kind(provider, class, status, &code);
+    // 429/402 里包着的「积分/余额/套餐」按文案还原（见 `evidence::resource_kind`）：
+    // 这类是账号级资源耗尽，方向是「排掉这个账号、换下一家」，而不是「等一会儿
+    // 在同一账号重试」。不还原的话，路由组会拿同一个账号换着成员模型再撞一次。
+    if matches!(kind, ErrorKind::RateLimit | ErrorKind::Quota | ErrorKind::Balance | ErrorKind::Unknown) {
+        if let Some(actual) = evidence::resource_kind(body.get("message").and_then(Value::as_str).unwrap_or("")) { kind = actual; }
+    }
     let mut rule = settings.resolve(kind, status, &code, provider, model).clone();
     let upstream_scope = evidence::scope(body);
     let mut scope = match (rule.scope, upstream_scope) {
@@ -96,6 +102,13 @@ pub(crate) fn decide_with(snapshot: &config::ErrorPolicySnapshot, provider: &str
         if action == ErrorAction::SwitchProvider { action = ErrorAction::SwitchAccount; }
     } else if kind == ErrorKind::Unsupported && rule.scope == CooldownScope::Auto { scope = CooldownScope::Provider; }
     if matches!(kind, ErrorKind::Auth | ErrorKind::Balance) && rule.scope == CooldownScope::Auto && scope != CooldownScope::Provider {
+        scope = CooldownScope::Account;
+    }
+    // 限流 / 额度 / 余额消耗的是**账号**的池子，不是某个模型的独立额度：冷却和
+    // 本次请求的排除都按账号维度走。上游若声成整家共享（Provider）则保留，
+    // 其余（含上游写 `scope: model` 的）一律升到账号级 —— 否则同一个账号会
+    // 被路由组的不同成员模型各撞一次，日志里就是「连着两个 429 没换模型」。
+    if matches!(kind, ErrorKind::RateLimit | ErrorKind::Quota) && scope != CooldownScope::Provider && !account_model {
         scope = CooldownScope::Account;
     }
     if kind != ErrorKind::Auth && action == ErrorAction::RefreshThenSwitch { action = ErrorAction::ReturnError; }
@@ -293,6 +306,42 @@ mod tests {
             &fatal(400, "网页工具请求超过 16000 字符预算"), 400, &serde_json::json!({}), true, false);
         assert_eq!(decision.action, ErrorAction::SwitchProvider);
         assert!(decision.skips_provider());
+    }
+
+    /// 429 里包着的「积分余额不足」（聚合上游常把它套在 429 上）是账号级资源
+    /// 耗尽：按账号冷却，本次请求把这个账号的其余候选一起排掉 —— 否则路由组会
+    /// 拿同一个账号换着成员模型再撞一次，日志里就是连着两条 429。
+    #[test]
+    fn balance_wrapped_in_429_cools_account() {
+        let decision = decide(429, serde_json::json!({ "message": "上游返回 429: 上游返回 402: 积分余额不足，请获取积分后再试" }));
+        assert_eq!(decision.kind, ErrorKind::Balance);
+        assert_eq!(decision.action, ErrorAction::SwitchAccount);
+        assert_eq!(decision.scope, CooldownScope::Account, "账号级资源耗尽要按账号冷却");
+        assert!(decision.switches() && decision.cooldown());
+    }
+
+    /// 「套餐池没有有效套餐」同理：账号级额度，不是某一个模型的额度。
+    #[test]
+    fn subscription_quota_cools_account() {
+        let decision = decide(429, serde_json::json!({ "message": "ZCode 套餐池当前没有有效套餐（1005）" }));
+        assert_eq!(decision.kind, ErrorKind::Quota);
+        assert_eq!(decision.scope, CooldownScope::Account);
+        assert!(decision.cooldown());
+    }
+
+    /// 真正的频率限制也按账号冷却（限流消耗的是账号的池子）。
+    #[test]
+    fn rate_limit_cools_account() {
+        let decision = decide(429, serde_json::json!({ "message": "too many requests, rate limit exceeded" }));
+        assert_eq!(decision.kind, ErrorKind::RateLimit);
+        assert_eq!(decision.scope, CooldownScope::Account);
+    }
+
+    /// 但上游明确声明整家共享冷却时保留 Provider，不缩到账号级。
+    #[test]
+    fn provider_scope_is_preserved_for_rate_limit() {
+        let decision = decide(429, serde_json::json!({ "message": "rate limit exceeded", "credentialScope": "provider" }));
+        assert_eq!(decision.scope, CooldownScope::Provider);
     }
 
     /// 没有拿到上游响应（status 0）是链路问题：换账号解决不了，保持收尾。
