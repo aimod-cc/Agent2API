@@ -887,8 +887,20 @@ async fn attempt_queue(
                 Err(error) => {
                     if ctx.telemetry.replay_guard().blocked() { return Err(error); }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
-                    if matches!(error.code.as_deref(), Some("plugin_busy" | "gateway_busy" | "account_busy" | "plugin_resource_limit"
-                        | "plugin_protocol_error" | "plugin_trap" | "plugin_response_started")) { return Err(error); }
+                    // ── 这一支以前「忙 / 插件协议错 / 插件崩了」一律直接抛回下游 ──
+                    // 现在只有「响应字节已经在往客户端写」（`plugin_response_started`）
+                    // 例外。实测（2026-11-21 21:34，`pro` 组）：WorkBuddy 回 400
+                    // 「Illegal API invocation from an unapproved channel」，走的就是
+                    // 这张名单 → 直接 `return Err`，明细里那一轮的 `errorPolicy` 是
+                    // null（统一错误规则压根没跑）。结果请求在 4 次尝试后断在这家，
+                    // 下游拿到 400 —— 而同一时刻 autoclaw / codearts / quwork 都能答
+                    // （紧随其后的那条请求就是 quwork 200 的）。
+                    //
+                    // 忙（`plugin_busy` / `gateway_busy` / `account_busy`）、资源满
+                    // （`plugin_resource_limit`）、插件协议错 / 插件崩了（`plugin_trap`）
+                    // 都属于「换一个候选仍可能有救」，交给下面的统一规则顺延：
+                    // 顺延的前提是没救，而这几种恰恰是「这次没发成」而不是「这条请求死了」。
+                    if error.code.as_deref() == Some("plugin_response_started") { return Err(error); }
                     let account_unavailable = matches!(error.code.as_deref(),
                         Some("account_model_unavailable" | "account_model_permissions_unknown"));
                     if ctx.images.is_some() && !account_unavailable { return Err(error); }

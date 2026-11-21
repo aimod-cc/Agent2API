@@ -137,18 +137,27 @@ pub(in crate::server::core::upstream) fn gateway_class(error: &GatewayError) -> 
 /// ── 为什么 403 / 权限类不再在这里 ─────────────────────────
 /// 上游 403（账号被风控、凭证对该模型无权、订阅级禁止）是**账号级**结论：
 /// 换下一个账号或另一家仍可能成功，属于「应该顺延」而不是「整条请求没救」。
-/// #644 之后它们走默认的换号规则（并落账号级冷却/熔断）。这里只保留
-/// 「再发一次可能造成重复执行/重复计费/状态错乱」与「用户已取消」两类。
+/// #644 之后它们走默认的换号规则（并落账号级冷却/熔断）。
+///
+/// ── 为什么「忙 / 插件协议错 / 插件崩了 / 原生助手不可用」也不再在这里
+///    （2026-11-21 再收窄）────────────────────────────────────
+/// 它们的共同点是「这一次没发出去，或者这次失败与账号无关」——
+/// 而这两点恰恰是**换一个候选仍然有救**，不是「这条请求到此为止」。
+/// 实测：一条 `pro` 组请求在 WorkBuddy 回 400「Illegal API invocation from an
+/// unapproved channel」后**没有任何换号动作**（明细里那一轮的 `errorPolicy` 是
+/// null，统一规则压根没跑），下游拿到 400；同一时刻 autoclaw / codearts / quwork
+/// 都还能答。旧列表把 `plugin_protocol_error` / `plugin_trap` / `*_busy` /
+/// `runtime_upstream_error` 全归成硬终止，等于「插件一抖，整条请求就死」。
+///
+/// 现在只保留「再发一次可能造成重复执行 / 重复计费 / 状态错乱」与「用户已取消」
+/// 两类 —— 这是唯一不能靠换候选解决的失败形态。
 pub(super) fn hard_stop(status: u16, code: &str) -> bool {
     matches!(status, 409 | 428 | 499)
-        || code.ends_with("cleanup_unconfirmed") || code.starts_with("claude_session_")
+        || code.ends_with("cleanup_unconfirmed")
+        || code.contains("unconfirmed")
+        || code.starts_with("claude_session_")
         || matches!(code, "validation_required"
-            | "tabbit_submission_unconfirmed" | "tabbit_account_changed" | "tabbit_state_conflict"
-            | "claude_response_started" | "account_origin_authorization_required"
-            | "plugin_busy" | "gateway_busy" | "account_busy" | "plugin_response_started" | "plugin_resource_limit"
-            | "plugin_protocol_error" | "plugin_trap" | "native_helper_not_authorized" | "native_helper_unavailable"
-            | "request_replay_blocked" | "gateway_capability_missing" | "aborted" | "cancelled"
-            | "upstream_submission_unconfirmed" | "runtime_invalid_error_metadata" | "runtime_protocol_error" | "runtime_stream_interrupted"
-            | "runtime_classification_unavailable" | "runtime_transport_unavailable" | "network_cleanup_unconfirmed"
-            | "runtime_upstream_error" | "builtin_runtime_error" | "runtime_sdk_content")
+            // 响应字节已经在往客户端写：此刻换号只会让下游收到半条流 + 另一家的续文
+            | "claude_response_started" | "plugin_response_started" | "runtime_stream_interrupted"
+            | "request_replay_blocked" | "aborted" | "cancelled")
 }

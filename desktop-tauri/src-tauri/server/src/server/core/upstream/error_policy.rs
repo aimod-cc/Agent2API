@@ -153,14 +153,19 @@ pub(super) fn classified_error(class: &UpstreamErrorClass, body: &Value) -> Gate
     error
 }
 
-/// 插件报的 `stop` 是否等于「整条请求到此为止」。
+/// 插件报的 `stop` 是否等于「这家别再原样发」。
 ///
-/// ── `stop` 不再顺手掐掉换号（#644）───────────────────────
-/// 插件声明 `stop` 的本义是「这份 body 不要再原地重发」，不是「换一个候选
-/// 也没救」。把它当成硬终止的后果是：账号级失败（被封、限额、WAF）静默收尾，
-/// 队列里明明还有健康账号却一个都不试。现在只有两种情况算硬终止：
-/// `stop_switching`（插件明确要求不要换号，例如提交状态不确定）与
-/// [`evidence::hard_stop`] 的证据类判据（重复执行 / 重复计费 / 已取消）。
+/// ── `stop` 不等于「整条请求到此为止」（#644，2026-11-21 再收窄一次）──
+/// 插件声明 `stop` 的本义是「这份 body 不要再往这家重发」。曾经的实现把它当成
+/// 硬终止：账号级失败（被封、限额、WAF、渠道未授权）静默收尾，队列里明明还有
+/// 健康账号与别的提供商却一个都不试。实测 21:34 一条 `pro` 组请求就是被
+/// WorkBuddy 的 400「unapproved channel」+ `stop_switching` 掐断的，下游拿到
+/// 400，而同一时刻另外几家都能答。
+///
+/// 现在调用方（`error_policy_send`）把这里的返回值解释成 **跳过这一家**
+/// （`SwitchProvider`），只有 `evidence::hard_stop` 那类证据判据（重复执行 /
+/// 重复计费 / 已取消）才算真正的硬终止 —— 它由 [`decide_with`] 自己按证据
+/// 打开，与本函数的返回值无关。
 ///
 /// `suspend_account` 不进这里 —— 停用当前账号之后，正该换下一个账号继续。
 pub(super) fn plugin_stops(_provider: &str, policy: &crate::server::core::providers::policy::ErrorPolicy,
