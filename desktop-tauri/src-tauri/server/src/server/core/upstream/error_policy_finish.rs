@@ -49,6 +49,16 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
         if matches!(decision.kind, ErrorKind::RateLimit | ErrorKind::Quota) && settings.sink && ctx.pinned_account.is_none() {
             service.route.sink_mark_for(account, logging::now_ms(), settings.sink_seconds);
         }
+        // ── 上游说「余额/积分不足」→ 把本地余额读数按 0 落一次 ──────────
+        // 余额是查上游接口读回来的，字段形状一变就会读出一个明显偏高的数字；
+        // 限制器与低余额跳过都按这个数字判断，于是账号一直显得「有钱」，每条
+        // 请求都被派上去再吃一次 402「积分余额不足」。上游的 402 比本地读数更
+        // 权威：这里直接落 0，余额列显示 0、低余额规则立刻拦下它，充值后下一
+        // 次成功查询会自己把 0 顶掉。
+        if decision.kind == ErrorKind::Balance {
+            crate::server::core::usage_records::force_zero_balance(
+                account, "上游报余额不足，余额读数已按 0 处理；充值后自动恢复");
+        }
         if decision.kind == ErrorKind::Transient && decision.rule.cooldown == crate::server::config::error_policy::CooldownMode::Protection
             && settings.backoff {
             service.route.backoff_mark_for(account, logging::now_ms(), settings.backoff_seconds, settings.backoff_cap_seconds);
