@@ -103,6 +103,26 @@ async fn signed_anthropic_stream_is_byte_exact_at_every_split() {
 }
 
 #[tokio::test]
+async fn lone_cr_survives_transport_splits_and_model_rewriting() {
+    let text = anthropic().replace('\n', "\r");
+    for size in [1, 2, 7, 113] {
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let output = drain(stream_with(
+            source(chunks(&text, size)),
+            WireProtocol::Anthropic,
+            "alias",
+            telemetry.clone(),
+        ))
+        .await;
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("sig+/=="));
+        assert!(output.contains("opaque+/=="));
+        assert!(output.contains("\"model\":\"alias\""));
+        assert_eq!(telemetry.snapshot().total_tokens, 68);
+        assert!(telemetry.snapshot().error.is_none());
+    }
+}
+#[tokio::test]
 async fn unicode_and_crlf_survive_one_byte_chunks_and_model_aliasing() {
     let text = anthropic().replace('\n', "\r\n");
     let telemetry = Arc::new(RequestTelemetry::new());

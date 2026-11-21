@@ -1,5 +1,5 @@
 //! 协议字段白名单：层级明确，避免遍历 ID、签名、附件、认证或任意 metadata。
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{is_secret_field, Mask, Restore};
 
@@ -45,10 +45,37 @@ impl Transform<'_> {
         })
     }
 
+    // Only assistant output follows the declared structured-output format;
+    // descriptions, reasoning and refusal strings remain ordinary text.
+    fn output_text(&mut self, value: Option<&mut Value>) -> Result {
+        if let Self::Restore(restore) = self {
+            if restore.json_output() {
+                return text(value, |s| {
+                    if s.is_empty() {
+                        return Ok(());
+                    }
+                    let mut decoded = serde_json::from_str::<Value>(s).map_err(|_| ())?;
+                    restore_json(restore, &mut decoded)?;
+                    *s = serde_json::to_string(&decoded).map_err(|_| ())?;
+                    Ok(())
+                });
+            }
+        }
+        self.text(value)
+    }
+
+    fn output_content(&mut self, value: Option<&mut Value>) -> Result {
+        match value {
+            Some(value @ Value::String(_)) => self.output_text(Some(value)),
+            Some(Value::Array(blocks)) => blocks.iter_mut().try_for_each(|block| self.block(block)),
+            _ => Ok(()),
+        }
+    }
+
     fn arguments(&mut self, value: Option<&mut Value>) -> Result {
         let Some(value) = value else { return Ok(()) };
         if let Value::String(s) = value {
-            if let Ok(mut decoded @ (Value::Object(_) | Value::Array(_))) =
+            if let Ok(mut decoded @ (Value::Object(_) | Value::Array(_) | Value::String(_))) =
                 serde_json::from_str::<Value>(s)
             {
                 let original = decoded.clone();
@@ -111,11 +138,13 @@ impl Transform<'_> {
 
     fn block(&mut self, block: &mut Value) -> Result {
         match kind(block) {
-            "text" | "input_text" | "output_text" => self.text(block.get_mut("text")),
+            "text" | "output_text" => self.output_text(block.get_mut("text")),
+            "input_text" => self.text(block.get_mut("text")),
             "refusal" => self.text(block.get_mut("refusal")),
             "tool_use" | "server_tool_use" | "mcp_tool_use" => {
                 self.arguments(block.get_mut("input"))
             }
+            "mcp_approval_request" => self.arguments(block.get_mut("arguments")),
             "tool_result" | "mcp_tool_result" => self.result_content(block.get_mut("content")),
             "function_call" | "mcp_call" => self.arguments(block.get_mut("arguments")),
             "custom_tool_call" => self.text(block.get_mut("input")),
@@ -142,7 +171,7 @@ impl Transform<'_> {
         ) {
             self.result_content(message.get_mut("content"))?;
         } else {
-            self.content(message.get_mut("content"))?;
+            self.output_content(message.get_mut("content"))?;
         }
         self.text(message.get_mut("refusal"))?;
         self.text(message.get_mut("reasoning_content"))?;
@@ -213,7 +242,45 @@ impl Transform<'_> {
     }
 }
 
+fn restore_json(restore: &mut Restore, value: &mut Value) -> Result {
+    match value {
+        Value::String(text) => restore.apply(text, false),
+        Value::Array(items) => items
+            .iter_mut()
+            .try_for_each(|item| restore_json(restore, item)),
+        Value::Object(fields) => {
+            let old = std::mem::take(fields);
+            let mut restored = Map::new();
+            for (mut key, mut item) in old {
+                restore.apply(&mut key, false)?;
+                restore_json(restore, &mut item)?;
+                if restored.insert(key, item).is_some() {
+                    return Err(());
+                }
+            }
+            *fields = restored;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
 pub(crate) fn request(format: Format, payload: &mut Value, mask: &mut Mask) -> Result {
+    // Capture the client mode once. Later protocol translation or continuation
+    // may omit it but must not change how the public response is restored.
+    mask.json_output.get_or_insert_with(|| match format {
+        Format::Chat => payload
+            .pointer("/response_format/type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "json_object" || kind == "json_schema"),
+        Format::Responses => payload
+            .pointer("/text/format/type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "json_object" || kind == "json_schema"),
+        Format::Messages => payload
+            .pointer("/output_config/format/type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "json_schema"),
+    });
     let mut transform = Transform::Mask(mask);
     match format {
         Format::Chat | Format::Messages => {
@@ -271,9 +338,9 @@ pub(crate) fn response(format: Format, payload: &mut Value, restore: &mut Restor
                 }
             }
             match kind(payload) {
-                "response.output_text.done" => transform.text(payload.get_mut("text")),
+                "response.output_text.done" => transform.output_text(payload.get_mut("text")),
                 "response.refusal.done" => transform.text(payload.get_mut("refusal")),
-                "response.function_call_arguments.done" => {
+                "response.function_call_arguments.done" | "response.mcp_call_arguments.done" => {
                     transform.arguments(payload.get_mut("arguments"))
                 }
                 "response.custom_tool_call_input.done" => transform.text(payload.get_mut("input")),
@@ -296,7 +363,7 @@ fn index(value: &Value, field: &str, fallback: u64) -> u64 {
     value.get(field).and_then(Value::as_u64).unwrap_or(fallback)
 }
 
-pub(super) fn deltas(format: Format, event: &Value) -> Vec<Delta> {
+pub(super) fn deltas(format: Format, event: &Value, json_output: bool) -> Vec<Delta> {
     let mut result = Vec::new();
     let mut add = |track: Track, path: String, json: bool| {
         if event.pointer(&path).is_some_and(Value::is_string) {
@@ -310,7 +377,11 @@ pub(super) fn deltas(format: Format, event: &Value) -> Vec<Delta> {
                     let n = index(choice, "index", i as u64);
                     let path = format!("/choices/{i}/delta");
                     for field in ["content", "refusal", "reasoning_content"] {
-                        add(Track(n, 0, field), format!("{path}/{field}"), false);
+                        add(
+                            Track(n, 0, field),
+                            format!("{path}/{field}"),
+                            field == "content" && json_output,
+                        );
                     }
                     add(
                         Track(n, 0, "legacy_arguments"),
@@ -338,7 +409,7 @@ pub(super) fn deltas(format: Format, event: &Value) -> Vec<Delta> {
         Format::Messages if kind(event) == "content_block_delta" => {
             let n = index(event, "index", 0);
             match event.pointer("/delta/type").and_then(Value::as_str) {
-                Some("text_delta") => add(Track(n, 0, "text"), "/delta/text".into(), false),
+                Some("text_delta") => add(Track(n, 0, "text"), "/delta/text".into(), json_output),
                 Some("input_json_delta") => {
                     add(Track(n, 0, "arguments"), "/delta/partial_json".into(), true)
                 }
@@ -349,10 +420,15 @@ pub(super) fn deltas(format: Format, event: &Value) -> Vec<Delta> {
             let n = index(event, "output_index", 0);
             let c = index(event, "content_index", 0);
             match kind(event) {
-                "response.output_text.delta" => add(Track(n, c, "text"), "/delta".into(), false),
+                "response.output_text.delta" => {
+                    add(Track(n, c, "text"), "/delta".into(), json_output)
+                }
                 "response.refusal.delta" => add(Track(n, c, "refusal"), "/delta".into(), false),
                 "response.function_call_arguments.delta" => {
                     add(Track(n, c, "arguments"), "/delta".into(), true)
+                }
+                "response.mcp_call_arguments.delta" => {
+                    add(Track(n, c, "mcp_arguments"), "/delta".into(), true)
                 }
                 "response.custom_tool_call_input.delta" => {
                     add(Track(n, c, "custom"), "/delta".into(), false)

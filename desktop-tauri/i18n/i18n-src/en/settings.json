@@ -1,4 +1,6 @@
 {
+  "刷新将丢弃尚未保存的本地隐私脱敏修改，是否继续？": "Refreshing will discard your unsaved local privacy masking changes. Continue?",
+  "本地隐私脱敏设置已在其他位置修改，请刷新后再保存；当前草稿未丢失": "Local privacy masking settings changed elsewhere. Refresh before saving again; your draft has been kept.",
   "自定义脱敏规则必须是 JSON 数组": "Custom masking rules must be a JSON array",
   "美国社会安全号码（SSN）": "US Social Security number (SSN)",
   "护照号": "Passport number",
@@ -10,7 +12,7 @@
   "登录用户名和主机名": "Login username and hostname",
   "公网 IP": "Public IP address",
   "云存储桶": "Cloud storage bucket",
-  "遮盖邮箱、手机号、身份证号和银行卡号": "Mask email, mobile, national ID and bank card numbers",
+  "遮盖邮箱、中国大陆手机号、身份证号和银行卡号": "Mask email, mainland China mobile numbers, national ID and bank card numbers",
   "附加个人信息分类": "Additional personal-data categories",
   "自定义脱敏词（每行一个）": "Custom masking terms (one per line)",
   "高级脱敏规则": "Advanced masking rules",

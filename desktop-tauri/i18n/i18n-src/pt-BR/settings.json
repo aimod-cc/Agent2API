@@ -1,4 +1,6 @@
 {
+  "刷新将丢弃尚未保存的本地隐私脱敏修改，是否继续？": "Atualizar descartará as alterações de privacidade local não salvas. Continuar?",
+  "本地隐私脱敏设置已在其他位置修改，请刷新后再保存；当前草稿未丢失": "As configurações de privacidade local foram alteradas em outro lugar. Atualize antes de salvar novamente; o rascunho foi mantido.",
   "自定义脱敏规则必须是 JSON 数组": "As regras personalizadas devem ser um array JSON",
   "美国社会安全号码（SSN）": "Número de seguridade social dos EUA (SSN)",
   "护照号": "Número do passaporte",
@@ -10,7 +12,7 @@
   "登录用户名和主机名": "Usuário de login e nome do host",
   "公网 IP": "Endereço IP público",
   "云存储桶": "Bucket de armazenamento em nuvem",
-  "遮盖邮箱、手机号、身份证号和银行卡号": "Mascarar e-mail, celular, documento de identidade e números de cartões bancários",
+  "遮盖邮箱、中国大陆手机号、身份证号和银行卡号": "Mascarar e-mail, celulares da China continental, documento de identidade e números de cartões bancários",
   "附加个人信息分类": "Categorias adicionais de dados pessoais",
   "自定义脱敏词（每行一个）": "Termos personalizados (um por linha)",
   "高级脱敏规则": "Regras avançadas de mascaramento",

@@ -148,6 +148,7 @@ pub(crate) struct Mask {
     by_value: HashMap<String, String>,
     by_token: HashMap<String, String>,
     mapped_bytes: usize,
+    json_output: Option<bool>,
 }
 
 impl Mask {
@@ -157,6 +158,7 @@ impl Mask {
             by_value: HashMap::new(),
             by_token: HashMap::new(),
             mapped_bytes: 0,
+            json_output: None,
         }
     }
 
@@ -209,7 +211,7 @@ impl Mask {
         let mut ranges = Vec::new();
         let mut collect = |items: &mut dyn Iterator<Item = (usize, usize)>| {
             for pair in items {
-                if owned(pair) {
+                if pair.0 >= pair.1 || owned(pair) {
                     continue;
                 }
                 if ranges.len() >= MAX_MATCHES {
@@ -225,7 +227,7 @@ impl Mask {
         }
         let literal_count = ranges.len();
         let mut record = |pair: (usize, usize)| {
-            if owned(pair) {
+            if pair.0 >= pair.1 || owned(pair) {
                 return Ok(());
             }
             if ranges.len() >= MAX_MATCHES {
@@ -249,7 +251,6 @@ impl Mask {
                     for m in re
                         .captures_iter(text)
                         .filter_map(|m| m.get(if m.len() > 1 { 1 } else { 0 }))
-                        .filter(|m| m.len() >= 4)
                     {
                         record((m.start(), m.end()))?;
                     }
@@ -358,6 +359,13 @@ pub(crate) struct Restore {
 }
 
 impl Restore {
+    pub(super) fn json_output(&self) -> bool {
+        self.request
+            .0
+            .lock()
+            .is_ok_and(|mask| mask.json_output.unwrap_or(false))
+    }
+
     /// Only wait for a prefix of a token actually emitted for this HTTP request.
     pub(super) fn partial_len(&self, text: &str) -> usize {
         let Ok(mask) = self.request.0.lock() else {
@@ -413,6 +421,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn whole_word_mode_also_bounds_date_variants() {
+        let rules = Rules::compile(Settings {
+            terms: vec!["1990-05-20".into()],
+            terms_whole: true,
+            ..Settings::default()
+        })
+        .unwrap();
+        let mut mask = Mask::new(&rules);
+        let original = "item1990-05-20draft | 1990-05-20";
+        let mut payload = serde_json::json!({"messages":[{"role":"user","content":original}]});
+        wire::request(wire::Format::Chat, &mut payload, &mut mask).unwrap();
+        let redacted = payload
+            .pointer("/messages/0/content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(redacted.starts_with("item1990-05-20draft | "));
+        assert_eq!(PLACEHOLDER.find_iter(redacted).count(), 1);
+        let mut restored = redacted.to_owned();
+        mask.into_restore()
+            .unwrap()
+            .apply(&mut restored, false)
+            .unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn structured_json_output_restores_quotes_as_json_values() {
+        let secret = "A\"B";
+        let rules = Rules::compile(Settings {
+            terms: vec![secret.into()],
+            ..Settings::default()
+        })
+        .unwrap();
+        let mut mask = Mask::new(&rules);
+        let mut request = serde_json::json!({"model":"fixture","response_format":{"type":"json_object"},"messages":[{"role":"user","content":secret}]});
+        wire::request(wire::Format::Chat, &mut request, &mut mask).unwrap();
+        let mut translated = serde_json::json!({"input":[]});
+        wire::request(wire::Format::Responses, &mut translated, &mut mask).unwrap();
+        let token = request
+            .pointer("/messages/0/content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        let mut response = serde_json::json!({"choices":[{"message":{"role":"assistant","content":format!("{{\"name\":{}}}", serde_json::to_string(token).unwrap()),"reasoning_content":format!("reasoning {token}")}}]});
+        let mut restore = mask.into_restore().unwrap();
+        wire::response(wire::Format::Chat, &mut response, &mut restore).unwrap();
+        let text = response
+            .pointer("/choices/0/message/content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(json["name"], secret);
+        assert_eq!(
+            response["choices"][0]["message"]["reasoning_content"],
+            format!("reasoning {secret}")
+        );
+    }
+
+    #[test]
     fn categories_overlap_reuse_and_cross_request_isolation() {
         let rules = Rules::compile(Settings {
             secrets: true,
@@ -421,19 +487,32 @@ mod tests {
             ..Settings::default()
         })
         .unwrap();
-        let input = "nightjar fixture@orchid.internal +86 13800138000 DB_PASSWORD=Example1234 sk-fixtureA1234567890ZZYX";
+        let email = "alice@mailprobe.internal";
+        let phone = "+8613900009931";
+        let password = "Example1234";
+        let key = concat!("sk-", "lp-example", "ABC123def456GHI789");
+        let input = format!("nightjar {email} {phone} DB_PASSWORD={password} {key} lp-example");
         let mut mask = Mask::new(&rules);
-        let mut redacted = input.to_owned();
+        let mut redacted = input.clone();
         mask.apply(&mut redacted, false).unwrap();
-        assert_eq!(PLACEHOLDER.find_iter(&redacted).count(), 5);
-        for term in [
-            "nightjar",
-            "example@example.test",
-            "13800138000",
-            "DB_PASSWORD=example",
-            "sk-example",
-        ] {
-            assert!(!redacted.contains(term));
+        let tokens = PLACEHOLDER
+            .find_iter(&redacted)
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tokens.len(), 6);
+        for expected in ["nightjar", email, phone, password, key, "lp-example"] {
+            assert!(
+                !redacted.contains(expected),
+                "expected range remained: {expected}"
+            );
+            assert!(
+                input.contains(expected),
+                "fixture omitted expected range: {expected}"
+            );
+            assert!(
+                mask.by_value.contains_key(expected),
+                "range had no mapping: {expected}"
+            );
         }
         let mut repeated = input.to_owned();
         mask.apply(&mut repeated, false).unwrap();

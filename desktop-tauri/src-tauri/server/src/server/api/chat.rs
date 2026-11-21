@@ -134,13 +134,30 @@ pub async fn chat_completions(
     // 下游等级与下游模型名同一时机采集（payload 被就地改写前；改写只动 model，
     // 两边前后一致，见 client_reasoning_of 的说明）
     let client_reasoning = pipeline::client_reasoning_of(&payload);
-    let compact_client = compact_routing::client_for_request(&request_source.behavior_client, &payload, RequestFormat::Chat);
-    // 标题请求只在不命中压缩时判：两者都是「把这条请求换成便宜模型」，同时命中会互相覆盖。
+    let (compact_client, title_client) = if let Some(Extension(context)) = privacy.as_ref() {
+        (context.compact_client, context.title_client)
+    } else {
+        let compact = compact_routing::client_for_request(
+            &request_source.behavior_client,
+            &payload,
+            RequestFormat::Chat,
+        );
+        let title = if compact.is_none() {
+            title_routing::client_for_request(
+                &request_source.behavior_client,
+                &headers,
+                &payload,
+                false,
+            )
+        } else {
+            None
+        };
+        (compact, title)
+    };
     let special = if compact_client.is_some() {
         super::request_prepare::SpecialRoute::compact(compact_client)
     } else {
-        super::request_prepare::SpecialRoute::title(title_routing::client_for_request(
-            &request_source.behavior_client, &headers, &payload, false))
+        super::request_prepare::SpecialRoute::title(title_client)
     };
     let requested_model = match super::request_prepare::resolve_client_model(&state, &mut payload, scope.as_ref(), special).await {
         Ok(model) => model,

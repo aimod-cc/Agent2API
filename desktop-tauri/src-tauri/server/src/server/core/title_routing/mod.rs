@@ -168,6 +168,13 @@ pub fn client_for_request(
     body: &Value,
     responses: bool,
 ) -> Option<&'static str> {
+    // Behavioral classification uses display names, while stored route clients use IDs.
+    let client = match client {
+        "Claude Code" => CLIENT_CLAUDE_CODE,
+        "Codex" => CLIENT_CODEX,
+        "ZCode" => CLIENT_ZCODE,
+        other => other,
+    };
     let settings = title_routes::active()?;
     // 这家客户端得有一条真会命中的规则（自己开着、勾了它、配了模型）才值得往下判 ——
     // 提示词判据要遍历消息结构，不便宜。

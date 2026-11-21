@@ -22,6 +22,7 @@ let foreign = ''
 let echoPrompt = false
 let echoToolResult = false
 let compactBudgetReply = false
+let reviewMode = ''
 const toolHistoryId = 'call_local'
 const encodedWord = 'EncodedMediaFixture0'
 const lookupId = ['736a9b08', '170a', '4b11', '97ef', '02329fbd984a'].join('-')
@@ -63,7 +64,7 @@ const upstream = createServer(async (req, res) => {
     const messages = protocol === 'responses' ? body.input : body.messages
     const value = messages.find(m => m.role === 'user')?.content
     const text = typeof value === 'string' ? value : value?.find(x => x.type === 'text' || x.type === 'input_text')?.text
-    const tool = protocol === 'anthropic' ? messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(part => part.type === 'tool_use').input
+    const tool = ['title','vision'].includes(reviewMode) ? { password: 'fixture' } : protocol === 'anthropic' ? messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(part => part.type === 'tool_use').input
       : JSON.parse(protocol === 'responses' ? messages.find(m => m.type === 'function_call').arguments
         : messages.find(m => m.tool_calls?.length).tool_calls[0].function.arguments)
     assert.equal(typeof text, 'string')
@@ -76,7 +77,7 @@ const upstream = createServer(async (req, res) => {
         : messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(part => part.type === 'tool_result')
     const toolOutput = protocol === 'responses' ? history?.output : history?.content
     const resultText = typeof toolOutput === 'string' ? toolOutput : toolOutput?.find(part => part.type === 'text' || part.type === 'input_text')?.text
-    const reply = compactBudgetReply ? 'budget accepted' : echoToolResult ? resultText : (foreign ? foreign + ' | ' : '') + text + (echoPrompt ? ' | ' + prompt : '')
+    const reply = reviewMode === 'structured' ? JSON.stringify({ value: text }) : compactBudgetReply ? 'budget accepted' : echoToolResult ? resultText : (foreign ? foreign + ' | ' : '') + text + (echoPrompt ? ' | ' + prompt : '')
     const msg = { id: 'msg_local', type: 'message', role: 'assistant', model: body.model,
       content: [textPart(reply), { type: 'tool_use', name: 'echo', id: 'call_local', input: tool }],
       stop_reason: 'tool_use', stop_sequence: null, usage: { input_tokens: 3, output_tokens: 2 } }
@@ -86,10 +87,33 @@ const upstream = createServer(async (req, res) => {
         { type: 'function_call', name: 'echo', call_id: 'call_local', id: 'fc_local', arguments: args(tool.password) }],
       usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } }
     const chat = (object, choice) => ({ id: 'chatcmpl_local', object, model: body.model, created: 1, choices: [choice] })
+    if (['title','vision'].includes(reviewMode)) {
+      const chunk = delta => frame(null, chat('chat.completion.chunk', { index: 0, delta, finish_reason: null }))
+      if (body.stream) {
+        res.writeHead(200, { 'content-type': 'text/event-stream' }).end(chunk({ content: text }) + frame(null, chat('chat.completion.chunk', { index: 0, delta: {}, finish_reason: 'stop' })) + 'data: [DONE]' + String.fromCharCode(10,10))
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(chat('chat.completion', { index: 0, message: message('assistant', text), finish_reason: 'stop' })))
+      }
+      return
+    }
+    if (reviewMode === 'mcp-events') {
+      const documents = text.split(' | ').map(value => JSON.stringify({ value }))
+      assert.equal(documents.length, 2)
+      const pieces = documents.map(cut)
+      const event = (type, fields) => frame(type, { type, ...fields })
+      let wire = ''
+      for (const part of [0,1]) for (const output_index of [0,1]) {
+        wire += event('response.mcp_call_arguments.delta', { output_index, item_id: 'mcp_' + output_index, delta: pieces[output_index][part] })
+      }
+      for (const output_index of [0,1]) wire += event('response.mcp_call_arguments.done', { output_index, item_id: 'mcp_' + output_index, arguments: documents[output_index] })
+      wire += event('response.completed', { response: { ...response, output: [] } })
+      res.writeHead(200, { 'content-type': 'text/event-stream' }).end(wire)
+      return
+    }
     if (!body.stream) {
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(
         protocol === 'anthropic' ? msg : protocol === 'responses' ? response
-          : chat('chat.completion', { index: 0, message: { ...message('assistant', reply), tool_calls: calls(args(tool.password)) }, finish_reason: 'tool_calls' })))
+          : chat('chat.completion', { index: 0, message: { ...message('assistant', reply), ...(reviewMode === 'structured' ? { reasoning_content: 'reasoning ' + text } : {}), tool_calls: calls(args(tool.password)) }, finish_reason: 'tool_calls' })))
       return
     }
     const pieces = cut(reply)
@@ -115,6 +139,12 @@ const upstream = createServer(async (req, res) => {
         + pieces.map(delta => event('response.output_text.delta', { item_id: 'msg_local', output_index: 0, content_index: 0, delta })).join('')
         + argPieces.map(delta => event('response.function_call_arguments.delta', { item_id: 'fc_local', output_index: 1, delta })).join('')
         + event('response.completed', { response })
+    }
+    if (reviewMode === 'bom') wire = String.fromCodePoint(0xfeff) + wire
+    if (reviewMode === 'lone-cr') wire = wire.replaceAll('\r\n', '\r')
+    if (reviewMode === 'wait-cap') {
+      const delta = text => frame(null, chat('chat.completion.chunk', { index: 0, delta: { content: text }, finish_reason: null }))
+      wire = delta(pieces[0]) + ': keepalive\r\n\r\n'.repeat(64) + delta(pieces[1]) + 'data: [DONE]\r\n\r\n'
     }
     res.writeHead(200, { 'content-type': 'text/event-stream' })
     const bytes = Buffer.from(wire)
@@ -142,7 +172,7 @@ try {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(AGENT2API_|WORKBUDDY_)/i.test(name)))
   child = spawn(resolve(process.argv[2]), [], { windowsHide: true, env: { ...env,
     AGENT2API_HOST: '127.0.0.1', AGENT2API_PROXY_PORT: String(port), AGENT2API_PROXY_HOME: home,
-    AGENT2API_PROXY_API_KEY: key, AGENT2API_CAPTCHA_ENABLED: '0', NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' },
+    AGENT2API_PROXY_API_KEY: key, AGENT2API_CAPTCHA_ENABLED: '0', RUST_MIN_STACK: String(16 * 1024 * 1024), NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' },
     stdio: ['ignore', 'pipe', 'pipe'] })
   child.stdout.on('data', x => { output = (output + x).slice(-8000) })
   child.stderr.on('data', x => { output = (output + x).slice(-8000) })
@@ -166,13 +196,20 @@ try {
   }
   assert(ready, 'gateway was not healthy')
   const endpoint = '/api/privacy-masking'
+  const settingsOf = ({ revision, ...policy }) => policy
+  const savePrivacy = async policy => {
+    const latest = policy.revision === undefined ? (await json(endpoint)).data.revision : policy.revision
+    return json(endpoint, 'PUT', { ...policy, ...(latest === undefined ? {} : { revision: latest }) })
+  }
   assert.equal((await call(endpoint, 'GET', undefined, false)).status, 401)
   const disabled = { secrets: false, personal: false, terms: [] }
-  assert.deepEqual((await json(endpoint)).data, disabled)
+  assert.deepEqual(settingsOf((await json(endpoint)).data), disabled)
   await json('/api/sanitize', 'PUT', { sanitizeBlacklistFingerprints: false })
+  const providerIds = {}
   for (const protocol of Object.keys(paths)) {
     const baseUrl = upstreamUrl + '/' + protocol + (protocol === 'anthropic' ? '' : '/v1')
     const id = (await json('/api/custom-providers', 'POST', { name: 'privacy ' + protocol, baseUrl, protocol, apiKey: upstreamKey })).data.provider.id
+    providerIds[protocol] = id
     await json('/api/custom-providers/models', 'POST', { providerId: id, models: [{ id: 'privacy-' + protocol, enabled: true }], mappings: [] })
   }
   function body(protocol, stream) {
@@ -226,8 +263,8 @@ try {
   assert.throws(() => checkUpstream(seen.at(-1)), /unmasked upstream text/, 'privacy assertion must fail with masking disabled')
   const enabled = { secrets: true, personal: true, terms: [sentinel] }
   assert.equal((await call(endpoint, 'PUT', enabled, false)).status, 401)
-  assert.equal((await call(endpoint, 'PUT', { secrets: 'wrong' })).status, 400)
-  assert.deepEqual((await json(endpoint, 'PUT', enabled)).data, enabled)
+  assert.equal((await call(endpoint, 'PUT', { secrets: 'wrong', revision: (await json(endpoint)).data.revision })).status, 400)
+  assert.deepEqual(settingsOf((await savePrivacy(enabled)).data), enabled)
   for (const protocol of Object.keys(paths)) {
     for (const stream of [false, true]) {
       assert.deepEqual(await read(protocol, stream), [content, password])
@@ -240,7 +277,7 @@ try {
   assert.notEqual(checkUpstream(seen.at(-1)), foreign)
   foreign = ''
   if (reviewFault) {
-    await json(endpoint, 'PUT', disabled)
+    await savePrivacy(disabled)
     await read('chat_completions', false)
     checkUpstream(seen.at(-1)) // The real wire assertion must turn red when masking is disabled.
   }
@@ -252,11 +289,11 @@ try {
   }
   assert.equal(seen.length, before, 'stateful requests must never reach the mock upstream')
   const terms100 = [...Array.from({ length: 99 }, (_, i) => 'privacy-case-' + i.toString().padStart(3, '0')), sentinel]
-  const normalized = (await json(endpoint, 'PUT', { ...enabled, terms: ['', ' ', ...terms100, '  ' + sentinel + '  ', ''] })).data
+  const normalized = (await savePrivacy({ ...enabled, terms: ['', ' ', ...terms100, '  ' + sentinel + '  ', ''] })).data
   assert.equal(normalized.terms.length, 100)
   assert.deepEqual(new Set(normalized.terms), new Set(terms100))
-  assert.equal((await call(endpoint, 'PUT', { ...enabled, terms: [...terms100, 'one-too-many'] })).status, 400)
-  await json(endpoint, 'PUT', { ...enabled, terms: [sentinel, promptOnly] })
+  assert.equal((await call(endpoint, 'PUT', { ...enabled, terms: [...terms100, 'one-too-many'], revision: (await json(endpoint)).data.revision })).status, 400)
+  await savePrivacy({ ...enabled, terms: [sentinel, promptOnly] })
   await json('/api/prompt', 'PUT', { promptMode: 'append', promptText: promptOnly })
   echoPrompt = true
   for (const protocol of ['chat_completions', 'responses']) {
@@ -279,16 +316,19 @@ try {
     let release
     holdReply = new Promise(resolve => { release = resolve })
     const [first, second] = await (async () => {
-      const a = read(protocol, false)
+      const observed = promise => promise.then(value => ({ ok: true, value }), error => ({ ok: false, error }))
+      const a = observed(read(protocol, false))
       let b
       try {
         for (let i = 0; i < 60 && seen.length === oldCount; i++) await sleep(25)
         assert.equal(seen.length, oldCount + 1)
-        b = read(protocol, false)
+        b = observed(read(protocol, false))
         await sleep(250)
         assert.equal(seen.length, oldCount + 1, 'unchanged original bodies must wait in the same dedupe slot: ' + protocol)
       } finally { holdReply = undefined; release() }
-      return Promise.all([a, b])
+      const results = await Promise.all([a, b])
+      for (const result of results) if (!result.ok) throw result.error
+      return results.map(result => result.value)
     })()
     assert.deepEqual(first, [content, password]); assert.deepEqual(second, [content, password])
     assert.notEqual(checkUpstream(seen[oldCount]), checkUpstream(seen[oldCount + 1]), 'dedupe must not share masking maps')
@@ -303,7 +343,7 @@ try {
   const birth = ['1990', '05', '20'].join('-')
   const dateVariant = ['1990', '5', '20'].join('/')
   const caseVariant = 'FIXTURECODEWORD'
-  await json(endpoint, 'PUT', { ...enabled, kinds: { bucket: true, mac: false }, terms: [birth, 'fixturecodeword'],
+  await savePrivacy({ ...enabled, kinds: { bucket: true, mac: false }, terms: [birth, 'fixturecodeword'],
     terms_any_case: true, terms_whole: true, allow: [keepEmail.toUpperCase()],
     rules: [{ kind: 'DEMO', prefix: 'fixture_' }, { kind: 'DEMO', regex: 'match:([0-9A-Z]{6})' }] })
   const input = [forcePrefix, 'match:' + forceRegex, keepEmail, hideEmail, keepBucket, hideBucket, dateVariant,
@@ -316,7 +356,7 @@ try {
   for (const i of [0, 1, 3, 5, 6, 7]) assert.match(wire[i], /\{\{A2A_[0-9a-f]{32}\}\}/, 'missing advanced rule index ' + i)
   for (const i of [2, 4, 8]) assert.equal(wire[i], input.split(' | ')[i])
   console.log('PASS Magpie custom rules, allowlist, date aliases and category opt-in via actual upstream wire')
-  await json(endpoint, 'PUT', { ...enabled, terms: [sentinel, encodedWord, toolHistoryId] })
+  await savePrivacy({ ...enabled, terms: [sentinel, encodedWord, toolHistoryId] })
   echoToolResult = true
   for (const protocol of Object.keys(paths)) {
     const request = body(protocol, false)
@@ -351,7 +391,7 @@ try {
   echoToolResult = false
   console.log('PASS Magpie tool-result fields: credential names, JSON round-trip, templates, expiry, attachments and protocol IDs (3 protocols)')
   // Magpie keeps numeric measurements and versions but masks labelled numeric keys.
-  await json(endpoint, 'PUT', { ...disabled, secrets: true })
+  await savePrivacy({ ...disabled, secrets: true })
   const numericCases = [
     ['密钥为“', '835294', '”'], ['API Key：', '540076', ''],
     ['秘密鍵は ', '946150', ''], ['비밀키는 ', '260893', ''],
@@ -382,7 +422,7 @@ try {
   ]
   const credentialIds = [['refresh_token=', lookupId], ['api_key=', lookupDigest], ['password=', elementToken]]
   const identifierInput = [...keptIds, ...credentialIds.map(parts => parts.join(''))].join('\n')
-  await json(endpoint, 'PUT', enabled)
+  await savePrivacy(enabled)
   const identifierRequest = body('chat_completions', false)
   identifierRequest.messages[0].content = identifierInput
   const identifierReply = await json(paths.chat_completions, 'POST', identifierRequest)
@@ -394,11 +434,11 @@ try {
     assert(line.startsWith(label) && !line.includes(value), 'labelled credential escaped identifier guard: ' + i)
     assert.match(line.slice(label.length), /^\{\{A2A_[0-9a-f]{32}\}\}$/)
   }
-  await json(endpoint, 'PUT', { ...enabled, terms: [lookupId] })
+  await savePrivacy({ ...enabled, terms: [lookupId] })
   await json(paths.chat_completions, 'POST', identifierRequest)
   assert(!seen.at(-1).text.includes(lookupId), 'explicit custom terms must override identifier exclusions')
   console.log('PASS Magpie identifier guards: UUID-like cards, hashes, cursors, element IDs and real credential fields')
-  await json(endpoint, 'PUT', { ...enabled, terms: [sentinel, encodedWord] })
+  await savePrivacy({ ...enabled, terms: [sentinel, encodedWord] })
   const declaration = {
     type: 'function', name: 'read_' + encodedWord, description: 'tool ' + sentinel,
     parameters: { type: 'object', properties: { [encodedWord]: {
@@ -448,10 +488,10 @@ try {
   async function reviewRegression(name, run) {
     try { await run(); console.log('PASS REVIEW', name) }
     catch (error) { reviewFailures.push({ name, error: error.message }); console.log('FAIL REVIEW', name) }
-    finally { echoToolResult = false }
+    finally { echoToolResult = false; reviewMode = '' }
   }
   const sendText = async (text, policy) => {
-    await json(endpoint, 'PUT', policy)
+    await savePrivacy(policy)
     const request = body('chat_completions', false)
     request.messages[0].content = text
     const response = await json(paths.chat_completions, 'POST', request)
@@ -507,7 +547,7 @@ try {
   await reviewRegression('JSON scalar tool text applies custom terms', async () => {
     const cases = [['42424242','42424242'], ['true','true'], ['null','null'], [JSON.stringify('scalarFixture'),'scalarFixture']]
     for (const protocol of Object.keys(paths)) for (const [raw, term] of cases) {
-      await json(endpoint, 'PUT', { ...disabled, terms: [term] })
+      await savePrivacy({ ...disabled, terms: [term] })
       const request = body(protocol, false)
       if (protocol === 'chat_completions') request.messages.at(-1).content = raw
       else if (protocol === 'responses') request.input.at(-1).output = raw
@@ -528,7 +568,7 @@ try {
   await reviewRegression('owned placeholders do not consume fresh match budget', async () => {
     // Exercise the full 40k-match request and a new gateway prompt. The upstream
     // answers briefly; echoing 1.6 MB is unrelated to the request matching budget.
-    await json(endpoint, 'PUT', { ...disabled, terms: ['A'] })
+    await savePrivacy({ ...disabled, terms: ['A'] })
     await json('/api/prompt', 'PUT', { promptMode: 'append', promptText: 'A' })
     compactBudgetReply = true
     try {
@@ -547,7 +587,7 @@ try {
     }
   })
   await reviewRegression('Responses echo restores instructions and tool descriptions', async () => {
-    await json(endpoint, 'PUT', { ...disabled, terms: [sentinel] })
+    await savePrivacy({ ...disabled, terms: [sentinel] })
     for (const stream of [false,true]) {
       const request = body('responses', stream)
       request.instructions = 'instructions ' + sentinel
@@ -567,17 +607,201 @@ try {
       assert(!seen.at(-1).body.tools[0].description.includes(sentinel))
     }
   })
-  assert.deepEqual(reviewFailures, [], 'new review regressions must all pass')
+  await reviewRegression('Unicode escaped JSON string scalars are masked', async () => {
+    const term = String.fromCodePoint(0x5f20, 0x4e09)
+    const slash = String.fromCharCode(92)
+    const escaped = '"' + slash + 'u5f20' + slash + 'u4e09"'
+    await savePrivacy({ ...disabled, terms: [term] })
+    for (const protocol of Object.keys(paths)) {
+      const request = body(protocol, false)
+      if (protocol === 'chat_completions') request.messages.at(-1).content = escaped
+      else if (protocol === 'responses') request.input.at(-1).output = escaped
+      else request.messages.at(-1).content[0].content = escaped
+      echoToolResult = true
+      const response = await json(paths[protocol], 'POST', request)
+      const returned = protocol === 'responses' ? response.output[0].content[0].text
+        : protocol === 'anthropic' ? response.content[0].text : response.choices[0].message.content
+      assert.equal(JSON.parse(returned), term, 'decoded JSON value must restore')
+      const payload = seen.at(-1).body
+      const wire = protocol === 'responses' ? payload.input.find(item => item.type === 'function_call_output').output
+        : protocol === 'anthropic' ? payload.messages.flatMap(item => Array.isArray(item.content) ? item.content : []).find(item => item.type === 'tool_result').content
+          : payload.messages.find(item => item.role === 'tool').content
+      assert.match(JSON.parse(wire), placeholderOnly, 'decoded Unicode term leaked in ' + protocol)
+    }
+  })
+  await reviewRegression('privacy settings reject stale compare-and-swap saves', async () => {
+    const pageA = (await json(endpoint)).data
+    const pageB = await savePrivacy({ ...enabled, revision: pageA.revision })
+    const stale = await call(endpoint, 'PUT', { ...disabled, terms: ['stale-page-draft'], revision: pageA.revision })
+    assert.equal(stale.status, 409, 'a stale page must not turn protection off')
+    assert.match(pageA.revision ?? '', /^[0-9a-f]{64}$/, 'settings require an opaque revision')
+    assert.notEqual(pageB.data.revision, pageA.revision)
+    const current = (await json(endpoint)).data
+    assert.deepEqual(current, pageB.data, 'conflicting save must leave config and revision unchanged')
+    assert.deepEqual(await read('chat_completions', false), [content, password])
+    checkUpstream(seen.at(-1))
+    const attempts = await Promise.all([
+      call(endpoint, 'PUT', { ...enabled, terms: [sentinel, 'writer-one'], revision: current.revision }),
+      call(endpoint, 'PUT', { ...enabled, terms: [sentinel, 'writer-two'], revision: current.revision }),
+    ])
+    assert.deepEqual(attempts.map(response => response.status).sort(), [200,409], 'revision compare must be atomic under simultaneous writes')
+  })
+  const eventValues = raw => raw.trimStart().split(/\r\n|\r|\n/)
+    .filter(line => line.startsWith('data:')).map(line => line.slice(5).trim())
+    .filter(line => line && line !== '[DONE]').map(JSON.parse)
+  await reviewRegression('whole-word dates respect surrounding letters', async () => {
+    const day = ['1990','05','20'].join('-')
+    const wire = await sendText('item' + day + 'draft | ' + day, { ...disabled, terms: [day], terms_whole: true })
+    const [kept, masked] = wire.split(' | ')
+    assert.equal(kept, 'item' + day + 'draft'); assert.match(masked, placeholderOnly)
+  })
+  await reviewRegression('valid grouped card prefix survives a separate code', async () => {
+    const card = ['4111','1111','1111','1111'].join(' ')
+    const wire = await sendText(card + ' 123', { ...disabled, personal: true })
+    assert.equal(wire.slice(-4), ' 123'); assert.match(wire.slice(0,-4), placeholderOnly)
+  })
+  await reviewRegression('adjacent repaired IBANs are both masked', async () => {
+    const iban = ['GB82','WEST','1234','5698','7654','32'].join('')
+    const wire = await sendText(iban + ' ' + iban, { ...disabled, personal: true })
+    const values = wire.split(' ')
+    assert.equal(values.length, 2); values.forEach(value => assert.match(value, placeholderOnly))
+  })
+  await reviewRegression('short regex values apply and empty capture groups do not', async () => {
+    assert.match(await sendText('abc', { ...secretsOnly, rules: [{ regex: '^abc$' }] }), placeholderOnly)
+    assert.equal(await sendText('b', { ...secretsOnly, rules: [{ regex: '(a*)b' }] }), 'b')
+  })
+  await reviewRegression('numeric array values remain unchanged at scale', async () => {
+    const input = '{"phone_numbers":[' + Array(4096).fill(syntheticPhone.slice(3)).join(',') + ']}'
+    assert.equal(await sendText(input, { ...disabled, personal: true }), input)
+  })
+  await reviewRegression('MCP approval arguments mask values but preserve identifiers', async () => {
+    await savePrivacy({ ...disabled, terms: [sentinel] })
+    const request = body('responses', false)
+    const approval = { type: 'mcp_approval_request', id: 'approval_' + sentinel, name: 'tool_' + sentinel,
+      server_label: 'server_' + sentinel, arguments: JSON.stringify({ note: sentinel }) }
+    request.input.push(approval)
+    await json(paths.responses, 'POST', request)
+    const actual = seen.at(-1).body.input.find(item => item.type === 'mcp_approval_request')
+    assert(actual, 'native approval item was removed')
+    assert.deepEqual({ ...actual, arguments: approval.arguments }, approval)
+    assert.match(JSON.parse(actual.arguments).note, placeholderOnly)
+  })
+  await reviewRegression('interleaved MCP deltas and done arguments restore separately', async () => {
+    const originals = ['first"quoted\\fixture', 'second"quoted\\fixture']
+    await savePrivacy({ ...disabled, terms: originals })
+    const request = body('responses', true); request.input[0].content = originals.join(' | ')
+    reviewMode = 'mcp-events'
+    const response = await call(paths.responses, 'POST', request); assert(response.ok)
+    const events = eventValues(await response.text())
+    for (const output_index of [0,1]) {
+      const delta = events.filter(event => event.type === 'response.mcp_call_arguments.delta' && event.output_index === output_index).map(event => event.delta).join('')
+      assert.equal(JSON.parse(delta).value, originals[output_index])
+      const done = events.find(event => event.type === 'response.mcp_call_arguments.done' && event.output_index === output_index)
+      assert.equal(JSON.parse(done.arguments).value, originals[output_index])
+    }
+  })
+  await reviewRegression('structured JSON output restores only assistant JSON fields', async () => {
+    const secret = 'A"B\\C\nD'
+    await savePrivacy({ ...disabled, terms: [secret] }); reviewMode = 'structured'
+    for (const protocol of Object.keys(paths)) for (const stream of [false,true]) {
+      const request = body(protocol, stream)
+      if (protocol === 'responses') {
+        request.input[0].content = secret; request.text = { format: { type: 'json_object' } }
+        request.instructions = 'instructions ' + secret
+        request.tools = [{ type: 'function', name: 'echo', description: 'description ' + secret, parameters: { type: 'object', properties: {} } }]
+      } else {
+        request.messages[0].content = secret
+        if (protocol === 'chat_completions') request.response_format = { type: 'json_object' }
+        else request.output_config = { format: { type: 'json_schema', schema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'], additionalProperties: false } } }
+      }
+      const response = await call(paths[protocol], 'POST', request); const raw = await response.text()
+      assert(response.ok, 'structured response failed: ' + protocol + ' ' + raw.slice(0,100))
+      let returned
+      if (!stream) {
+        const value = JSON.parse(raw)
+        returned = protocol === 'chat_completions' ? value.choices[0].message.content : protocol === 'responses' ? value.output[0].content[0].text : value.content[0].text
+        if (protocol === 'responses') { assert.equal(value.instructions, request.instructions); assert.deepEqual(value.tools, request.tools) }
+      } else {
+        const events = eventValues(raw)
+        returned = protocol === 'chat_completions' ? events.map(event => event.choices?.[0]?.delta?.content ?? '').join('')
+          : protocol === 'responses' ? events.filter(event => event.type === 'response.output_text.delta').map(event => event.delta).join('') : events.map(event => event.delta?.text ?? '').join('')
+        if (protocol === 'responses') for (const event of events.filter(event => event.response)) {
+          assert.equal(event.response.instructions, request.instructions); assert.deepEqual(event.response.tools, request.tools)
+        }
+      }
+      assert.deepEqual(JSON.parse(returned), { value: secret }, protocol + ' structured value was corrupted')
+    }
+  })
+  for (const mode of ['bom','lone-cr']) await reviewRegression('SSE framing restores ' + mode, async () => {
+    await savePrivacy(enabled); reviewMode = mode
+    const response = await call(paths.responses, 'POST', body('responses', true)); assert(response.ok)
+    const events = eventValues(await response.text())
+    assert.equal(events.filter(event => event.type === 'response.output_text.delta').map(event => event.delta).join(''), content)
+  })
+  await reviewRegression('SSE pending-token cap reports an actual stream error', async () => {
+    await savePrivacy(enabled); reviewMode = 'wait-cap'
+    const response = await call(paths.chat_completions, 'POST', body('chat_completions', true)); assert(response.ok)
+    await assert.rejects(response.text(), /terminated|socket|other side closed|fetch failed|aborted/i)
+  })
+  await reviewRegression('title routing uses the original content before masking', async () => {
+    const providerId = providerIds.chat_completions
+    await json('/api/custom-providers/models','POST',{providerId,models:[{id:'privacy-chat_completions',enabled:true},{id:'privacy-title',enabled:true},{id:'privacy-vision',enabled:true,capabilities:{supportsImages:true}}],mappings:[]})
+    const old = (await json('/api/models/title-routes')).data
+    try {
+      await json('/api/models/title-routes','PUT',{revision:old.revision,config:{enabled:true,rules:[{enabled:true,clients:['claude-code'],model:'privacy-title',fallback:'error'}]}})
+      await savePrivacy({ ...disabled, terms: ['title'] }); reviewMode = 'title'
+      const request = {model:'privacy-chat_completions',messages:[message('user','Please write a 5-10 word title for this fixture')]}
+      const response = await call(paths.chat_completions,'POST',request,true,{'user-agent':'claude-cli/2.0.0'})
+      assert(response.ok, await response.text())
+      assert.equal(seen.at(-1).body.model,'privacy-title')
+      assert(!seen.at(-1).text.includes('title'))
+    } finally { const latest=(await json('/api/models/title-routes')).data;await json('/api/models/title-routes','PUT',{revision:latest.revision,config:old.config}) }
+  })
+  await reviewRegression('vision child shares masking and bypasses cross-request cache', async () => {
+    const providerId = providerIds.chat_completions
+    const old = (await json('/api/vision-compatibility')).data
+    const newline = String.fromCharCode(10), term = 'ALPHA' + newline + 'OMEGA'
+    try {
+      await json('/api/vision-compatibility','PUT',{revision:old.revision,config:{...old.config,enabled:true,unknownCapability:'compat',rules:[{enabled:true,models:[{provider:providerId,model:'privacy-chat_completions'}],mode:'assist',source:'custom',target:{provider:providerId,model:'privacy-vision'},reuseResults:true}]}})
+      await savePrivacy({...disabled,terms:[term]});reviewMode='vision'
+      const request={model:'privacy-chat_completions',messages:[message('user',[textPart('ALPHA'),textPart('OMEGA'),{type:'image_url',image_url:{url:'data:image/png;base64,AQ=='}}])]}
+      const oldCount=seen.length;let previousToken
+      for(let round=0;round<2;round++) {
+        const response=await call(paths.chat_completions,'POST',request);const raw=await response.text();assert(response.ok,raw.slice(0,500))
+        const calls=seen.slice(oldCount).filter(item=>item.body.model==='privacy-vision')
+        assert.equal(calls.length,round+1,'masked vision request must not reuse a prior map through the cache')
+        const text=calls.at(-1).text;assert(!text.includes(term),'joined child text leaked')
+        const token=text.match(/[{][{]A2A_[0-9a-f]{32}[}][}]/)?.[0];assert(token)
+        if(round)assert.notEqual(token,previousToken);previousToken=token
+        assert(!raw.includes('{{A2A_'),'vision result retained request placeholder')
+      }
+    } finally { const latest=(await json('/api/vision-compatibility')).data;await json('/api/vision-compatibility','PUT',{revision:latest.revision,config:old.config}) }
+  })
   const beforeBlocks = seen.length
   const blocked = await call('/v1/images/generations', 'POST', { prompt: content })
   assert.equal(blocked.status, 400)
   assert.equal((await blocked.json()).error.code, 'privacy_masking')
   assert.equal((await call(paths.chat_completions, 'POST', body('chat_completions', false), true, { 'content-encoding': 'gzip' })).status, 415)
   assert.equal(seen.length, beforeBlocks)
-  assert.deepEqual((await json(endpoint, 'PUT', disabled)).data, disabled)
+  assert.deepEqual(settingsOf((await savePrivacy(disabled)).data), disabled)
   assert.deepEqual(await read('chat_completions', false), [content, password])
   assert.equal(seen.at(-1).text, content)
   console.log('PASS default/off, authorization, fail-closed, and request isolation')
+  // Run the deliberate egress error last: the existing account error policy
+  // may cool down that account, which is unrelated to the off-path assertions.
+  await reviewRegression('egress masking failures finalize the actual attempt', async () => {
+    await savePrivacy({...disabled,terms:['A']})
+    await json('/api/prompt','PUT',{promptMode:'append',promptText:'A '.repeat(65537)})
+    try {
+      const before=seen.length;const request=body('chat_completions',false);request.messages[0].content='small input'
+      const response=await call(paths.chat_completions,'POST',request);assert.equal(response.status,503);assert.equal((await response.json()).error.code,'privacy_masking');assert.equal(seen.length,before)
+      const records=(await json('/api/stats/requests?status=error&limit=10')).data
+      const rows=records.entries??records.requests??records.items;assert(Array.isArray(rows),'request stats rows missing: '+Object.keys(records))
+      const row=rows.find(item=>item.attemptDetails?.length&&item.status===503);assert(row,'failed request missing attempt details')
+      const attempt=row.attemptDetails.at(-1);assert.equal(attempt.status,503);assert(attempt.error,'preparation error not finalized')
+    } finally {await json('/api/prompt','PUT',{promptMode:'passthrough',promptText:''})}
+  })
+  assert.deepEqual(reviewFailures, [], 'new review regressions must all pass')
 } catch (failure) {
   console.error(output)
   throw failure

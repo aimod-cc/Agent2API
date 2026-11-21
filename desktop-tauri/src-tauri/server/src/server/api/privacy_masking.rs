@@ -24,17 +24,21 @@ const MAX_BODY: usize = 32 * 1024 * 1024;
 pub(crate) async fn get() -> Response {
     match config::snapshot() {
         Ok(Some(policy)) => match policy.as_ref() {
-            Ok(rules) => settings_response(&rules.settings),
+            Ok(policy) => settings_response(&policy.rules.settings, &policy.revision),
             Err(message) => management_error(503, *message),
         },
-        Ok(None) => settings_response(&Settings::default()),
+        Ok(None) => settings_response(&Settings::default(), &config::revision(&Value::Null)),
         Err(message) => management_error(503, message),
     }
 }
 
-fn settings_response(settings: &Settings) -> Response {
+fn settings_response(settings: &Settings, revision: &str) -> Response {
     match serde_json::to_value(settings) {
-        Ok(value) => ok_json(value),
+        Ok(Value::Object(mut value)) => {
+            value.insert("revision".into(), Value::String(revision.to_owned()));
+            ok_json(Value::Object(value))
+        }
+        Ok(_) => management_error(500, "隐私脱敏设置格式错误"),
         Err(_) => management_error(500, "隐私脱敏设置序列化失败"),
     }
 }
@@ -43,18 +47,28 @@ pub(crate) async fn put(body: Bytes) -> Response {
     if body.len() > 64 * 1024 {
         return management_error(413, "隐私脱敏设置过大");
     }
-    let Ok(value @ Value::Object(_)) = serde_json::from_slice::<Value>(&body) else {
+    let Ok(Value::Object(mut fields)) = serde_json::from_slice::<Value>(&body) else {
         return management_error(400, "隐私脱敏设置必须是 JSON 对象");
     };
-    let Ok(settings) = serde_json::from_value::<Settings>(value) else {
+    let Some(Value::String(revision)) = fields.remove("revision") else {
+        return management_error(400, "隐私脱敏设置需要 revision，请刷新后再保存");
+    };
+    if revision.len() != 64 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return management_error(400, "隐私脱敏 revision 无效，请刷新后再保存");
+    }
+    let Ok(settings) = serde_json::from_value::<Settings>(Value::Object(fields)) else {
         return management_error(
             400,
             "隐私脱敏设置必须是包含 secrets、personal、terms 的对象",
         );
     };
-    match config::save(settings) {
+    match config::save(settings, &revision) {
         Ok(()) => get().await,
         Err(config::SaveError::Storage) => management_error(500, "隐私脱敏设置未能持久化"),
+        Err(config::SaveError::Conflict) => management_error(
+            409,
+            "本地隐私脱敏设置已在其他位置修改，请刷新后再保存；当前草稿未丢失",
+        ),
         Err(config::SaveError::Invalid(message)) => management_error(400, message),
     }
 }
@@ -63,6 +77,8 @@ pub(crate) async fn put(body: Bytes) -> Response {
 pub(crate) struct PrivacyContext {
     pub(super) original_digest: String,
     pub(super) masking: RequestMask,
+    pub(super) compact_client: Option<&'static str>,
+    pub(super) title_client: Option<&'static str>,
 }
 
 pub(crate) async fn protect(request: Request, next: Next) -> Response {
@@ -84,7 +100,7 @@ pub(crate) async fn protect(request: Request, next: Next) -> Response {
         Err(message) => return error(503, message),
     };
     let rules = match policy.as_ref() {
-        Ok(rules) if rules.enabled() => rules,
+        Ok(policy) if policy.rules.enabled() => &policy.rules,
         Ok(_) => return next.run(request).await,
         Err(message) => return error(503, message),
     };
@@ -118,6 +134,34 @@ pub(crate) async fn protect(request: Request, next: Next) -> Response {
         .with_code("privacy_masking_stateful_responses")
         .payload_response();
     }
+    // Run content-sensitive routing classifiers on the original request before masking.
+    let behavior_client = crate::server::core::client::classify(
+        parts
+            .headers
+            .get(header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or(""),
+    );
+    let request_format = match format {
+        Format::Chat => crate::server::core::compact_routing::RequestFormat::Chat,
+        Format::Responses => crate::server::core::compact_routing::RequestFormat::Responses,
+        Format::Messages => crate::server::core::compact_routing::RequestFormat::Anthropic,
+    };
+    let compact_client = crate::server::core::compact_routing::client_for_request(
+        &behavior_client,
+        &parsed,
+        request_format,
+    );
+    let title_client = if compact_client.is_none() {
+        crate::server::core::title_routing::client_for_request(
+            &behavior_client,
+            &parts.headers,
+            &parsed,
+            matches!(format, Format::Responses),
+        )
+    } else {
+        None
+    };
     let masking = RequestMask::new(rules);
     let original_digest = super::pipeline::sha256_hex(&original);
     if let Err(err) = masking.apply(format, &mut parsed) {
@@ -133,6 +177,8 @@ pub(crate) async fn protect(request: Request, next: Next) -> Response {
     parts.extensions.insert(PrivacyContext {
         original_digest,
         masking: masking.clone(),
+        compact_client,
+        title_client,
     });
     let upstream = next
         .run(Request::from_parts(parts, Body::from(bytes)))

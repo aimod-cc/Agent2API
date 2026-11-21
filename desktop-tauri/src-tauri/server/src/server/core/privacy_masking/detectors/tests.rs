@@ -129,6 +129,48 @@ fn optional_infrastructure_detectors_require_opt_in() {
 }
 
 #[test]
+fn luhn_group_prefix_and_full_length_account_numbers_are_checked() {
+    let leaked = "4111111111111111 123";
+    let hits = ranges(leaked, false, true, false);
+    assert_eq!(hits, vec!["4111111111111111"]);
+    let prefix = ["4111", "1111", "1111", "1111", "11"].join("");
+    let full = (0..=9)
+        .map(|digit| format!("{prefix}{digit}"))
+        .find(|value| ranges(value, false, true, false).contains(&value.as_str()));
+    assert!(
+        full.is_some(),
+        "valid complete 19-digit card vector was not recognized"
+    );
+}
+
+#[test]
+fn numeric_arrays_are_indexed_once_and_preserved() {
+    let values = vec!["13800138000"; 2048].join(",");
+    let input = format!("{{\"phone_numbers\":[{values}]}}");
+    assert!(
+        ranges(&input, false, true, false).is_empty(),
+        "numbers inside a JSON numeric array are values, not text phones"
+    );
+    assert_eq!(super::guards::numeric_arrays(&input).len(), 1);
+    let nested = format!("[[],[{values}],[{values}]]");
+    assert!(ranges(&nested, false, true, false).is_empty());
+    assert_eq!(super::guards::numeric_arrays(&nested).len(), 3);
+}
+
+#[test]
+fn repaired_iban_match_resumes_before_the_unconsumed_suffix() {
+    let iban = "DE89 3704 0044 0532 0130 00";
+    let input = format!("{iban} {iban}");
+    assert_eq!(
+        ranges(&input, false, true, false)
+            .iter()
+            .filter(|&&hit| hit == iban)
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn credential_families_and_checksum_guards() {
     let vendor: Vec<String> = [
         ("sk-proj-", 22),

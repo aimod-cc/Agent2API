@@ -5,7 +5,7 @@ import { t } from '../i18n'
 
 type ExtraKind = 'ssn' | 'passport' | 'iban' | 'birthday' | 'mac' | 'serial' | 'home' | 'userhost' | 'ip' | 'bucket'
 type Rule = { kind?: string; prefix?: string; regex?: string }
-type Policy = { secrets: boolean; personal: boolean; terms: string[]; kinds?: Partial<Record<ExtraKind, boolean>>; terms_any_case?: boolean; terms_whole?: boolean; allow?: string[]; rules?: Rule[] }
+type Policy = { revision: string; secrets: boolean; personal: boolean; terms: string[]; kinds?: Partial<Record<ExtraKind, boolean>>; terms_any_case?: boolean; terms_whole?: boolean; allow?: string[]; rules?: Rule[] }
 const kinds: readonly [ExtraKind, string, boolean][] = [
   ['ssn', '美国社会安全号码（SSN）', true], ['passport', '护照号', true], ['iban', 'IBAN', true],
   ['birthday', '生日', true], ['mac', 'MAC 地址', true], ['serial', '序列号', true],
@@ -14,12 +14,13 @@ const kinds: readonly [ExtraKind, string, boolean][] = [
 function normalizeLines(value: string) {
   return [...new Set(value.split(/\r?\n/).map(line => line.trim()).filter(Boolean))]
 }
-const initial: Policy = { secrets: false, personal: false, terms: [] }
+const initial: Policy = { revision: '', secrets: false, personal: false, terms: [] }
 function parse(value: unknown): Policy {
   if (!value || typeof value !== 'object') throw new Error(t('服务端未返回本地隐私脱敏设置'))
   const x = value as Record<string, unknown>
   if (typeof x.secrets !== 'boolean' || typeof x.personal !== 'boolean'
-    || !Array.isArray(x.terms) || !x.terms.every(term => typeof term === 'string')) {
+    || !Array.isArray(x.terms) || !x.terms.every(term => typeof term === 'string')
+    || typeof x.revision !== 'string' || !/^[0-9a-f]{64}$/.test(x.revision)) {
     throw new Error(t('本地隐私脱敏设置格式无效'))
   }
   return x as Policy
@@ -36,6 +37,9 @@ export function PrivacyMaskingPanel() {
   const [error, setError] = React.useState('')
   const [notice, setNotice] = React.useState('')
   const pending = React.useRef(false)
+  const editDraft = (update: (current: Policy) => Policy) => { setError(''); setDraft(update) }
+  const editAllowText = (value: string) => { setError(''); setAllowText(value) }
+  const editRulesText = (value: string) => { setError(''); setRulesText(value) }
 
   const load = React.useCallback(async () => {
     if (pending.current) return
@@ -76,14 +80,31 @@ export function PrivacyMaskingPanel() {
       try { rules = JSON.parse(rulesText || '[]') }
       catch { throw new Error(t('自定义脱敏规则必须是 JSON 数组')) }
       if (!Array.isArray(rules)) throw new Error(t('自定义脱敏规则必须是 JSON 数组'))
-      const value = parse(await api.savePrivacyMasking({ ...draft, terms, allow: normalizeLines(allowText), rules }))
+      const value = parse(await api.savePrivacyMasking({ ...draft, terms, allow: normalizeLines(allowText), rules, revision: saved.revision }))
       setSaved(value)
       setDraft(value)
       setAllowText((value.allow ?? []).join('\n'))
       setRulesText(ruleText(value))
       setNotice(t('设置已保存：从下一个推理请求生效'))
-    } catch (failure) { setError(errorMessage(failure)) }
+    } catch (failure) { setError(t(errorMessage(failure))) }
     finally { pending.current = false; setBusy(false) }
+  }
+
+  async function refresh() {
+    if (pending.current) return
+    if (dirty) {
+      pending.current = true
+      setBusy(true)
+      try {
+        const ask = window.wbConfirm?.ask
+        if (!ask) throw new Error(t('确认弹窗不可用，请重新打开页面'))
+        if (!await ask({ title: t('放弃未保存的修改？'),
+          text: t('刷新将丢弃尚未保存的本地隐私脱敏修改，是否继续？'),
+          okText: t('放弃修改并刷新'), cancelText: t('取消'), bodyClass: '' })) return
+      } catch (failure) { setError(t(errorMessage(failure))); return }
+      finally { pending.current = false; setBusy(false) }
+    }
+    await load()
   }
 
   const active = !!saved && (saved.secrets || saved.personal || saved.terms.length > 0)
@@ -91,13 +112,14 @@ export function PrivacyMaskingPanel() {
     || allowText !== (saved.allow ?? []).join('\n') || rulesText !== ruleText(saved))
   const locked = loading || busy || !saved
   const labelId = React.useId()
+  React.useEffect(() => { if (dirty) setNotice('') }, [dirty])
   return <Card render={<section />} className='panel' id='settings-privacy-masking'>
     <CardHeader className='flex-row items-center justify-between gap-3'>
       <div className='flex flex-col gap-1'>
         <h2>{t('本地隐私脱敏')}</h2>
         <span className='text-xs text-subtle'>{loading ? t('正在读取设置…') : saved ? t(active ? '已开启' : '已关闭') : t('不可用')}</span>
       </div>
-      <Button variant='ghost' size='sm' disabled={busy} onClick={() => void load()}>{t('刷新')}</Button>
+      <Button variant='ghost' size='sm' disabled={busy} onClick={() => void refresh()}>{t('刷新')}</Button>
     </CardHeader>
     <CardContent className='panel-body flex flex-col gap-3'>
       <p className='m-0 text-xs leading-relaxed text-subtle'>
@@ -106,41 +128,41 @@ export function PrivacyMaskingPanel() {
       <Label htmlFor={labelId + '-secrets'} className='flex items-center justify-between gap-3'>
         <span>{t('遮盖 API Key、Token、密码和已识别的私钥')}</span>
         <Switch id={labelId + '-secrets'} checked={draft.secrets} disabled={locked}
-          onCheckedChange={secrets => setDraft(value => ({ ...value, secrets }))} />
+          onCheckedChange={secrets => editDraft(value => ({ ...value, secrets }))} />
       </Label>
       <Label htmlFor={labelId + '-personal'} className='flex items-center justify-between gap-3'>
-        <span>{t('遮盖邮箱、手机号、身份证号和银行卡号')}</span>
+        <span>{t('遮盖邮箱、中国大陆手机号、身份证号和银行卡号')}</span>
         <Switch id={labelId + '-personal'} checked={draft.personal} disabled={locked}
-          onCheckedChange={personal => setDraft(value => ({ ...value, personal }))} />
+          onCheckedChange={personal => editDraft(value => ({ ...value, personal }))} />
       </Label>
       {draft.personal ? <fieldset className='grid grid-cols-1 gap-2 sm:grid-cols-2'>
         <legend>{t('附加个人信息分类')}</legend>
         {kinds.map(([key, label, fallback]) => <Label key={key} htmlFor={labelId + '-' + key} className='flex items-center justify-between gap-2'>
           {t(label)}<Switch id={labelId + '-' + key} checked={draft.kinds?.[key] ?? fallback} disabled={locked}
-            onCheckedChange={enabled => setDraft(value => ({ ...value, kinds: { ...value.kinds, [key]: enabled } }))} />
+            onCheckedChange={enabled => editDraft(value => ({ ...value, kinds: { ...value.kinds, [key]: enabled } }))} />
         </Label>)}
       </fieldset> : null}
       <div className='flex flex-col gap-2'>
         <Label htmlFor={labelId + '-terms'}>{t('自定义脱敏词（每行一个）')}</Label>
         <Textarea id={labelId + '-terms'} rows={4} spellCheck={false} disabled={locked}
           value={draft.terms.join('\n')}
-          onChange={event => setDraft(value => ({ ...value, terms: event.target.value.split(/\r?\n/) }))} />
+          onChange={event => editDraft(value => ({ ...value, terms: event.target.value.split(/\r?\n/) }))} />
       </div>
       <details>
         <summary>{t('高级脱敏规则')}</summary>
         <div className='mt-2 flex flex-col gap-2'>
           <Label htmlFor={labelId + '-fold'} className='flex items-center justify-between gap-2'>
             {t('自定义词忽略大小写')}<Switch id={labelId + '-fold'} checked={draft.terms_any_case ?? false} disabled={locked}
-              onCheckedChange={enabled => setDraft(value => ({ ...value, terms_any_case: enabled }))} />
+              onCheckedChange={enabled => editDraft(value => ({ ...value, terms_any_case: enabled }))} />
           </Label>
           <Label htmlFor={labelId + '-whole'} className='flex items-center justify-between gap-2'>
             {t('自定义词只匹配整词')}<Switch id={labelId + '-whole'} checked={draft.terms_whole ?? false} disabled={locked}
-              onCheckedChange={enabled => setDraft(value => ({ ...value, terms_whole: enabled }))} />
+              onCheckedChange={enabled => editDraft(value => ({ ...value, terms_whole: enabled }))} />
           </Label>
           <Label htmlFor={labelId + '-allow'}>{t('原样放行的值（每行一个）')}</Label>
-          <Textarea id={labelId + '-allow'} disabled={locked} value={allowText} onChange={event => setAllowText(event.target.value)} rows={3} />
+          <Textarea id={labelId + '-allow'} disabled={locked} value={allowText} onChange={event => editAllowText(event.target.value)} rows={3} />
           <Label htmlFor={labelId + '-rules'}>{t('前缀或正则规则（开启凭据脱敏时生效）')}</Label>
-          <Textarea id={labelId + '-rules'} disabled={locked} value={rulesText} onChange={event => setRulesText(event.target.value)} rows={5} spellCheck={false}
+          <Textarea id={labelId + '-rules'} disabled={locked} value={rulesText} onChange={event => editRulesText(event.target.value)} rows={5} spellCheck={false}
             placeholder={'[{"kind":"CUSTOM","prefix":"service_"}]'} />
           <div className='text-xs text-subtle'>{t('每条规则填 prefix 或 regex，正则有捕获组时只遮盖第一组。自定义词支持同一天的日期变体。')}</div>
         </div>

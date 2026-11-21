@@ -59,6 +59,9 @@ fn try_update_raw_fields_inner<T, E>(
     if next.raw.get(super::compact_routes::KEY_COMPACT_ROUTES) != previous.raw.get(super::compact_routes::KEY_COMPACT_ROUTES) {
         next.compact_routes = super::compact_routes::from_raw(&next.raw);
     }
+    if next.raw.get(super::title_routes::KEY_TITLE_ROUTES) != previous.raw.get(super::title_routes::KEY_TITLE_ROUTES) {
+        next.title_routes = super::title_routes::from_raw(&next.raw);
+    }
     if next.raw.get(super::runtime_capacity::KEY_RUNTIME_CAPACITY) != previous.raw.get(super::runtime_capacity::KEY_RUNTIME_CAPACITY) {
         next.runtime_capacity = super::runtime_capacity::from_raw(&next.raw);
     }

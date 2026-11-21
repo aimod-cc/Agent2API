@@ -177,6 +177,7 @@ pub(super) fn scan(
         return Ok(());
     }
     let rules = RULES.as_ref().map_err(|_| ())?;
+    let number_arrays = guards::numeric_arrays(text);
     let lower = std::cell::OnceCell::new();
     for (spec, regex) in rules {
         if !spec.category.enabled(secrets, personal, overrides)
@@ -193,7 +194,9 @@ pub(super) fn scan(
         let mut from = 0;
         while let Some(caps) = regex.captures_at(text, from) {
             let Some(full) = caps.get(0) else { break };
-            from = full.end();
+            let full_end = full.end();
+            let mut resume_at = full_end;
+            from = full_end;
             if from == full.start() {
                 return Err(());
             }
@@ -209,12 +212,20 @@ pub(super) fn scan(
                 let (a, b) = (hit.start(), hit.end());
                 let spans = if matches!(spec.repair, Guard::SeedPhraseAt) {
                     wallet::phrases(text, a, b)
+                } else if matches!(check, Guard::Luhn) {
+                    guards::card_prefix(text, a, b).into_iter().collect()
                 } else {
                     guards::repair(spec.repair, text, a, b)
                         .into_iter()
                         .collect()
                 };
                 for (a, b) in spans {
+                    if (matches!(spec.repair, Guard::IbanAt) || matches!(check, Guard::Luhn))
+                        && b < resume_at
+                        && b > full.start()
+                    {
+                        resume_at = b;
+                    }
                     if a >= b || guards::adjacent(text, a, b, spec.bound) {
                         continue;
                     }
@@ -224,7 +235,7 @@ pub(super) fn scan(
                         || id_filter.keep(spec.id_rule, text, a, b)
                         || (spec.category != Category::Secrets
                             && spec.category != Category::Ip
-                            && guards::part_of_number_or_id(text, a, b))
+                            && guards::part_of_number_or_id(text, a, b, &number_arrays))
                     {
                         continue;
                     }
@@ -232,6 +243,9 @@ pub(super) fn scan(
                 }
                 Ok(())
             })?;
+            if resume_at < full_end && resume_at > full.start() {
+                from = resume_at;
+            }
         }
     }
     Ok(())

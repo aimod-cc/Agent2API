@@ -566,6 +566,7 @@ impl RequestTelemetry {
     pub(crate) fn child_with_id(&self) -> Self {
         let mut telemetry = Self::with_replay_guard(Arc::clone(&self.replay_guard));
         telemetry.model_key = self.model_key.clone();
+        telemetry.privacy_mask = self.privacy_mask.clone();
         telemetry.prompt_request = Mutex::new(self.prompt_request());
         telemetry.ensure_id(&super::request::new_request_id());
         telemetry

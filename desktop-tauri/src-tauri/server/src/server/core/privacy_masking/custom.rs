@@ -133,6 +133,7 @@ impl Term {
             .filter(move |m| {
                 if self.date {
                     date_boundary(s, m.start(), m.end())
+                        && (!whole || whole_word(s, m.start(), m.end()))
                 } else {
                     !whole || whole_word(s, m.start(), m.end())
                 }

@@ -192,7 +192,7 @@ async fn collect_native(
             capture.push(&bytes);
         }
         buffer.extend_from_slice(&bytes);
-        while let Some(end) = frame_end(&buffer) {
+        while let Some(end) = frame_end(&buffer, false) {
             if end > MAX_EVENT_BYTES {
                 return Err(GatewayError::with_status(
                     502,
@@ -215,6 +215,19 @@ async fn collect_native(
             ));
         }
     }
+    while let Some(end) = frame_end(&buffer, true) {
+        if end > MAX_EVENT_BYTES {
+            return Err(GatewayError::with_status(
+                502,
+                "上游原生事件超过 8 MiB，已停止接收",
+            ));
+        }
+        let frame: Vec<_> = buffer.drain(..end).collect();
+        if let Some(event) = event_json(&frame)? {
+            observer.observe(protocol, &event, telemetry);
+            collector.push(&event, frame.len())?;
+        }
+    }
     if !buffer.is_empty() {
         return Err(GatewayError::with_status(
             502,
@@ -224,26 +237,44 @@ async fn collect_native(
     collector.finish()
 }
 
-fn frame_end(buffer: &[u8]) -> Option<usize> {
-    let mut start = 0;
-    for (index, byte) in buffer.iter().enumerate() {
-        if *byte != b'\n' {
-            continue;
+// Keep byte ranges so model rewriting preserves CR, LF and CRLF exactly.
+fn line_parts(bytes: &[u8]) -> Vec<(usize, usize, usize)> {
+    let (mut start, mut at) = (0, 0);
+    let mut parts = Vec::new();
+    while at < bytes.len() {
+        if matches!(bytes[at], b'\r' | b'\n') {
+            let end = at;
+            at += if bytes[at] == b'\r' && bytes.get(at + 1) == Some(&b'\n') {
+                2
+            } else {
+                1
+            };
+            parts.push((start, end, at));
+            start = at;
+        } else {
+            at += 1;
         }
-        let line = &buffer[start..index];
-        if line.is_empty() || line == b"\r" {
-            return Some(index + 1);
-        }
-        start = index + 1;
     }
-    None
+    if start < bytes.len() {
+        parts.push((start, bytes.len(), bytes.len()));
+    }
+    parts
 }
-
+fn frame_end(buffer: &[u8], eof: bool) -> Option<usize> {
+    line_parts(buffer)
+        .into_iter()
+        .find_map(|(start, end, next)| {
+            (start == end
+                && next > end
+                && !(!eof && buffer[end] == b'\r' && next == end + 1 && next == buffer.len()))
+            .then_some(next)
+        })
+}
 fn event_json(bytes: &[u8]) -> Result<Option<Value>, GatewayError> {
     let mut data = Vec::new();
     let mut has_data = false;
-    for line in bytes.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+    for (start, end, _) in line_parts(bytes) {
+        let line = &bytes[start..end];
         if let Some(value) = line.strip_prefix(b"data:") {
             if has_data {
                 data.push(b'\n');
@@ -378,8 +409,8 @@ impl NativeStream {
             return;
         }
         let mut event_name = String::new();
-        for line in bytes.split(|byte| *byte == b'\n') {
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
+        for (start, end, _) in line_parts(&bytes) {
+            let line = &bytes[start..end];
             if let Some(value) = line.strip_prefix(b"event:") {
                 event_name = String::from_utf8_lossy(value).trim().to_string();
             }
@@ -447,45 +478,52 @@ impl NativeStream {
             out.extend_from_slice(format!("event: {kind}\n").as_bytes());
         }
         let mut written = false;
-        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        for (start, end, next) in line_parts(&bytes) {
+            let line = &bytes[start..end];
             if line.starts_with(b"data:") {
                 if !written {
                     out.extend_from_slice(b"data: ");
                     out.extend_from_slice(&encoded);
-                    if line.ends_with(b"\r\n") {
-                        out.extend_from_slice(b"\r\n");
-                    } else if line.ends_with(b"\n") {
-                        out.push(b'\n');
-                    }
+                    out.extend_from_slice(&bytes[end..next]);
                     written = true;
                 }
             } else {
-                out.extend_from_slice(line);
+                out.extend_from_slice(&bytes[start..next]);
             }
         }
         self.pending.push_back(Bytes::from(out));
     }
 
-    fn feed(&mut self, bytes: &[u8]) -> Result<(), io::Error> {
+    fn feed(&mut self, bytes: &[u8], eof: bool) -> Result<(), io::Error> {
         self.buffer.extend_from_slice(bytes);
         let mut start = 0;
         let mut line_start = self.line_start;
         let mut frames = Vec::new();
-        for (index, byte) in self.buffer.iter().enumerate().skip(self.scan_from) {
-            if *byte != b'\n' {
+        let mut at = self.scan_from;
+        while at < self.buffer.len() {
+            if !matches!(self.buffer[at], b'\r' | b'\n') {
+                at += 1;
                 continue;
             }
-            let line = &self.buffer[line_start..index];
-            if line.is_empty() || line == b"\r" {
-                if index + 1 - start > MAX_EVENT_BYTES {
+            if self.buffer[at] == b'\r' && at + 1 == self.buffer.len() && !eof {
+                break;
+            }
+            let end = at;
+            at += if self.buffer[at] == b'\r' && self.buffer.get(at + 1) == Some(&b'\n') {
+                2
+            } else {
+                1
+            };
+            if end == line_start {
+                if at - start > MAX_EVENT_BYTES {
                     return Err(io::Error::other("上游原生事件超过 8 MiB，已停止接收"));
                 }
-                frames.push(self.buffer[start..=index].to_vec());
-                start = index + 1;
+                frames.push(self.buffer[start..at].to_vec());
+                start = at;
             }
-            line_start = index + 1;
+            line_start = at;
         }
-        self.scan_from = self.buffer.len().saturating_sub(start);
+        self.scan_from = at.saturating_sub(start);
         self.line_start = line_start.saturating_sub(start);
         if start > 0 {
             self.buffer.drain(..start);
@@ -529,12 +567,15 @@ impl Stream for NativeStream {
                     if !bytes.is_empty() {
                         self.telemetry.note_first_frame();
                     }
-                    if let Err(error) = self.feed(&bytes) {
+                    if let Err(error) = self.feed(&bytes, false) {
                         self.fail(error);
                     }
                 }
                 Poll::Ready(Some(Err(error))) => self.fail(error),
                 Poll::Ready(None) => {
+                    if let Err(error) = self.feed(&[], true) {
+                        self.fail(error);
+                    }
                     self.ended = true;
                     if !self.buffer.is_empty() {
                         self.buffer.clear();

@@ -171,6 +171,20 @@ fn chinese_id(v: &str) -> bool {
         .sum();
     bytes[17].to_ascii_uppercase() == b"10X98765432"[sum % 11]
 }
+pub(super) fn card_prefix(s: &str, a: usize, mut b: usize) -> Option<(usize, usize)> {
+    if luhn(&s[a..b]) {
+        return Some((a, b));
+    }
+    while b > a {
+        let separator = s[a..b].rfind([' ', '-'])?;
+        b = a + separator;
+        if luhn(&s[a..b]) {
+            return Some((a, b));
+        }
+    }
+    None
+}
+
 fn luhn(v: &str) -> bool {
     let n = v.bytes().filter(u8::is_ascii_digit).count();
     if !(15..=19).contains(&n) {
@@ -734,7 +748,39 @@ fn phone(s: &str, a: usize, b: usize) -> bool {
     }
     true
 }
-pub(super) fn part_of_number_or_id(s: &str, a: usize, b: usize) -> bool {
+pub(super) fn numeric_arrays(s: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+    for (i, byte) in s.bytes().enumerate() {
+        match byte {
+            b'[' => start = Some(i),
+            b']' => {
+                if let Some(begin) = start.take() {
+                    ranges.push((begin, i + 1));
+                }
+            }
+            b'0'..=b'9'
+            | b','
+            | b'.'
+            | b'-'
+            | b'+'
+            | b'e'
+            | b'E'
+            | b' '
+            | b'\t'
+            | b'\n'
+            | b'\r' => {}
+            _ => start = None,
+        }
+    }
+    ranges
+}
+pub(super) fn part_of_number_or_id(
+    s: &str,
+    a: usize,
+    b: usize,
+    numeric_arrays: &[(usize, usize)],
+) -> bool {
     let raw = s.as_bytes();
     if (numeric(raw.get(a)) && a >= 2 && raw[a - 1] == b'.' && numeric(raw.get(a - 2)))
         || (numeric(raw.get(b - 1)) && raw.get(b) == Some(&b'.') && numeric(raw.get(b + 1)))
@@ -744,32 +790,18 @@ pub(super) fn part_of_number_or_id(s: &str, a: usize, b: usize) -> bool {
     if !s[a..b].bytes().all(|x| x.is_ascii_digit()) {
         return false;
     }
+    let in_array = numeric_arrays
+        .partition_point(|&(start, _)| start <= a)
+        .checked_sub(1)
+        .is_some_and(|index| numeric_arrays[index].1 >= b);
+    if in_array {
+        return true;
+    }
     let after = s[b..].trim_start();
     let before = s[..a].trim_end();
-    // Plain strings can contain a JSON document. An unquoted numeric JSON value is data, not text.
+    // Plain strings can contain JSON documents; unquoted numeric fields are data.
     (after.is_empty() || after.starts_with([',', '}', ']']))
-        && (before
+        && before
             .strip_suffix(':')
-            .is_some_and(|k| k.trim_end().ends_with('"'))
-            || before
-                .chars()
-                .rev()
-                .take_while(|c| {
-                    c.is_ascii_digit()
-                        || matches!(
-                            c,
-                            ',' | '.' | '-' | '+' | 'e' | 'E' | ' ' | '\t' | '\n' | '\r'
-                        )
-                })
-                .count()
-                < before.len()
-                && before.rfind('[').is_some_and(|i| {
-                    before[i + 1..].chars().all(|c| {
-                        c.is_ascii_digit()
-                            || matches!(
-                                c,
-                                ',' | '.' | '-' | '+' | 'e' | 'E' | ' ' | '\t' | '\n' | '\r'
-                            )
-                    })
-                }))
+            .is_some_and(|key| key.trim_end().ends_with('"'))
 }

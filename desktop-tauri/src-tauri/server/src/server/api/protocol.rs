@@ -149,13 +149,25 @@ pub async fn responses_endpoint(
         Err(response) => return response,
     };
     // 协议翻译前识别，保留原始文本块边界。
-    let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Responses);
-    // 标题请求在原始体上判（Responses 的 input 数组形态），且只在不命中压缩时判。
+    let (compact_client, title_client) = if let Some(Extension(context)) = privacy.as_ref() {
+        (context.compact_client, context.title_client)
+    } else {
+        let compact = compact_routing::client_for_request(
+            &source.behavior_client,
+            &raw,
+            RequestFormat::Responses,
+        );
+        let title = if compact.is_none() {
+            title_routing::client_for_request(&source.behavior_client, &headers, &raw, true)
+        } else {
+            None
+        };
+        (compact, title)
+    };
     let special = if compact_client.is_some() {
         super::request_prepare::SpecialRoute::compact(compact_client)
     } else {
-        super::request_prepare::SpecialRoute::title(title_routing::client_for_request(
-            &source.behavior_client, &headers, &raw, true))
+        super::request_prepare::SpecialRoute::title(title_client)
     };
     // 原始请求体留一份：回程要用它回显请求侧字段（instructions / tools / …），
     // 而下面会把 payload 改写成 Chat 形态
@@ -387,13 +399,25 @@ pub async fn messages_endpoint(
     };
     let stream = raw.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
-    let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Anthropic);
-    // 标题请求在原始体上判（Anthropic 的 content 块形态），只在不命中压缩时判。
+    let (compact_client, title_client) = if let Some(Extension(context)) = privacy.as_ref() {
+        (context.compact_client, context.title_client)
+    } else {
+        let compact = compact_routing::client_for_request(
+            &source.behavior_client,
+            &raw,
+            RequestFormat::Anthropic,
+        );
+        let title = if compact.is_none() {
+            title_routing::client_for_request(&source.behavior_client, &headers, &raw, false)
+        } else {
+            None
+        };
+        (compact, title)
+    };
     let special = if compact_client.is_some() {
         super::request_prepare::SpecialRoute::compact(compact_client)
     } else {
-        super::request_prepare::SpecialRoute::title(title_routing::client_for_request(
-            &source.behavior_client, &headers, &raw, false))
+        super::request_prepare::SpecialRoute::title(title_client)
     };
     // 协议翻译
     let (native, mut chat_body) = match NativeRequest::prepare(WireProtocol::Anthropic, raw.clone()) {

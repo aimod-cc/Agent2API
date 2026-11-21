@@ -348,6 +348,14 @@ pub(super) fn transient_retry_advice(status: u16, remaining: usize) -> Option<Re
     })
 }
 
+// Only use after note_attempt_started; pre-attempt validation must not finalize
+// a previous attempt. Keep the original error and successful send result intact.
+fn finish_preparation<T>(ctx: &ProviderContext<'_>, result: Result<T, GatewayError>) -> Result<T, GatewayError> {
+    result.inspect_err(|error| {
+        ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+    })
+}
+
 /// 传输层失败（DNS / 代理 / 连接）的统一退避建议：与瞬时 HTTP 错误同一套设置。
 ///
 /// 原因取错误自带的简短形态（`UpstreamRequestError::reason`）：连接超时与
@@ -1066,7 +1074,8 @@ async fn attempt_queue(
             let cache_key = (provider_id, account_pool.clone(), selected_model.clone(), degraded);
             if !send_cache.contains_key(&cache_key) {
                 let built = if let Some(native) = subscription_native {
-                    let mut prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded)?;
+                    let mut prepared = finish_preparation(ctx, super::native_payload::prepare(
+                        ctx, native, provider_id, target.account.as_ref(), degraded))?;
                     let requested = model_of(ctx.body);
                     let wire = crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, target.account.as_ref());
                     if ctx.direct_model.is_none() && target.account.as_ref().and_then(crate::server::core::routing_groups::candidate_model).is_none() {
@@ -1078,7 +1087,7 @@ async fn attempt_queue(
                     }
                     prepared
                 } else {
-                    send_body(ctx, provider_id, target.account.as_ref(), degraded).await?
+                    finish_preparation(ctx, send_body(ctx, provider_id, target.account.as_ref(), degraded).await)?
                 };
                 send_cache.insert(cache_key.clone(), built);
             }
@@ -1989,11 +1998,15 @@ async fn attempt_custom(
     // **即将发送**。`send_body` 对自定义 id 是零改写（它的模型名改写只认
     // modelRules），处理结果就是「提示词/脱敏后的客户端请求体」—— 自定义
     // 语义的改写（映射 alias → 真名、思考等级）在 forward 里做。
-    let native = if super::native_payload::eligible(ctx, &provider_id)? { ctx.native } else { None };
-    let send = match native {
+    let native = if finish_preparation(ctx, super::native_payload::eligible(ctx, &provider_id))? {
+        ctx.native
+    } else {
+        None
+    };
+    let send = finish_preparation(ctx, match native {
         Some(native) => super::native_payload::prepare(ctx, native, &provider_id, target.account.as_ref(), degraded),
         None => send_body(ctx, &provider_id, target.account.as_ref(), degraded).await,
-    }?;
+    })?;
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
     // 覆盖一次（note_upstream_model 是覆盖式，最后一次为准；空串被内部过滤）。
@@ -2299,7 +2312,8 @@ async fn attempt_stateful(
         crate::server::core::plugin_host::script::native::protocol(provider_id, wire_model) == Some(native.protocol)
             && native.protocol != crate::server::core::protocol::native::WireProtocol::Chat
     }) {
-        let prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded)?;
+        let prepared = finish_preparation(ctx, super::native_payload::prepare(
+            ctx, native, provider_id, target.account.as_ref(), degraded))?;
         crate::server::core::plugin_host::script::native::forward(provider_id,
             target.account_id.as_deref().unwrap_or(""), prepared.body.into_owned(), ctx.client_headers,
             target.proxy.clone(), native.protocol, &model, ctx.stream, ctx.telemetry).await
