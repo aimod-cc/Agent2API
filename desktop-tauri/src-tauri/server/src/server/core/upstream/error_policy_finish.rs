@@ -24,6 +24,21 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     let decision = error.routing_error.clone().unwrap_or_else(|| error_policy::for_error_with(&ctx.error_policy, &target.provider, &model, error, false));
     error_policy::attach(error, &decision);
     error_policy::note(ctx.telemetry, &decision, None);
+    // ── 「这家吃不下这份请求」要把整家铺上冷却，而不是只罚撞墙的那个账号 ──
+    // provider_local 的 400（网页工具预算超限、该家不接受的参数）与账号无关：
+    // 同一家的另一个账号拿到的是同一份 body、同一个预算，撞的是同一堵墙。只给
+    // 失败账号记冷却的话，下一条请求会派同家的下一个账号再吃一次一模一样的
+    // 400 —— 用户看到的就是「前面报过错的没有被熔断，后续请求继续往上撞」。
+    // 冷却键仍是模型维度（这家别的模型照常可用），但铺到该家的全部账号。
+    if decision.skips_provider() && decision.scope == crate::server::config::error_policy::CooldownScope::Model
+        && ctx.pinned_account.is_none() {
+        for account in rotate::scoped_accounts(service, providers, keys.request_model(), None, Some(&ctx.routing)) {
+            if crate::server::core::routing::provider_of(&account) != target.provider { continue; }
+            let Some(id) = crate::server::core::routing::account_id(&account) else { continue };
+            if Some(id) == target.account_id.as_deref() { continue; }
+            error_policy::remember_cooldown(service, settings, id, &model, error, &decision);
+        }
+    }
     if decision.hard_stop || ctx.telemetry.replay_guard().blocked() || ctx.telemetry.is_cancelled() || ctx.telemetry.response_started() { return false; }
     if let Some(account) = target.account_id.as_deref() {
         if let Some(entry) = error_policy::remember_cooldown(service, settings, account, &model, error, &decision) {
