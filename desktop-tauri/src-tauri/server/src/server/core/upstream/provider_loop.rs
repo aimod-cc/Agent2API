@@ -674,7 +674,20 @@ async fn attempt_queue(
     // 结果是「能换几个账号」根本没人管 —— 某家囤了 9 个账号时一次请求会一路
     // 试到第 10 个，而用户填的那个数字要等跨家才生效。
     let mut budget = RetryBudget::from_snapshot(ctx.error_policy.clone());
-    let switch_total = ctx.error_policy.settings.switches as usize;
+    // ── 换号预算的**下限**是整条候选队列 ─────────────────────────
+    // 用户填的 `switches` 表达「最多换几次」，但它不能比候选队列还短：
+    // 队列里有 N 个没试过的候选时提前收尾，就是把「换一个本来能答上来的
+    // 账号/提供商」变成「直接 400 给下游」。生产上的形状就是 21 个候选、
+    // 默认 10 次预算 —— 试到第 10 个（全是同一家的工具预算 400）就收尾，
+    // 而排在第 12 位、不做工具模拟的那家其实一条就 200。
+    //
+    // 所以取 `max(用户值, 队列规模)`，再受转发层的 `MAX_ROUTE_ATTEMPTS`
+    // 约束（那才是防死循环的硬闸）。
+    let queue_cap = rotate::scoped_account_cap(service, provider_ids, cooldown_keys.request_model(),
+        ctx.pinned_account, Some(&ctx.routing));
+    // 配成 0 是显式的「不换号」，尊重它；其余情况一律按队列规模兜底。
+    let configured = ctx.error_policy.settings.switches as usize;
+    let switch_total = if configured == 0 { 0 } else { configured.max(queue_cap).min(MAX_ROUTE_ATTEMPTS) };
     let mut switches_left = switch_total;
     let mut decision = ctx.telemetry.route_decision().unwrap_or_else(|| json!({}));
     decision["errorPolicyConfig"] = json!({ "revision": config::error_policy::revision(&ctx.error_policy),
@@ -798,7 +811,8 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -874,7 +888,7 @@ async fn attempt_queue(
                     if ctx.telemetry.replay_guard().blocked() { return Err(error); }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     if matches!(error.code.as_deref(), Some("plugin_busy" | "gateway_busy" | "account_busy" | "plugin_resource_limit"
-                        | "plugin_protocol_error" | "plugin_trap" | "plugin_response_started" | "web_tools_invalid_request")) { return Err(error); }
+                        | "plugin_protocol_error" | "plugin_trap" | "plugin_response_started")) { return Err(error); }
                     let account_unavailable = matches!(error.code.as_deref(),
                         Some("account_model_unavailable" | "account_model_permissions_unknown"));
                     if ctx.images.is_some() && !account_unavailable { return Err(error); }
@@ -895,7 +909,8 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -1146,21 +1161,17 @@ async fn attempt_queue(
                     // 个模型名在别几家都能答。换号顺延本来就不该只看「发出去之后
                     // 上游怎么回」：既然本地就判定不可用，队列里的下一家有机会。
                     //
-                    // 其余构造期错误（400 缺模型名 / 转换失败、401 账号缺凭证、
-                    // 500 内部坏了）继续**直接终止**：那些是「这份请求本身坏了」，
-                    // 换个账号发的是同一份坏请求，换满预算只会把一次 400 变成四条
-                    // 400，并把真实原因埋进顺延链里。
-                    let account_unavailable = error.code.as_deref().is_some_and(|code| {
-                        matches!(code, "account_model_unavailable" | "account_model_permissions_unknown")
-                    });
+                    // 其余构造期错误（网页工具字符预算超限这类 400、账号对模型无
+                    // 权限、转换失败）同样交给**统一错误规则**判定（#644）：规则会
+                    // 区分「换一个账号仍可能好」（换号）、「同一家换账号也没用」（跳过
+                    // 这一家）与「再发一次可能重复执行」（硬终止）。在这里写死
+                    // `return Err` 等于绕过用户的整套错误处理设置。
                     if i32::from(readiness::LOCAL_PRECONDITION_STATUS) != error.status_code {
-                        if account_unavailable || error.status_code == 501 {
-                            let mut error = error;
-                            if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
-                                last_error = Some(error); continue 'accounts;
-                            }
-                            return Err(error);
+                        let mut error = error;
+                        if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
+                            &target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                            &conv_key, &model, sticky_generation) {
+                            last_error = Some(error); continue 'accounts;
                         }
                         return Err(error);
                     }
@@ -1559,7 +1570,8 @@ async fn attempt_queue(
                     if ctx.telemetry.replay_guard().blocked() { return Err(failure.error); }
                     let mut error = failure.error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -1664,7 +1676,8 @@ async fn attempt_queue(
                 super::error_policy::attach(&mut error, &decision);
                 ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
                 if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                     last_error = Some(error); continue 'accounts;
                 }
                 return Err(error);

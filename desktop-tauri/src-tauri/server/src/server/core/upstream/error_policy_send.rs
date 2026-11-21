@@ -46,7 +46,12 @@ pub(super) async fn send_with_retry(
                 if telemetry.replay_guard().blocked() || telemetry.is_cancelled() {
                     return Err(stopped(if telemetry.is_cancelled() { super::cancellation::cancelled_error() } else { gateway }));
                 }
-                let decision = error_policy::for_error_with(&budget.policy, adapter.provider_id(), &budget.model, &gateway, !error.safe_to_retry);
+                let mut decision = error_policy::for_error_with(&budget.policy, adapter.provider_id(), &budget.model, &gateway, !error.safe_to_retry);
+                // 传输层失败（连不上 / 写不出去 / 读不回来）换成别的账号也一样：
+                // 这类问题出在本机链路或出口上，换号只会把整个队列白打一遍。
+                // 保持「原地处理 + 原样收尾」，与 #644 的口径不冲突 —— 那条规则的
+                // 主语是「上游返回的错误」。
+                if error.network_failure { decision.action = crate::server::config::error_policy::ErrorAction::ReturnError; }
                 error_policy::attach(&mut gateway, &decision);
                 error_policy::note(telemetry, &decision, None);
                 if decision.hard_stop {
