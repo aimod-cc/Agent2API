@@ -815,7 +815,9 @@ async fn attempt_queue(
                         &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
-                    return Err(error);
+                    // 兜底也没能给出下一个：这时**不再把上游的 4xx 原样透给下游**
+                    // —— 见 `exhausted_error`（换过 ≥2 个对象一律收成可重试的 503）。
+                    return Err(exhausted_error(Some(error), tried_ids.len()));
 
                 }
             }
@@ -925,7 +927,7 @@ async fn attempt_queue(
                         &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
-                    return Err(error);
+                    return Err(exhausted_error(Some(error), tried_ids.len()));
 
                 }
             }
@@ -1185,7 +1187,7 @@ async fn attempt_queue(
                             &conv_key, &model, sticky_generation) {
                             last_error = Some(error); continue 'accounts;
                         }
-                        return Err(error);
+                        return Err(exhausted_error(Some(error), tried_ids.len()));
                     }
                     if ctx.telemetry.replay_guard().blocked() { return Err(error); }
                     if defer_to_next_account(
@@ -1599,7 +1601,7 @@ async fn attempt_queue(
                         &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
-                    return Err(error);
+                    return Err(exhausted_error(Some(error), tried_ids.len()));
 
                 }
             }
@@ -1705,7 +1707,7 @@ async fn attempt_queue(
                         &conv_key, &model, sticky_generation) {
                     last_error = Some(error); continue 'accounts;
                 }
-                return Err(error);
+                return Err(exhausted_error(Some(error), tried_ids.len()));
             }
             Gate::Held(head)
         } else {

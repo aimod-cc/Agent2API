@@ -19,8 +19,13 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     }
     // 面包屑：这一行出现 ⇒ 统一错误规则确实跑到了；没出现 ⇒ 这个错误是某个
     // 早退分支直接抛回下游的（那时明细里的 `errorPolicy` 会是 null）。
-    logging::stage(format!("错误结算 provider={} status={} 模型={}",
-        target.provider, error.status_code, target.account.as_ref().and_then(|a| a["routingModel"].as_str()).unwrap_or("-")));
+    // 用 `log_with_level` 而不是 `console_line`：前者会落进数据库的 `logs` 表，
+    // 事后能直接查；`console_line` 只打到 stdout，没截屏就等于丢了。
+    logging::log_with_level("[Upstream]", &format!(
+        "错误结算 provider={} status={} 模型={} 已试={} 账号={}",
+        target.provider, error.status_code,
+        target.account.as_ref().and_then(|a| a["routingModel"].as_str()).unwrap_or("-"),
+        tried.len(), target.account_id.as_deref().unwrap_or("-")), "info");
     let model = error.routing_error.as_ref().map(|decision| decision.model.clone()).unwrap_or_else(|| {
         target.account.as_ref().map(|account| keys.for_account(account)).unwrap_or_else(|| keys.for_provider(&target.provider))
     });
@@ -39,8 +44,8 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     let head = format!("HTTP {} {}", error.status_code, error.message);
     let stop = |reason: &str| {
         ctx.telemetry.note_error_policy(json!({ "reason": reason }));
-        logging::console_line("[Upstream]", &format!(
-            "未继续顺延（{head} · 模型 {model_label}）：{reason}"));
+        logging::log_with_level("[Upstream]", &format!(
+            "未继续顺延（{head} · 模型 {model_label}）：{reason}"), "warn");
         false
     };
     // ── 「这家吃不下这份请求」要把整家铺上冷却，而不是只罚撞墙的那个账号 ──
@@ -116,9 +121,9 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     // 的候选。所以「规则动作是直接返回错误」在这里只留一条日志，不再提前收尾 ——
     // 决定收尾的判据只剩下面那一个：「下一个」确实不存在。
     if !decision.switches() {
-        logging::console_line("[Upstream]", &format!(
+        logging::log_with_level("[Upstream]", &format!(
             "规则「{}」本来会直接返回错误（HTTP {}），兜底改为继续换下一个可用对象",
-            decision.rule.name, error.status_code));
+            decision.rule.name, error.status_code), "warn");
     }
     if decision.scope == crate::server::config::error_policy::CooldownScope::Account {
         if let Some(id) = target.account_id.as_deref() {
@@ -154,10 +159,10 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     // 换号预算用尽同样不作为收尾理由：预算只是「别一口气试太多」的软闸，
     // 真正的硬闸是转发层的 `MAX_ROUTE_ATTEMPTS`（100 次）。
     if !super::provider_loop::take_switch(switches_left, switch_total) {
-        logging::console_line("[Upstream]", &format!(
-            "换号预算已用尽（上限 {switch_total}），兜底继续换下一个可用对象"));
+        logging::log_with_level("[Upstream]", &format!(
+            "换号预算已用尽（上限 {switch_total}），兜底继续换下一个可用对象"), "warn");
     }
-    logging::console_line("[Upstream]", &format!("统一错误规则「{}」：HTTP {}，顺延到 {}（换号 {}/{}）",
-        decision.rule.name, error.status_code, super::account_display(&next), switch_total - *switches_left, switch_total));
+    logging::log_with_level("[Upstream]", &format!("统一错误规则「{}」：HTTP {}，顺延到 {}（换号 {}/{}）",
+        decision.rule.name, error.status_code, super::account_display(&next), switch_total - *switches_left, switch_total), "info");
     true
 }
