@@ -389,7 +389,7 @@ fn select_target_account_sync(
             // 请求判死属于「自己的记账把自己的活掐了」。所以这里只越过估算
             // 冷却：挑最早恢复的那个先试一次。成了就解开，不成也照常记一次
             // 失败（下一次估算会更长）。
-            if let Some(account) = last_resort(&enabled, keys, tried_ids, now) {
+            if let Some(account) = last_resort(&enabled, keys, tried_ids, now, &snap.open) {
                 let id = routing::account_id(&account).unwrap_or_default().to_string();
                 if let Some(picked) = service.store.get_session_by_id(&id) {
                     logging::console_line("[Upstream]", &format!(
@@ -813,7 +813,7 @@ pub(super) fn pick_next_account(
     }
     // 队列被冷却 / 并发 / 退避挡得一个不剩 —— 顺延路径同样不能就此收尾：
     // 与首轮选路共用 `last_resort` 的口径（只越过我们自己的估算冷却）。
-    last_resort(&candidates, keys, tried_ids, now)
+    last_resort(&candidates, keys, tried_ids, now, &snap.open)
 }
 
 /// 账号此刻的冷却如果**全是我们自己估算**的，返回最晚的恢复时间。
@@ -845,18 +845,23 @@ fn guessed_reset(account: &Value, wire: &str, now: i64) -> Option<i64> {
 /// 全队列被冷却挡住时的兜底候选：估算冷却中、最早恢复、本请求还没试过的那个。
 ///
 /// 只看估算冷却（见 [`guessed_reset`]），所以「上游明确让我们等」的队列不会
-/// 被这条兜底绕过；反复失败时估算会一次比一次长，不会把同一个账号无休止地
-/// 重试（且每次都会进 `tried_ids`）。
+/// 被这条兜底绕过；**熔断中的账号也不碰** —— 熔断的含义就是「先别用它」，兜底
+/// 越过它等于把熔断作废。反复失败时估算会一次比一次长，不会把同一个账号
+/// 无休止地重试（且每次都会进 `tried_ids`）。
 fn last_resort(
     accounts: &[Value],
     keys: &routing::CooldownKeys<'_>,
     tried_ids: &[String],
     now: i64,
+    open: &std::collections::HashSet<String>,
 ) -> Option<Value> {
     accounts
         .iter()
         .filter(|account| {
             if matches!(account.get("enabled"), Some(Value::Bool(false))) {
+                return false;
+            }
+            if routing::account_id(account).is_some_and(|id| open.contains(id)) {
                 return false;
             }
             let key = crate::server::core::routing_groups::attempt_key(account);

@@ -1349,10 +1349,14 @@ async fn attempt_queue(
                     // 时，粘的必须是现在这个能干活的。
                     let route_settings = ctx.routing.settings;
                     if let Some(account_id) = target.account_id.as_deref() {
-                        if route_settings.breaker_enabled {
-                            service
-                                .route
-                                .breaker_success(account_id, route_settings.breaker_success_threshold);
+                        // 熔断的「开关与阈值」以错误规则那份设置为准：失败计数在
+                        // `error_policy_finish` 里读的是 `error_policy.settings`，
+                        // 成功恢复若还读 `routing.settings`，升级后两边一旦不同步，
+                        // 失败计数就永远清零不了 —— 于是一个历史失败的账号每失败
+                        // 一次都被当成「刚攒够阈值」，反复熔断。
+                        let policy = &ctx.error_policy.settings;
+                        if policy.breaker {
+                            service.route.breaker_success(account_id, policy.breaker_successes as i64);
                         }
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
