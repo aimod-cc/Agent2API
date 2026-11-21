@@ -1884,7 +1884,7 @@ async fn attempt_queue(
     // 改造前这里恒返回 `500 上游转发重试次数超限`：客户端把它当服务器错误，
     // 既不知道能不能重试，也看不到最后一次真实原因（排队里 43 个账号试到
     // 预算用尽，日志只剩这一句）。见 [`exhausted_error`]。
-    Err(exhausted_error(last_error))
+    Err(exhausted_error(last_error, tried_ids.len()))
 }
 
 /// 换号 / 排队轮转走到尽头时的收尾错误。
@@ -1897,10 +1897,15 @@ async fn attempt_queue(
 ///   这属于「网关暂时没有承载者」，重发一次就有机会落到已经恢复的账号上。
 ///   保持上游的 429 反而更糟 —— 同一个模型名在下一分钟可能就由另一家答上来，
 ///   而 429 让客户端以为「是它自己的额度问题」。
-/// * 否（400 参数 / 401 凭据 / 403 权限 / 404 模型不存在这类）→ **原样返回**。
-///   换个账号重发必然还是同一个结论，改写成 503 只会让客户端把一个永久错误
-///   当成抖动无限重试。
-fn exhausted_error(last: Option<GatewayError>) -> GatewayError {
+/// * 否（400 参数 / 401 凭据 / 403 权限 / 404 模型不存在这类）→ **原样返回** ——
+///   但只在**这条请求只试过一个对象**时才原样：那才可能真的是「客户端请求本身
+///   有问题」。一旦已经换过号 / 换过家（`tried >= 2`）还是同一个结论，就不能再
+///   把它当客户端错误丢出去 —— 同一份 body 在两家都撞 400，最先该怀疑的是网关
+///   侧的渠道/模型映射，把 400 透给下游只会让客户端以为「我的请求写错了」直接
+///   中止（实测 WorkBuddy 那条 `Illegal API invocation from an unapproved
+///   channel` 就是这样：上游渠道问题，客户端却收到 400）。这类收成 503 +
+///   `Retry-After`，正文保留上游原文，客户端会按可重试处理。
+fn exhausted_error(last: Option<GatewayError>, tried: usize) -> GatewayError {
     let Some(error) = last else {
         return GatewayError::with_status(
             503, "上游转发重试次数超限：这一轮没有任何候选账号应答，请稍后重试",
@@ -1910,7 +1915,7 @@ fn exhausted_error(last: Option<GatewayError>) -> GatewayError {
     };
     let retryable = matches!(error.status_code, 402 | 408 | 425 | 429 | 500 | 502 | 503 | 504)
         || matches!(error.code.as_deref(), Some("account_busy" | "route_empty" | "route_exhausted"));
-    if !retryable {
+    if !retryable && tried < 2 {
         return error;
     }
     crate::server::logging::log_with_level(

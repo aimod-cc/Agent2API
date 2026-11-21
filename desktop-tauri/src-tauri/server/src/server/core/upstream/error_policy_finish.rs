@@ -135,11 +135,29 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
         error_policy::exclude_provider(service, providers, keys.request_model(), &target.provider, tried, ctx.pinned_account, &ctx.routing);
     }
     if let Some(id) = target.attempt_key() { tried.retain(|other| other != &id); tried.push(id); }
-    let Some(next) = rotate::pick_next_account(service, providers, keys, tried, ctx.pinned_account, &ctx.routing) else {
-        // 这一句是「池子里到底还有没有下一个」的唯一权威答案：`plan_route`
-        // 只记录候选，能不能真的拿出一个对象由这次查找决定。
-        return stop(&format!(
-            "本队列已没有下一个可发对象（本轮已试 {} 个）", tried.len()));
+    let picked = rotate::pick_next_account(service, providers, keys, tried, ctx.pinned_account, &ctx.routing);
+    let next = match picked {
+        Some(next) => next,
+        None => {
+            // ── 兜底：正常选路已经把整个池子剔空了 ───────────────────────
+            // 到这一步说明 `plan_route` + `last_resort` 都拿不出对象（冷却、
+            // 限制器、熔断、并发、余额全剔完）。这不是「没有账号」，而是
+            // 「我们的账本认为没有账号」。所以按配置里的原始顺序再走一遍，
+            // 只跳过禁用 / 无凭证 / 本请求已试过的 —— 宁可撞一次，也别把
+            // 请求断在这。
+            let fallback = rotate::fallback_sweep(service, providers, keys, tried, ctx.pinned_account, &ctx.routing);
+            let Some(fallback) = fallback else {
+                return stop(&format!("本队列已没有下一个可发对象（本轮已试 {} 个，兜底遍历也已试完）", tried.len()));
+            };
+            logging::console_line("[Upstream]", &format!(
+                "⚠️ 常规选路已无候选，按兜底顺序（路由组 / 提供商原始顺序，忽略冷却与限制器）继续：{}",
+                super::account_display(&fallback)));
+            let key = crate::server::core::routing_groups::attempt_key(&fallback);
+            if !key.is_empty() && !tried.contains(&key) { tried.push(key); }
+            logging::console_line("[Upstream]", &format!("兜底顺延到 {}（换号 {}/{}）",
+                super::account_display(&fallback), switch_total - *switches_left, switch_total));
+            return true;
+        }
     };
     if !super::provider_loop::take_switch(switches_left, switch_total) {
         return stop(&format!("换号次数已用尽（上限 {switch_total}）"));

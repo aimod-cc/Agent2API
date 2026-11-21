@@ -16,6 +16,9 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
     let wait_started = Instant::now();
     let deadline = wait_started + Duration::from_secs(wait_seconds);
     let mut excluded = tried.to_vec();
+    // 兜底最多走 8 次：每次兜底都把一个账号写进 `excluded`，正常几轮就扫完了；
+    // 这个计数器只防「`attempt_key` 为空时 excluded 不增长」的死循环。
+    let mut fallback_left = 8usize;
     let notify = service.connections().changed_notify();
     loop {
         let wake = notify.notified();
@@ -34,7 +37,37 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
                 }
             }
             Err(error) if error.code.as_deref() == Some("account_busy") || excluded.len() > tried.len() => {},
-            Err(error) => return Err(error),
+            Err(error) => {
+                // ── 兜底：常规选路一个候选都没给出来 ─────────────────────
+                // 走到这里说明 `select_target_account` 直接判定「无对象可发」：
+                // 全在冷却（`routing_cooldown`）、全被限制器拦、全被禁用、
+                // 全忙…… 这些判据**全是我们自己记的账**（冷却时长、限制器读数、
+                // 并发计数）。用它把整条请求判死，等于自己的账本把自己的活掐了。
+                //
+                // 于是按配置里的原始顺序再走一遍（`fallback_sweep`），只跳过
+                // 禁用、取不到凭证、以及本请求已经试过的。撞一次总比直接 429
+                // / 503 让下游中断好 —— 而且真失败了，下次冷却估算会更长，
+                // 不会在同一个账号上原地打转。
+                if fallback_left == 0 { return Err(error); }
+                fallback_left -= 1;
+                let Some(account) = rotate::fallback_sweep(service, providers, keys, &excluded, pinned, routing) else {
+                    return Err(error);
+                };
+                let Some(target) = rotate::target_from_account(service, account, None) else {
+                    return Err(error);
+                };
+                crate::server::logging::log_with_level(
+                    "[Upstream]",
+                    &format!("⚠️ 常规选路报错（HTTP {} {}），改按兜底顺序尝试 {}/{}",
+                        error.status_code, error.message, target.provider,
+                        target.account_id.as_deref().unwrap_or("-")),
+                    "warn",
+                );
+                let limit = target.account.as_ref().map(crate::server::core::routing::max_concurrent_of).unwrap_or(0);
+                if connection.try_rebind(target.account_id.clone(), limit) { return Ok(target); }
+                if let Some(key) = target.attempt_key() { excluded.push(key); }
+                continue;
+            }
         }
         connection.rebind(None);
         if Instant::now() >= deadline {
