@@ -250,6 +250,13 @@ impl Runtime {
             .map_or(tokio::time::Instant::now() + timeout, |deadline| deadline.min(tokio::time::Instant::now() + timeout));
         let query_reserved = !interactive && super::query_queue::reserved(&self.shared, &account, method)?;
         let diagnostics = super::diagnostics::Invocation::new(&self.shared.options.provider, method, &self.module_digest);
+        // 面包屑：wasm 调用是栈溢出高危区（debug 构建下加载/执行插件曾把默认
+        // 2 MiB 栈打穿，见 `server::lib::worker_stack_bytes`）。万一崩在这里，
+        // 控制台最后一行就是「哪个 provider 的哪个方法」。
+        crate::server::logging::stage(format!(
+            "wasm {}/{} account={} bytes={}",
+            self.shared.options.provider, method, account, input_bytes,
+        ));
         let work = async {
             let wait_started = tokio::time::Instant::now();
             let queue_deadline = (tokio::time::Instant::now() + Duration::from_secs(capacity::limits().queue_wait_seconds)).min(call_deadline);

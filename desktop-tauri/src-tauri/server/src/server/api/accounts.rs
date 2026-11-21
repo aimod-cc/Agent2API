@@ -403,6 +403,9 @@ pub async fn dispatch(
     query: &str,
     body: &Bytes,
 ) -> Response {
+    // 面包屑：面板首屏就拉这个接口（62 个账号 × 用量 JSON），崩在请求链上时
+    // 这条能把它和「启动时的后台维护」区分开。
+    crate::server::logging::stage(format!("HTTP {method} {full_path}"));
     // ① 精确命中 `/api/accounts`
     if rest.is_none() {
         match method.as_str() {
