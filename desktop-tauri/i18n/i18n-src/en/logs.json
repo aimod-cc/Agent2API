@@ -63,6 +63,8 @@
   "插件启动存在异常": "Some plugins could not start",
   "插件启动完成，{n} 个已就绪": "Plugin startup complete: {n} ready",
   "插件启动超时": "Plugin startup timed out",
+  "插件已停止": "Plugin stopped",
+  "插件已停止，远端状态未确认": "Plugin stopped; remote state unconfirmed",
   "插件已就绪": "Plugin ready",
   "插件已恢复运行": "Plugin is running again",
   "插件暂不可用，等待运行环境恢复": "Plugin unavailable while the runtime recovers",

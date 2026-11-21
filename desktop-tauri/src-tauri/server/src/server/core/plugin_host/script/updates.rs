@@ -6,27 +6,19 @@
 //!   * **GitHub 源** → 那个分支/标签当前指向的提交，与装的那次记下的 `commit` 比
 //!     （版本号在这里没有可比性，所以「最新」显示的是提交短号）。
 //!
-//! 结果落一份小缓存（`updates.json`），后台每 6 小时刷一次；插件页的
-//! 「检查更新」可以强制立刻刷一次（[`refresh`]）。这与图标那条链是同一个模型：
-//! **页面轮询只读缓存，不碰网络**。
-//!
-//! ── 拿不到最新版时一律「不标记可更新」 ──────────────────────
-//! 断网、上游改版、包被撤回都可能让查询失败。失败时写 `error` 但 `available`
-//! 保持 false —— 宁可漏报（用户少点一次更新），也不误报（用户点了却发现没有
-//! 新版本，或者把好好的插件重装一遍）。
+//! 结果落一份小缓存（`website-updates.json`），定时检查统一由「自动维护 / 定时任务」调度；
+//! 插件页的「检查更新」可以强制立刻刷一次（[`check`]）。页面轮询只读缓存，不碰网络。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::Notify;
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::storage::{Package, PackageSource};
 
-/// 后台自动检查的间隔。循环本身每小时醒一次（与图标一致），到点才真去问上游。
+/// 后台自动检查的最小间隔（仅非强制直接刷新时参考）。
 const REFRESH_MS: i64 = 6 * 3_600_000;
 /// 单次 JSON 响应的上限（GitHub commits / npm latest 都很小）。
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
@@ -48,14 +40,20 @@ struct Cache {
     packages: BTreeMap<String, Entry>,
 }
 
-struct Worker {
-    wake: Notify,
-    force: AtomicBool,
+#[derive(Clone, Debug)]
+pub(crate) struct CheckOutcome {
+    pub id: String,
+    pub name: String,
+    pub current: String,
+    pub latest: String,
+    pub available: bool,
+    pub error: Option<String>,
+    pub source_label: String,
 }
 
-fn worker() -> &'static Worker {
-    static WORKER: OnceLock<Worker> = OnceLock::new();
-    WORKER.get_or_init(|| Worker { wake: Notify::new(), force: AtomicBool::new(false) })
+fn update_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 fn path() -> std::path::PathBuf {
@@ -70,7 +68,7 @@ fn cache() -> Cache {
 }
 
 /// 已安装插件的可更新状态（同步读缓存；界面每次轮询都读它）。
-pub(super) fn snapshot() -> Value {
+pub(crate) fn snapshot() -> Value {
     let cached = cache();
     let items: Vec<Value> = cached
         .packages
@@ -82,69 +80,71 @@ pub(super) fn snapshot() -> Value {
     json!({ "checkedAt": cached.checked_at, "updates": items })
 }
 
-/// 叫醒后台：`force` = 忽略间隔，立刻去问一次。
+/// 安装/卸载脚本插件后立即单次刷新更新状态。
 pub(super) fn wake(force: bool) {
-    if force {
-        worker().force.store(true, Ordering::Release);
-    }
-    worker().wake.notify_one();
-}
-
-pub(super) fn spawn() {
-    static STARTED: AtomicBool = AtomicBool::new(false);
-    if STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    crate::spawn_task(async {
-        loop {
-            let force = worker().force.swap(false, Ordering::AcqRel);
-            let _ = refresh(force).await;
-            tokio::select! {
-                _ = worker().wake.notified() => {},
-                _ = tokio::time::sleep(Duration::from_secs(3600)) => {},
-            }
-        }
+    crate::spawn_task(async move {
+        let _ = refresh(force).await;
     });
 }
 
 /// 界面上的「检查更新」：立刻刷一次，返回刷新后的快照。
-///
-/// 已经有一次在跑时直接返回当前快照（不排队）：两个入口同时点不该等两轮网络。
 pub async fn check() -> Value {
     refresh(true).await
 }
 
-/// 刷一次。返回刷新后的快照（失败也一样返回 —— 界面看到的是「没有可更新的」）。
+/// 刷一次。返回刷新后的快照。
 pub(super) async fn refresh(force: bool) -> Value {
-    static BUSY: AtomicBool = AtomicBool::new(false);
-    if BUSY.swap(true, Ordering::AcqRel) {
-        return snapshot();
-    }
-    refresh_inner(force).await;
-    BUSY.store(false, Ordering::Release);
+    let _ = refresh_outcomes(force).await;
     snapshot()
 }
 
-async fn refresh_inner(force: bool) {
-    let Ok(registry) = super::storage::read() else {
-        return;
-    };
+/// 执行一轮更新检查并返回每个已安装脚本插件的检查明细（供自动维护记录使用）。
+pub(crate) async fn refresh_outcomes(force: bool) -> Result<Vec<CheckOutcome>, String> {
+    let _guard = update_lock().lock().await;
+    refresh_inner(force).await
+}
+
+fn source_label(package: &Package) -> String {
+    match &package.source {
+        Some(PackageSource::Local { .. }) => "本地安装".to_string(),
+        Some(PackageSource::Magpie { .. }) => "Magpie 分发源".to_string(),
+        Some(PackageSource::Github { repository, .. }) => format!("GitHub ({repository})"),
+        None => "npm".to_string(),
+    }
+}
+
+async fn refresh_inner(force: bool) -> Result<Vec<CheckOutcome>, String> {
+    let registry = super::storage::read()?;
     let now = crate::server::logging::now_ms();
-    if !force && now.saturating_sub(cache().checked_at) < REFRESH_MS {
-        return;
+    let existing = cache();
+    let names = super::runtime::package_names(&registry);
+    if !force && now.saturating_sub(existing.checked_at) < REFRESH_MS {
+        return Ok(registry.packages.iter().map(|package| {
+            let entry = existing.packages.get(&package.id).cloned().unwrap_or_default();
+            CheckOutcome {
+                id: package.id.clone(),
+                name: names.get(&package.id).cloned().unwrap_or_else(|| package.name.clone()),
+                current: package.version.clone(),
+                latest: entry.latest,
+                available: entry.available,
+                error: entry.error,
+                source_label: source_label(package),
+            }
+        }).collect());
     }
     if registry.packages.is_empty() {
-        if !cache().packages.is_empty() || force {
+        if !existing.packages.is_empty() || force {
             let cached = Cache { checked_at: now, packages: BTreeMap::new() };
             if let Ok(bytes) = serde_json::to_vec(&cached) {
                 let _ = super::storage::atomic_write(&path(), &bytes);
             }
         }
-        return;
+        return Ok(Vec::new());
     }
     // 懒加载：只有真的装了 magpie 分发源的包，才去拉那份索引（几 MB）。
     let mut distribution: Option<Result<Value, String>> = None;
     let mut packages = BTreeMap::new();
+    let mut outcomes = Vec::with_capacity(registry.packages.len());
     for package in &registry.packages {
         let entry = match &package.source {
             Some(PackageSource::Local { .. }) => Entry { latest: package.version.clone(), ..Entry::default() },
@@ -171,6 +171,15 @@ async fn refresh_inner(force: bool) {
             // 没有 source = npm 装的
             None => npm_entry(&package.name, &package.version).await,
         };
+        outcomes.push(CheckOutcome {
+            id: package.id.clone(),
+            name: names.get(&package.id).cloned().unwrap_or_else(|| package.name.clone()),
+            current: package.version.clone(),
+            latest: entry.latest.clone(),
+            available: entry.available,
+            error: entry.error.clone(),
+            source_label: source_label(package),
+        });
         packages.insert(package.id.clone(), entry);
     }
     // 只保留还在装的插件：卸载 / 换来源后旧条目不再有意义。
@@ -180,6 +189,7 @@ async fn refresh_inner(force: bool) {
             crate::server::logging::verbose("[PluginUpdates]", &format!("保存更新检查结果失败：{error}"));
         }
     }
+    Ok(outcomes)
 }
 
 fn magpie_entry(index: &Value, package: &Package) -> Entry {

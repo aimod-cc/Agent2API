@@ -20,12 +20,16 @@ use super::{
 
 static FLIGHTS: OnceLock<Table<String>> = OnceLock::new();
 
-pub(super) fn expiring(store: &AccountStore, id: &str) -> bool {
+pub(super) fn expiring_within(store: &AccountStore, id: &str, min_lead_ms: i64) -> bool {
     account::snapshot(store, id).ok().is_some_and(|account| {
         account.secret.get("needsRelogin").and_then(Value::as_bool) != Some(true)
             && !account.tokens.refresh.is_empty()
-            && account.tokens.expiring()
+            && account.tokens.expiring_within(min_lead_ms)
     })
+}
+
+pub(super) fn expiring(store: &AccountStore, id: &str) -> bool {
+    expiring_within(store, id, 0)
 }
 
 pub(super) async fn ensure(

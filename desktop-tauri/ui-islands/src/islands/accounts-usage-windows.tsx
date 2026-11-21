@@ -8,7 +8,7 @@ import { isFreePlan, planBadgeLabel } from './accounts-domain'
 import { formatTime, numberText, type UsageEntry } from './accounts-shared'
 import { usageAgeText } from '../../../ui-shared/usage-query-state'
 import {
-  usageNumberOrNull, usageSupplementReadingsOf, usageWarningsOf,
+  usageModelQuotasOf, usageNumberOrNull, usageSupplementReadingsOf, usageWarningsOf,
   usageWindowLabel, usageWindowView,
 } from '../../../ui-shared/usage-readings'
 import '../styles/accounts-usage-windows.css'
@@ -95,35 +95,18 @@ export function usageWindows(entry: UsageEntry): UsageWindowReading[] {
 }
 
 export function usageModelQuotas(entry: UsageEntry): ModelQuotaReading[] {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
-  const rows = Array.isArray(entry.modelQuotas) ? entry.modelQuotas : []
-  const readings: ModelQuotaReading[] = []
-  for (const value of rows) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
-    const row = value as Record<string, unknown>
-    const id = typeof row.id === 'string' ? row.id.trim() : ''
-    const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id
-    if (!id && !name) continue
-    const group = typeof row.group === 'string' ? row.group.trim() : ''
-    const windowCode = typeof row.window === 'string' ? row.window.trim().toLowerCase() : ''
-    const window = windowLabel(typeof row.window === 'string' ? row.window : '')
-    const read = usageNumberOrNull(row.remainingPercent)
-    const percent = read === null ? null : Math.max(0, Math.min(100, read))
-    const resetsAt = usageNumberOrNull(row.resetsAt)
-    readings.push({
-      id: id || name,
-      name,
-      group,
-      window,
-      windowCode,
-      view: usageWindowView(row, t, numberText),
-      percent,
-      percentText: percent !== null ? `${numberText(percent)}%` : '',
-      tone: percent === null ? 'muted' : percent < 20 ? 'warn' : 'ok',
-      resetsAt: resetsAt !== null && resetsAt > 0 && resetsAt <= 8.64e15 ? resetsAt : null,
-    })
-  }
-  return readings
+  return usageModelQuotasOf(entry).map(item => ({
+    id: item.id,
+    name: item.name,
+    group: item.group,
+    window: windowLabel(item.window),
+    windowCode: item.window,
+    view: usageWindowView(item.row, t, numberText),
+    percent: item.remainingPercent,
+    percentText: item.remainingPercent !== null ? `${numberText(item.remainingPercent)}%` : '',
+    tone: item.remainingPercent === null ? 'muted' : item.remainingPercent < 20 ? 'warn' : 'ok',
+    resetsAt: item.resetsAt,
+  }))
 }
 
 function groupWindows(rows: UsageWindowReading[]): WindowGroup[] {

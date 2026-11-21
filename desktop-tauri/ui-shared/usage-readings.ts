@@ -222,6 +222,166 @@ export function usageWarningsOf(value: unknown): string[] {
     : []
 }
 
+export type NormalizedModelQuota = {
+  id: string
+  name: string
+  group: string
+  window: string
+  remainingPercent: number | null
+  resetsAt: number | null
+  row: UsageObject
+}
+
+const EFFORT_ID_RE = /[-_](?:extra[-_]?low|xlow|minimal|xhigh|medium|high|low)$/i
+const EFFORT_ANY_ID_RE = /[-_](?:extra[-_]?low|xlow|minimal|xhigh|medium|high|low|max)$/i
+const EFFORT_PAREN_NAME_RE = /\s*[（(]\s*(?:extra[- ]?low|xlow|minimal|xhigh|medium|high|low|max)\s*[)）]$/i
+const EFFORT_WORD_NAME_RE = /\s+(?:extra[- ]?low|xlow|minimal|xhigh|medium|high|low)$/i
+const EFFORT_ANY_WORD_NAME_RE = /\s+(?:extra[- ]?low|xlow|minimal|xhigh|medium|high|low|max)$/i
+
+function stripEffortId(id: string, allowMax: boolean): { value: string; stripped: boolean } {
+  const next = id.replace(allowMax ? EFFORT_ANY_ID_RE : EFFORT_ID_RE, '').replace(/[-_]+$/, '')
+  if (next && next !== id) return { value: next, stripped: true }
+  return { value: id, stripped: false }
+}
+
+function stripEffortName(name: string, allowMax: boolean): { value: string; stripped: boolean } {
+  const withoutParen = name.replace(EFFORT_PAREN_NAME_RE, '').trimEnd()
+  if (withoutParen && withoutParen !== name) return { value: withoutParen, stripped: true }
+  const next = name.replace(allowMax ? EFFORT_ANY_WORD_NAME_RE : EFFORT_WORD_NAME_RE, '').trimEnd()
+  if (next && next !== name) return { value: next, stripped: true }
+  return { value: name, stripped: false }
+}
+
+function preferIncomingModelQuota(existing: NormalizedModelQuota, incoming: NormalizedModelQuota): boolean {
+  if (existing.remainingPercent === null && incoming.remainingPercent !== null) return true
+  if (existing.remainingPercent !== null && incoming.remainingPercent === null) return false
+  if (existing.remainingPercent !== null && incoming.remainingPercent !== null) {
+    if (incoming.remainingPercent + 1e-6 < existing.remainingPercent) return true
+    if (Math.abs(incoming.remainingPercent - existing.remainingPercent) > 1e-6) return false
+  }
+  const hasExistingWindow = Boolean(existing.window)
+  const hasIncomingWindow = Boolean(incoming.window)
+  if (!hasExistingWindow && hasIncomingWindow) return true
+  if (hasExistingWindow && !hasIncomingWindow) return false
+  if (existing.resetsAt === null && incoming.resetsAt !== null) return true
+  if (existing.resetsAt !== null && incoming.resetsAt !== null) return incoming.resetsAt < existing.resetsAt
+  return false
+}
+
+/** 同一模型不同思考等级在配额清单中合并为单条基础模型，取最紧剩余比例并保留有效重置时间。 */
+export function usageModelQuotasOf(value: unknown): NormalizedModelQuota[] {
+  const usage = object(value)
+  const rows = Array.isArray(usage?.modelQuotas) ? usage.modelQuotas : []
+  const items: {
+    raw: UsageObject
+    rawId: string
+    rawName: string
+    group: string
+    window: string
+    remainingPercent: number | null
+    resetsAt: number | null
+    maxBaseId: string
+    maxBaseName: string
+    hadParenEffort: boolean
+  }[] = []
+  const idCounts = new Map<string, number>()
+  const nameCounts = new Map<string, number>()
+  for (const candidate of rows) {
+    const row = object(candidate)
+    if (!row) continue
+    const rawId = typeof row.id === 'string' ? row.id.trim() : ''
+    const rawName = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : rawId
+    if (!rawId && !rawName) continue
+    const group = typeof row.group === 'string' ? row.group.trim() : ''
+    const window = typeof row.window === 'string' ? row.window.trim().toLowerCase() : ''
+    const read = usageNumberOrNull(row.remainingPercent)
+    const remainingPercent = read === null ? null : Math.max(0, Math.min(100, read))
+    const rawReset = usageNumberOrNull(row.resetsAt)
+    const resetsAt = rawReset !== null && rawReset > 0 && rawReset <= 8.64e15 ? rawReset : null
+    const maxBaseId = stripEffortId(rawId || rawName, true).value.toLowerCase()
+    const hadParenEffort = EFFORT_PAREN_NAME_RE.test(rawName)
+    const maxBaseName = stripEffortName(rawName, true).value.toLowerCase()
+    idCounts.set(maxBaseId, (idCounts.get(maxBaseId) ?? 0) + 1)
+    if (maxBaseName) nameCounts.set(maxBaseName, (nameCounts.get(maxBaseName) ?? 0) + 1)
+    items.push({ raw: row, rawId, rawName, group, window, remainingPercent, resetsAt, maxBaseId, maxBaseName, hadParenEffort })
+  }
+
+  type Entry = NormalizedModelQuota & { barePriority: number }
+  const merged: Entry[] = []
+  const byId = new Map<string, number>()
+  const byGroupName = new Map<string, number>()
+  for (const item of items) {
+    const allowMax = item.hadParenEffort
+      || (idCounts.get(item.maxBaseId) ?? 0) > 1
+      || (item.maxBaseName ? (nameCounts.get(item.maxBaseName) ?? 0) > 1 : false)
+    const idResult = stripEffortId(item.rawId || item.rawName, allowMax)
+    const id = idResult.value
+    const nameResult = stripEffortName(item.rawName, allowMax || idResult.stripped)
+    const name = item.rawName.toLowerCase() === item.rawId.toLowerCase() ? id : nameResult.value
+    const idKey = id.toLowerCase()
+    const nameKey = name ? `${item.group.toLowerCase()}::${name.toLowerCase()}` : ''
+    const barePriority = idResult.stripped ? 1 : 0
+    const next: Entry = {
+      id,
+      name,
+      group: item.group,
+      window: item.window,
+      remainingPercent: item.remainingPercent,
+      resetsAt: item.resetsAt,
+      barePriority,
+      row: {
+        ...item.raw,
+        id,
+        name,
+        group: item.group,
+        window: item.window,
+        remainingPercent: item.remainingPercent,
+        resetsAt: item.resetsAt,
+      },
+    }
+    const existingIndex = byId.get(idKey) ?? (nameKey ? byGroupName.get(nameKey) : undefined)
+    if (existingIndex === undefined) {
+      const index = merged.length
+      merged.push(next)
+      byId.set(idKey, index)
+      if (nameKey) byGroupName.set(nameKey, index)
+      continue
+    }
+    const existing = merged[existingIndex]
+    const adoptIdentity = next.barePriority < existing.barePriority
+    const winReading = preferIncomingModelQuota(existing, next)
+    if (adoptIdentity) {
+      existing.id = next.id
+      existing.name = next.name
+      existing.barePriority = next.barePriority
+    }
+    if (winReading) {
+      existing.window = next.window
+      existing.remainingPercent = next.remainingPercent
+      existing.resetsAt = next.resetsAt
+      existing.row = { ...next.row, id: existing.id, name: existing.name, group: existing.group || next.group }
+    } else {
+      if (!existing.window && next.window) existing.window = next.window
+      if (existing.resetsAt === null && next.resetsAt !== null) existing.resetsAt = next.resetsAt
+      existing.row = {
+        ...existing.row,
+        id: existing.id,
+        name: existing.name,
+        window: existing.window,
+        resetsAt: existing.resetsAt,
+      }
+    }
+    if (!existing.group && next.group) {
+      existing.group = next.group
+      existing.row = { ...existing.row, group: next.group }
+    }
+    byId.set(idKey, existingIndex)
+    if (nameKey) byGroupName.set(nameKey, existingIndex)
+  }
+
+  return merged.map(({ barePriority: _barePriority, ...rest }) => rest)
+}
+
 export function recordReadingsOf(
   value: unknown,
   t: Translate,

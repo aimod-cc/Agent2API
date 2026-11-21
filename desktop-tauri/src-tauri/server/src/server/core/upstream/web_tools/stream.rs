@@ -261,7 +261,10 @@ impl State {
             .unwrap_or("");
         let output = if reason == "stop" {
             parser::parse(&self.content, &self.context)?
-        } else if self.context.required || self.content.trim_start().starts_with(super::OPEN) {
+        } else if self.context.required
+            || self.content.contains(super::OPEN)
+            || self.content.contains(super::CLOSE)
+        {
             return Err(failed("网页模型未正常完成工具调用，未执行或自动续写"));
         } else {
             Output::Text(std::mem::take(&mut self.content))
@@ -273,7 +276,11 @@ impl State {
                         .push_back(self.delta(json!({ "content": text })));
                 }
             }
-            Output::Calls(calls) => {
+            Output::Calls { text, calls } => {
+                if !text.is_empty() {
+                    self.pending
+                        .push_back(self.delta(json!({ "content": text })));
+                }
                 self.pending
                     .push_back(self.delta(json!({ "tool_calls": calls })));
                 terminal["choices"][0]["finish_reason"] = json!("tool_calls");

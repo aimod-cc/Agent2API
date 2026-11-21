@@ -85,6 +85,15 @@ impl ProviderAdapter for CodexSubscription {
     fn credentials_expiring(&self, store: &AccountStore, account_id: &str) -> bool {
         credentials::expiring(store, account_id)
     }
+
+    fn credentials_expiring_within(
+        &self,
+        store: &AccountStore,
+        account_id: &str,
+        min_lead_ms: i64,
+    ) -> bool {
+        credentials::expiring_within(store, account_id, min_lead_ms)
+    }
     fn supports_refresh(&self) -> bool {
         true
     }

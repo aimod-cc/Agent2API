@@ -47,6 +47,7 @@ export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd
     <NavList render={<SidebarContent />} className='routing-config-rail-list' aria-label={t('路由配置列表')}>
       <SidebarGroupLabel>{t('默认规则')}</SidebarGroupLabel>
       <NavItem className='routing-config-scope-item' active={globalSelected} disabled={disabled}
+        icon={<RouteIcon name='globe' size={17} />}
         trailing={dirtyDot(Boolean(editor.drafts[''] && draftDirty(editor.drafts[''])))} onClick={() => onModel('')}>
         {t('全局默认')}
       </NavItem>

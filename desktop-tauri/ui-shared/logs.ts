@@ -127,6 +127,12 @@ export function logSource(entry: LogEntry, t: Translate): string {
     || logComponent(logText(entry, 'component'), t) || logCategory(entry.category, t)
 }
 
+function pluginShutdownState(entry: LogEntry): 'normal' | 'remote_unknown' | 'failed' {
+  if (entry.level === 'warn' || entry.level === 'error') return 'failed'
+  if (entry.data?.localExited !== true) return 'failed'
+  return (logNumber(entry, 'remoteUnknown') ?? 0) > 0 ? 'remote_unknown' : 'normal'
+}
+
 export function logSummary(entry: LogEntry, t: Translate): string {
   if (logText(entry, 'action') === 'usage.query') {
     const diagnostics = entry.data?.diagnostics as UsageQueryDiagnostics | undefined
@@ -157,7 +163,12 @@ export function logSummary(entry: LogEntry, t: Translate): string {
     case 'plugin.failure': return t('插件暂时无法使用')
     case 'plugin.exit': return t('插件进程已退出')
     case 'plugin.recovered': return t('插件已恢复运行')
-    case 'plugin.shutdown': return t('插件未能正常停止')
+    case 'plugin.shutdown': {
+      const state = pluginShutdownState(entry)
+      if (state === 'normal') return t('插件已停止')
+      if (state === 'remote_unknown') return t('插件已停止，远端状态未确认')
+      return t('插件未能正常停止')
+    }
   }
   const summary = logText(entry, 'summary') || (entry.message || '').replace(/^(?:\[[^\]]+\]\s*)+/, '')
   switch (summary) {
@@ -264,7 +275,11 @@ export function logAdvice(entry: LogEntry, t: Translate): string {
       default: return t('请在插件页查看加载诊断，确认原因后重新加载。')
     }
   }
-  if (['plugin.failure', 'plugin.exit', 'plugin.shutdown'].includes(action)) {
+  if (action === 'plugin.shutdown') {
+    return pluginShutdownState(entry) === 'failed'
+      ? t('请在插件页查看加载诊断，确认原因后重新加载。') : ''
+  }
+  if (['plugin.failure', 'plugin.exit'].includes(action)) {
     return t('请在插件页查看加载诊断，确认原因后重新加载。')
   }
   return ''

@@ -193,6 +193,7 @@ export function DynamicProviderBlock({
       progressRef.current = {}
       setProgress({})
       setValues({})
+      setName('')
       setUpload(undefined)
       setProxyDraft(previous => ({ ...previous, password: '' }))
     }
@@ -436,6 +437,7 @@ export function DynamicProviderBlock({
     if (!alive.current) { await shared().wbApp?.refresh?.(); return }
     setProgress({})
     setValues({})
+    setName('')
     setUpload(undefined)
     setUserAgent('')
     setProxyDraft(draftOfProxy(undefined))
@@ -582,6 +584,8 @@ export function DynamicProviderBlock({
   const instructions = mergeLoginInstructions(methodsState.instructions, progress.managedLogin ? '' : method?.instructions,
     method?.browserMode === 'plugin' && !method.embeddedOnly ? pluginBrowserInstructions(provider) : '',
     loginText(progress.instructions), loginText(progress.hint), loginText(loginView.hint))
+  const proxyLocked = locked || loginView.waiting
+  const optionsLocked = method?.type === 'sms' ? saving || readingSystemProxy : proxyLocked
   const owned = loginScope.current
   const managed: ManagedLoginScope | undefined = progress.managedLogin && owned && owned.methodIndex !== undefined ? {
     provider, methodIndex: owned.methodIndex, key: JSON.stringify([owned.origin, owned.bootId, owned.managementGeneration, provider, owned.state]),
@@ -612,6 +616,7 @@ export function DynamicProviderBlock({
         smsConfig={methodAvailable && method.type === 'sms' && !method.reason ? method.sms : undefined}
         onStartSms={startSmsFlow} startingSms={loginView.waiting}
         smsStartDisabled={submitLocked || requestingRef.current || methodsState.phase === 'loading' || Boolean(method?.reason)}
+        remark={accountName} onRemarkChange={setName}
         openExternal={managed ? async url => {
           if (!managed.current()) throw new DOMException('请求已取消', 'AbortError')
           if (owned?.bridge?.platform === 'web') {
@@ -688,13 +693,13 @@ export function DynamicProviderBlock({
       <PluginLoginDiagnostic diagnostic={diagnostic} />
     </Alert> : null}
     {methodAvailable ? <AccountProxySection draft={proxyDraft} onChange={setProxyDraft}
-      idPrefix={`${prefix}-proxy`} disabled={locked || loginView.waiting} onSystemImportBusy={setReadingSystemProxy}
-      label={method.type === 'sms' ? t('账号 / 登录出网代理') : t('备注与代理')}
-      summary={method.type === 'sms' ? accountProxySummary(proxyDraft) : `${accountName || t('默认账号名')} · ${accountProxySummary(proxyDraft)}`}>
-      {method.type !== 'sms' && (optionalName || !method.prompts.some(prompt => prompt.key === 'name')) ? <div className='plugin-login-field'>
+      idPrefix={`${prefix}-proxy`} disabled={optionsLocked} proxyDisabled={proxyLocked} onSystemImportBusy={setReadingSystemProxy}
+      label={t('备注与代理')}
+      summary={`${accountName || t('默认账号名')} · ${accountProxySummary(proxyDraft)}`}>
+      {optionalName || !method.prompts.some(prompt => prompt.key === 'name') ? <div className='plugin-login-field'>
         <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>
         <Input id={`${prefix}-name`} maxLength={MAX_NAME_LENGTH} placeholder={t('可选，留空使用账号昵称')}
-          value={accountName} disabled={locked || loginView.waiting} onChange={event => {
+          value={accountName} disabled={optionsLocked} onChange={event => {
             const value = event.currentTarget.value
             if (optionalName) setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [optionalName.key]: value } }))
             else setName(value)
@@ -703,7 +708,7 @@ export function DynamicProviderBlock({
       {uaEditable ? <div className='plugin-login-field'>
         <Label htmlFor={`${prefix}-user-agent`}>{t('User-Agent（可选）')}</Label>
         <UserAgentInput id={`${prefix}-user-agent`} value={userAgent} onChange={setUserAgent}
-          presets={uaPresets} disabled={locked || loginView.waiting} />
+          presets={uaPresets} disabled={proxyLocked} />
       </div> : null}
     </AccountProxySection> : null}
     <PluginLoginSecurity />

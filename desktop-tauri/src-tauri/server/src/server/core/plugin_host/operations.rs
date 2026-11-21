@@ -201,6 +201,17 @@ pub fn start_cached(
     platform: &Value,
     automatic: bool,
 ) -> Result<Operation, String> {
+    start_cached_with_wait(id, action, target, version, platform, automatic).map(|(operation, _)| operation)
+}
+
+pub(crate) fn start_cached_with_wait(
+    id: &str,
+    action: &str,
+    target: &str,
+    version: &str,
+    platform: &Value,
+    automatic: bool,
+) -> Result<(Operation, tokio::task::JoinHandle<Result<Value, String>>), String> {
     if target != super::host_target() && target != super::wasm::manifest::TARGET {
         return Err("只能安装当前网关平台的插件包".to_string());
     }
@@ -221,7 +232,7 @@ pub fn start_cached(
     } else {
         InstallPolicy::Manual
     };
-    start_asset(id, action, asset, policy)
+    start_asset_with_wait(id, action, asset, policy)
 }
 
 fn claim_operation(id: &str, policy: InstallPolicy) -> Result<task_state::RunGuard, String> {
@@ -270,6 +281,15 @@ fn start_asset(
     asset: update::PackAsset,
     policy: InstallPolicy,
 ) -> Result<Operation, String> {
+    start_asset_with_wait(id, action, asset, policy).map(|(operation, _)| operation)
+}
+
+fn start_asset_with_wait(
+    id: &str,
+    action: &str,
+    asset: update::PackAsset,
+    policy: InstallPolicy,
+) -> Result<(Operation, tokio::task::JoinHandle<Result<Value, String>>), String> {
     policy.validate(id, &asset)?;
     crate::server::core::update::assert_downloadable(&asset.url).map_err(|error| error.message)?;
     let guard = claim_operation(id, policy)?;
@@ -292,11 +312,12 @@ fn start_asset(
     persist(id);
     let id = id.to_string();
     let guard = OperationGuard { id: id.clone(), operation_id: operation.operation_id.clone(), guard: Some(guard), policy };
-    crate::spawn_task(async move {
+    let handle = crate::spawn_task(async move {
         let result = run(&id, &asset, policy).await;
         guard.finish(result.as_ref());
+        result
     });
-    Ok(operation)
+    Ok((operation, handle))
 }
 
 async fn run(

@@ -13,7 +13,7 @@
 
 import type { UsageRow, UsageSnapshot } from '../api/gateway'
 import { t, locale } from '../i18n'
-import { balanceWalletOf, creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { balanceWalletOf, creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageModelQuotasOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { formatStamp } from './format'
 import { mergeUsageQueryRow, usageQueryFailureStatus, usageQueryNoticeOf } from '../../../ui-shared/usage-query-state'
 import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf } from '../../../ui-shared/credit-expiry'
@@ -118,25 +118,16 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
     ...recordReadingsOf(data, t, compact, formatStamp),
   ]
   const baseKind: UsageView['kind'] = errors.length ? 'warn' : 'ok'
-  const models: UsageModelReading[] = Array.isArray(data.modelQuotas)
-    ? data.modelQuotas
-        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
-        .map(item => {
-          const id = typeof item.id === 'string' ? item.id.trim() : ''
-          const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : id
-          const percent = usageNumberOrNull(item.remainingPercent)
-          const resetsAt = usageNumberOrNull(item.resetsAt)
-          return {
-            id: id || name,
-            name,
-            group: typeof item.group === 'string' ? item.group.trim() : '',
-            view: percent !== null ? `${compact(Math.max(0, Math.min(100, percent)))}%` : usageWindowView(item, t, compact),
-            percent: percent === null ? null : Math.max(0, Math.min(100, percent)),
-            resetsAt: resetsAt !== null && resetsAt > 0 && resetsAt <= 8.64e15 ? resetsAt : null,
-          }
-        })
-        .filter(item => Boolean(item.name))
-    : []
+  const models: UsageModelReading[] = usageModelQuotasOf(data)
+    .map(item => ({
+      id: item.id || item.name,
+      name: item.name,
+      group: item.group,
+      view: item.remainingPercent !== null ? `${compact(item.remainingPercent)}%` : usageWindowView(item.row, t, compact),
+      percent: item.remainingPercent,
+      resetsAt: item.resetsAt,
+    }))
+    .filter(item => Boolean(item.name))
   const withErrors = (view: UsageView): UsageView => ({
     kind: errors.length ? 'warn' : view.kind,
     text: view.text,

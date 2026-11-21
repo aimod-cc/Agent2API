@@ -4,7 +4,7 @@ import { mountOnPage } from '../island-lazy'
 import { t } from '../i18n'
 import { MaintenancePanel } from '../../../ui-shared/maintenance-panel'
 import { api as pluginTaskRequest } from './plugins-shared'
-import type { MaintenanceApi, MaintenanceDetail, MaintenanceOverview, MaintenanceQuery, MaintenanceTask, MaintenanceTaskId } from '../../../ui-shared/maintenance-types'
+import type { MaintenanceApi, MaintenanceDetail, MaintenanceOverview, MaintenanceQuery, MaintenanceTask, MaintenanceTaskId, MaintenanceTaskPatch } from '../../../ui-shared/maintenance-types'
 
 type Host = {
   workbuddyDesktop?: {
@@ -12,13 +12,13 @@ type Host = {
     getMaintenanceRecord(id: string): Promise<MaintenanceDetail>
     runMaintenance(id: MaintenanceTaskId): Promise<MaintenanceDetail>
     retryMaintenance(id: string, itemId?: string): Promise<MaintenanceDetail>
-    saveScheduledTask(id: string, patch: { enabled: boolean; interval: number }): Promise<MaintenanceTask>
+    saveScheduledTask(id: string, patch: MaintenanceTaskPatch): Promise<MaintenanceTask>
   }
   wbApp?: {
     readonly currentPage?: string
     refresh?(): Promise<unknown>
     showPage?(page: string): void
-    toast?(message: string, kind?: 'ok' | 'err'): void
+    toast?(message: string, kind?: 'ok' | 'err' | 'warn'): void
   }
   wbAccountPanel?: { open(id: string): void }
 }

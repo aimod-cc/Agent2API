@@ -78,11 +78,13 @@ pub struct TaskDef {
 pub const TASK_CREDENTIAL_MAINTENANCE: &str = config::KEY_CREDENTIAL_MAINTENANCE;
 pub const TASK_MODEL_REFRESH: &str = config::KEY_MODEL_REFRESH;
 pub const TASK_UPDATE_CHECK: &str = config::KEY_UPDATE_CHECK;
+pub const TASK_PLUGIN_CATALOG: &str = crate::server::core::maintenance::PLUGIN_CATALOG;
+pub const TASK_MAGPIE_PLUGIN: &str = config::KEY_MAGPIE_PLUGIN_CHECK;
 pub const TASK_LOGS_AUTO_REFRESH: &str = config::KEY_LOGS_AUTO_REFRESH;
 pub const TASK_REQUESTS_AUTO_REFRESH: &str = config::KEY_REQUESTS_AUTO_REFRESH;
 pub const TASK_REPORT_AUTO_REFRESH: &str = config::KEY_REPORT_AUTO_REFRESH;
 
-pub const TASKS: [TaskDef; 6] = [
+pub const TASKS: [TaskDef; 8] = [
     TaskDef {
         id: TASK_CREDENTIAL_MAINTENANCE,
         label: "凭证维护",
@@ -105,13 +107,33 @@ pub const TASKS: [TaskDef; 6] = [
     },
     TaskDef {
         id: TASK_UPDATE_CHECK,
-        label: "软件版本检查",
-        description: "定期检查最新发布版本，默认每 4 小时一次。检查结果、排期和冷却跨重启保留；手动检查也会合并重复请求并遵守冷却。开关与间隔在「软件更新」面板的「更新设置」弹窗里配置（定时任务页不再渲染这一条）。",
+        label: "软件检查更新",
+        description: "定期检查最新发布版本，默认每 4 小时一次。检查结果、排期和冷却跨重启保留；与「设置 → 软件更新」共用设置与检查结果。",
         unit: "minutes",
         runner: Runner::Backend,
         min: config::INTERVAL_MIN_MINUTES,
         max: config::INTERVAL_MAX_MINUTES,
         default_interval: config::DEFAULT_UPDATE_CHECK_MINUTES,
+    },
+    TaskDef {
+        id: TASK_PLUGIN_CATALOG,
+        label: "社区插件检查",
+        description: "定期刷新社区插件目录并检查已安装插件更新；开启自动更新时自动升级已启用且已签名的插件。默认跟随「软件检查更新」，也可单独调整。",
+        unit: "minutes",
+        runner: Runner::Backend,
+        min: config::INTERVAL_MIN_MINUTES,
+        max: config::INTERVAL_MAX_MINUTES,
+        default_interval: config::DEFAULT_UPDATE_CHECK_MINUTES,
+    },
+    TaskDef {
+        id: TASK_MAGPIE_PLUGIN,
+        label: "Magpie 插件检查",
+        description: "定期刷新 Magpie 官方与 GitHub 插件清单，并检查已安装脚本插件的新版本，默认每 6 小时一次。",
+        unit: "minutes",
+        runner: Runner::Backend,
+        min: config::INTERVAL_MIN_MINUTES,
+        max: config::INTERVAL_MAX_MINUTES,
+        default_interval: config::DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES,
     },
     TaskDef {
         id: TASK_LOGS_AUTO_REFRESH,
@@ -154,6 +176,14 @@ fn settings_of(settings: config::ScheduledSettings, id: &str) -> config::Interva
         TASK_CREDENTIAL_MAINTENANCE => settings.credential_maintenance,
         TASK_MODEL_REFRESH => settings.model_refresh,
         TASK_UPDATE_CHECK => settings.update_check,
+        TASK_PLUGIN_CATALOG => {
+            let plugin_settings = crate::server::core::plugin_host::settings::current();
+            config::IntervalTask {
+                enabled: plugin_settings.auto_check,
+                interval: plugin_settings.interval,
+            }
+        }
+        TASK_MAGPIE_PLUGIN => settings.magpie_plugin_check,
         TASK_LOGS_AUTO_REFRESH => settings.logs_auto_refresh,
         TASK_REQUESTS_AUTO_REFRESH => settings.requests_auto_refresh,
         TASK_REPORT_AUTO_REFRESH => settings.report_auto_refresh,
@@ -167,10 +197,10 @@ fn interval_ms(task: &TaskDef) -> i64 {
 }
 
 fn state_key(id: &str) -> String {
-    if id == TASK_UPDATE_CHECK {
-        crate::server::core::update::global_check_key()
-    } else {
-        id.to_string()
+    match id {
+        TASK_UPDATE_CHECK => crate::server::core::update::global_check_key(),
+        TASK_PLUGIN_CATALOG => crate::server::core::plugin_host::catalog::key(),
+        _ => id.to_string(),
     }
 }
 
@@ -180,7 +210,7 @@ fn task_json(task: &TaskDef, state: Result<TaskState, String>) -> Value {
     let error = state.as_ref().err().cloned();
     let state = state.unwrap_or_default();
     let timestamp = |at: i64| if at > 0 { json!(at) } else { Value::Null };
-    json!({
+    let mut item = json!({
         "id": task.id,
         "label": task.label,
         "description": task.description,
@@ -200,7 +230,16 @@ fn task_json(task: &TaskDef, state: Result<TaskState, String>) -> Value {
         "retryAt": timestamp(state.retry_at),
         "nextRunAt": if backend && settings.enabled { timestamp(state.due_at().max(logging::now_ms())) } else { Value::Null },
         "canRun": backend,
-    })
+    });
+    if task.id == TASK_PLUGIN_CATALOG {
+        let plugin_settings = crate::server::core::plugin_host::settings::current();
+        item["checkMode"] = json!(match plugin_settings.check_mode {
+            crate::server::core::plugin_host::settings::SettingsMode::Follow => "follow",
+            crate::server::core::plugin_host::settings::SettingsMode::Custom => "custom",
+        });
+        item["autoUpdate"] = json!(plugin_settings.auto_update);
+    }
+    item
 }
 
 pub fn list() -> Value {
@@ -244,7 +283,53 @@ fn task_from_states(id: &str, states: &Result<HashMap<String, TaskState>, String
 }
 
 pub fn configure(id: &str, patch: IntervalTaskPatch) -> Result<Value, String> {
+    configure_extended(id, patch, None, None)
+}
+
+pub fn configure_extended(
+    id: &str,
+    patch: IntervalTaskPatch,
+    check_mode: Option<&str>,
+    auto_update: Option<bool>,
+) -> Result<Value, String> {
     let task = find(id).ok_or_else(|| format!("未知的定时任务: {id}"))?;
+    if id == TASK_PLUGIN_CATALOG {
+        if patch.enabled.is_none() && patch.interval.is_none() && check_mode.is_none() && auto_update.is_none() {
+            return Err("没有需要更新的字段".to_string());
+        }
+        if check_mode != Some("follow") {
+            if let Some(interval) = patch.interval {
+                if !(task.min..=task.max).contains(&interval) {
+                    return Err(format!("「{}」的间隔必须是 {}–{} 分钟", task.label, task.min, task.max));
+                }
+            }
+        }
+        let before = settings_of(config::scheduled_settings(), id);
+        let mut payload = serde_json::Map::new();
+        if let Some(mode) = check_mode {
+            payload.insert("checkMode".to_string(), json!(mode));
+        }
+        if check_mode != Some("follow") {
+            if let Some(enabled) = patch.enabled {
+                payload.insert("autoCheck".to_string(), json!(enabled));
+            }
+            if let Some(interval) = patch.interval {
+                payload.insert("interval".to_string(), json!(interval));
+            }
+        }
+        if let Some(auto) = auto_update {
+            payload.insert("autoUpdate".to_string(), json!(auto));
+        }
+        let configured = crate::server::core::plugin_host::settings::configure(&Value::Object(payload))?;
+        let after = settings_of(config::scheduled_settings(), id);
+        if before != after {
+            logging::log("[Tasks]", &format!("定时任务「{}」已{}，间隔 {} 分钟", task.label,
+                if after.enabled { "开启" } else { "关闭" }, after.interval));
+        }
+        let mut result = task_by_id(id);
+        result["saved"] = configured.get("saved").cloned().unwrap_or(json!(true));
+        return Ok(result);
+    }
     if patch.enabled.is_none() && patch.interval.is_none() {
         return Err("没有需要更新的字段".to_string());
     }
@@ -311,6 +396,14 @@ async fn run_backend(
             summary
         } else { "已完成版本检查".to_string() });
     }
+    if task.id == TASK_PLUGIN_CATALOG {
+        let _ = crate::server::core::plugin_host::catalog::refresh(manual).await?;
+        return Ok("已完成社区插件检查".to_string());
+    }
+    if task.id == TASK_MAGPIE_PLUGIN {
+        let detail = crate::server::core::maintenance::tasks::execute_magpie_plugin_check(manual).await?;
+        return Ok(crate::server::core::maintenance::summary(&detail));
+    }
     if matches!(task.id, TASK_CREDENTIAL_MAINTENANCE | TASK_MODEL_REFRESH) {
         let detail = crate::server::core::maintenance::execute(
             store,
@@ -337,7 +430,8 @@ pub fn spawn(store: AccountStore, update: UpdateManager) {
         // 首轮先按持久化状态恢复排期：从未跑过的任务排到「现在」（于是全新安装
         // 启动即跑一次，与改造前一致），跑过的沿用「上次尝试 + 间隔」——
         // 已经到期的自然落到过去，这一轮就补上。
-        for task in TASKS.iter().filter(|task| task.runner == Runner::Backend) {
+        // 社区插件检查由 `plugin_host::catalog::spawn` 在加载完已安装插件后驱动。
+        for task in TASKS.iter().filter(|task| task.runner == Runner::Backend && task.id != TASK_PLUGIN_CATALOG) {
             if let Err(error) = task_state::reschedule(&state_key(task.id), interval_ms(task)) {
                 logging::log("[Tasks]", &format!("恢复「{}」排期失败：{error}", task.label));
             }
@@ -347,7 +441,7 @@ pub fn spawn(store: AccountStore, update: UpdateManager) {
                 tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
                 continue;
             };
-            for task in TASKS.iter().filter(|task| task.runner == Runner::Backend) {
+            for task in TASKS.iter().filter(|task| task.runner == Runner::Backend && task.id != TASK_PLUGIN_CATALOG) {
                 if !settings_of(config::scheduled_settings(), task.id).enabled {
                     continue;
                 }

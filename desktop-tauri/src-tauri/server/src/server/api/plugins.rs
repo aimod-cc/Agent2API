@@ -109,11 +109,12 @@ pub async fn change_script(body: Bytes) -> Response {
 /// 返回刷新后的结果。与本体插件的 `GET /api/plugins/update` 同一分工 ——
 /// 界面点一次，后台算一轮，页面自己轮询。
 pub async fn refresh_script_catalog() -> Response {
-    ok_json(plugin_host::script::refresh_catalog())
+    crate::server::core::maintenance::tasks::launch_magpie_for_refresh();
+    ok_json(plugin_host::script::catalog_status())
 }
 
 pub async fn check_script_updates() -> Response {
-    ok_json(plugin_host::script::check_updates().await)
+    ok_json(crate::server::core::maintenance::tasks::check_magpie_for_plugins_page().await)
 }
 
 pub async fn settings() -> Response {

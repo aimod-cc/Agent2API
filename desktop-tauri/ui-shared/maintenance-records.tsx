@@ -1,6 +1,6 @@
 import * as React from 'react'
 import {
-  Button, Card, Empty, Input, Pager, SegmentedControl, Select, SelectContent, SelectItem,
+  Button, Card, Empty, Input, Pager, Select, SelectContent, SelectItem,
   SelectTrigger, SelectValue, Spinner, Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@ui'
 import { t } from '../ui-kit/src/i18n'
@@ -10,21 +10,8 @@ import { duration, maintenanceLabel, sourceLabel, stamp } from './maintenance-fo
 import type { MaintenanceDetail, MaintenanceQuery, MaintenanceRun, MaintenanceTaskId } from './maintenance-types'
 
 /**
- * 执行记录。
- *
- * ── 版面 ─────────────────────────────────────────────────────
- * 这一页真正的内容就是它，所以它吃掉概览条以下的全部高度：卡内分三段 ——
- * 工具条（标题与筛选同一行）、记录表（自己滚动、表头常驻）、底栏（条数、保留说明、翻页）。
- * 页面本身不滚，行数只受窗口高度限制，不再被上方的卡挤掉。
- *
- * ── 明细在哪 ─────────────────────────────────────────────────
- * 逐项明细走弹窗（见 maintenance-details），列表里每一行等高，点「查看明细」打开。
- *
- * ── 窄屏 ─────────────────────────────────────────────────────
- * 700px 以下表格换成一行一张卡片（列太多，横向滚在手机上不可用），
- * 与原来那套的判定阈值一致；弹窗在手机上按视口收窄。
+ * 执行记录：工具条 + 可滚动表格 + 底栏翻页 + 逐项明细弹窗。
  */
-
 export function MaintenanceRecords({ compact, loading, busy, runs, total, page, pages, query, search,
   onSearch, onQuery, onPage, openId, onToggle, detail, detailLoading, detailError, onReloadDetail,
   retentionDays, maxRecords, onRetry, onAccount }: {
@@ -51,6 +38,14 @@ export function MaintenanceRecords({ compact, loading, busy, runs, total, page, 
   onRetry(runId: string, itemId?: string): void
   onAccount?(accountId: string): void
 }) {
+  const taskOptions: Array<{ value: MaintenanceTaskId | ''; label: string }> = [
+    { value: '', label: t('全部类型') },
+    { value: 'credentialMaintenance', label: t('凭证维护') },
+    { value: 'modelRefresh', label: t('模型目录更新') },
+    { value: 'updateCheck', label: t('软件检查更新') },
+    { value: 'pluginCatalogCheck', label: t('社区插件检查') },
+    { value: 'magpiePluginCheck', label: t('Magpie 插件检查') },
+  ]
   const resultOptions = [{ value: '', label: t('全部结果') }, { value: 'failed', label: t('有失败项') }, { value: 'success', label: t('无失败项') }]
   const sourceOptions = [{ value: '', label: t('全部触发方式') }, { value: 'automatic', label: t('自动触发') }, { value: 'manual', label: t('手动触发') }]
   const filtered = Boolean(query.taskId || query.source || query.status || query.keyword)
@@ -59,16 +54,12 @@ export function MaintenanceRecords({ compact, loading, busy, runs, total, page, 
     <div className='maintenance-toolbar'>
       <span className='maintenance-toolbar-title'>{t('执行记录')}</span>
       <span className='maintenance-toolbar-sub'>{t('自动和手动维护，统一在这里查看')}</span>
-      <SegmentedControl
-        value={query.taskId}
-        aria-label={t('维护类型')}
-        onValueChange={value => onQuery({ taskId: value as MaintenanceTaskId | '' })}
-        options={[
-          { value: '', label: t('全部') },
-          { value: 'credentialMaintenance', label: t('凭证维护') },
-          { value: 'modelRefresh', label: t('模型目录更新') },
-        ]}
-      />
+      <Select value={query.taskId} onValueChange={value => onQuery({ taskId: (value ?? '') as MaintenanceTaskId | '' })}>
+        <SelectTrigger aria-label={t('维护类型')} className='min-w-[144px]'>
+          <SelectValue>{taskOptions.find(option => option.value === query.taskId)?.label}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>{taskOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+      </Select>
       <Select value={query.status} onValueChange={value => onQuery({ status: (value ?? '') as MaintenanceQuery['status'] })}>
         <SelectTrigger aria-label={t('执行结果')} className='min-w-[124px]'>
           <SelectValue>{resultOptions.find(option => option.value === query.status)?.label}</SelectValue>
@@ -83,8 +74,8 @@ export function MaintenanceRecords({ compact, loading, busy, runs, total, page, 
       </Select>
       <Input
         value={search}
-        aria-label={t('搜索账号或提供商')}
-        placeholder={t('搜索账号或提供商')}
+        aria-label={t('搜索账号、提供商或插件')}
+        placeholder={t('搜索账号、提供商或插件')}
         className='maintenance-push maintenance-search'
         onChange={event => onSearch(event.target.value)}
       />

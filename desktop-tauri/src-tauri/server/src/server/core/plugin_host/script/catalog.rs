@@ -8,7 +8,10 @@ mod types;
 
 pub(super) fn wake(force: bool) { refresh::wake(force); }
 pub(super) fn ensure_loaded() { refresh::ensure_loaded(); }
-pub(super) fn status() -> Value { cache::status() }
+pub(crate) fn status() -> Value { cache::status() }
+pub(crate) async fn refresh_now(force: bool) -> Result<(usize, usize, Option<String>), String> {
+    refresh::refresh_now(force).await
+}
 
 pub(super) fn github_commit(repository: &str) -> Option<String> {
     github_commit_for(repository, "")

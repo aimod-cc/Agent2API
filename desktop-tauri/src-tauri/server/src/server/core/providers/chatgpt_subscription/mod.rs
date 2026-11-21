@@ -134,6 +134,10 @@ impl ProviderAdapter for ChatgptSubscriptionAdapter {
         credentials::expiring(store, id)
     }
 
+    fn credentials_expiring_within(&self, store: &AccountStore, id: &str, min_lead_ms: i64) -> bool {
+        credentials::expiring_within(store, id, min_lead_ms)
+    }
+
     fn refresh_models<'a>(
         &'a self,
         store: &'a AccountStore,

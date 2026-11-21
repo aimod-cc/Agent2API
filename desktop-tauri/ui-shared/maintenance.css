@@ -130,7 +130,7 @@
 .maintenance-facts dd { margin: 2px 0 0; font-size: 12.5px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 
 /* ── 维护设置弹窗：一张分组表，行间只用发丝线 ── */
-.maintenance-setting-group { overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }
+.maintenance-setting-group { flex-shrink: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }
 .maintenance-setting { padding: 14px 16px; }
 .maintenance-setting-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .maintenance-setting h3 { margin: 0; font-size: 13px; font-weight: 500; }

@@ -1,6 +1,7 @@
-//! 凭证维护与模型目录更新共用的执行记录；后台排期沿用原任务标识。
+//! 凭证维护、模型目录更新及更新检查等自动维护任务的执行记录；后台排期沿用原任务标识。
 
 pub mod storage;
+pub mod tasks;
 pub mod types;
 
 use std::collections::HashMap;
@@ -9,13 +10,18 @@ use serde_json::{json, Map, Value};
 
 use crate::server::config;
 use crate::server::core::{
-    account_store::AccountStore, credential_maintenance, model_meta, providers, task_state,
+    account_store::AccountStore, credential_maintenance, model_meta, plugin_host, providers,
+    task_state, update,
 };
 use crate::server::logging;
 use types::{Detail, Item};
 
 pub const CREDENTIAL: &str = config::KEY_CREDENTIAL_MAINTENANCE;
 pub const MODEL: &str = config::KEY_MODEL_REFRESH;
+pub const UPDATE_CHECK: &str = config::KEY_UPDATE_CHECK;
+pub const PLUGIN_CATALOG: &str = "pluginCatalogCheck";
+pub const MAGPIE_PLUGIN: &str = config::KEY_MAGPIE_PLUGIN_CHECK;
+pub const ALL_TASKS: [&str; 5] = [CREDENTIAL, MODEL, UPDATE_CHECK, PLUGIN_CATALOG, MAGPIE_PLUGIN];
 
 pub struct Request {
     pub task_id: String,
@@ -45,39 +51,120 @@ impl Request {
 
 pub fn interval(task_id: &str) -> i64 {
     let settings = config::scheduled_settings();
-    let minutes = if task_id == CREDENTIAL {
-        settings.credential_maintenance.interval
-    } else {
-        settings.model_refresh.interval
+    let minutes = match task_id {
+        CREDENTIAL => settings.credential_maintenance.interval,
+        MODEL => settings.model_refresh.interval,
+        UPDATE_CHECK => settings.update_check.interval,
+        PLUGIN_CATALOG => plugin_host::settings::current().interval,
+        MAGPIE_PLUGIN => settings.magpie_plugin_check.interval,
+        _ => settings.model_refresh.interval,
     };
     minutes.max(1) * 60_000
 }
 
 pub fn summary(detail: &Detail) -> String {
     let run = &detail.run;
-    let unit = if run.task_id == CREDENTIAL {
-        "个账号"
-    } else {
-        "家提供商"
+    if run.task_id == UPDATE_CHECK {
+        if let Some(message) = detail.results.first().and_then(|item| item.message.as_deref()) {
+            return message.to_string();
+        }
+    }
+    let unit = match run.task_id.as_str() {
+        CREDENTIAL => "个账号",
+        MODEL => "家提供商",
+        PLUGIN_CATALOG => "个插件",
+        _ => "项",
     };
     let mut text = format!(
         "成功 {} {unit}，跳过 {}，失败 {}",
         run.refreshed, run.skipped, run.failed
     );
     if let Some(metadata) = &run.metadata {
-        match metadata.status.as_str() {
-            "refreshed" => text.push_str(&format!(
-                "；models.dev 已更新 {} 条",
-                metadata.count.unwrap_or(0)
-            )),
-            "failed" => text.push_str(&format!(
-                "；models.dev 更新失败：{}",
-                metadata.message.as_deref().unwrap_or("未知原因")
-            )),
-            _ => (),
+        if run.task_id == PLUGIN_CATALOG {
+            if let Some(message) = metadata.message.as_deref() {
+                text.push_str(&format!("；{message}"));
+            }
+        } else {
+            match metadata.status.as_str() {
+                "refreshed" => text.push_str(&format!(
+                    "；models.dev 已更新 {} 条",
+                    metadata.count.unwrap_or(0)
+                )),
+                "failed" => text.push_str(&format!(
+                    "；models.dev 更新失败：{}",
+                    metadata.message.as_deref().unwrap_or("未知原因")
+                )),
+                _ => (),
+            }
         }
     }
     text
+}
+
+enum PreparedTask {
+    Standard(task_state::RunGuard, storage::Recorder),
+    UpdateCheck(task_state::RunGuard, storage::Recorder),
+    PluginCatalog(
+        String,
+        config::UpdateChannels,
+        bool,
+        task_state::RunGuard,
+        storage::Recorder,
+    ),
+    MagpiePlugin(task_state::RunGuard, storage::Recorder),
+}
+
+fn claim_deferred(manual: bool, state: &task_state::TaskState) -> String {
+    if manual {
+        state.waiting_message_bypassing()
+    } else {
+        state.waiting_message()
+    }
+}
+
+fn prepare_task(request: &Request, manager: &update::UpdateManager) -> Result<PreparedTask, String> {
+    let manual = request.source == "manual";
+    let backoff = if manual {
+        task_state::ManualBackoff::Bypass
+    } else {
+        task_state::ManualBackoff::Respect
+    };
+    match request.task_id.as_str() {
+        CREDENTIAL | MODEL => {
+            let guard = match task_state::claim(&request.task_id, interval(&request.task_id), manual, backoff, 1000)? {
+                task_state::Claim::Acquired(guard) => guard,
+                task_state::Claim::Deferred(state) => return Err(claim_deferred(manual, &state)),
+            };
+            let recorder = storage::Recorder::start(&request.task_id, request.source, request.retry_of.as_deref())?;
+            Ok(PreparedTask::Standard(guard, recorder))
+        }
+        UPDATE_CHECK => {
+            let guard = match manager.claim_check(update::CURRENT_VERSION, manual)? {
+                task_state::Claim::Acquired(guard) => guard,
+                task_state::Claim::Deferred(state) => return Err(claim_deferred(manual, &state)),
+            };
+            let recorder = storage::Recorder::start(&request.task_id, request.source, request.retry_of.as_deref())?;
+            Ok(PreparedTask::UpdateCheck(guard, recorder))
+        }
+        PLUGIN_CATALOG => {
+            let (channel_key, channels, claim) = plugin_host::catalog::claim_refresh(manual)?;
+            let guard = match claim {
+                task_state::Claim::Acquired(guard) => guard,
+                task_state::Claim::Deferred(state) => return Err(claim_deferred(manual, &state)),
+            };
+            let recorder = storage::Recorder::start(&request.task_id, request.source, request.retry_of.as_deref())?;
+            Ok(PreparedTask::PluginCatalog(channel_key, channels, manual, guard, recorder))
+        }
+        MAGPIE_PLUGIN => {
+            let guard = match task_state::claim(&request.task_id, interval(&request.task_id), manual, backoff, 1000)? {
+                task_state::Claim::Acquired(guard) => guard,
+                task_state::Claim::Deferred(state) => return Err(claim_deferred(manual, &state)),
+            };
+            let recorder = storage::Recorder::start(&request.task_id, request.source, request.retry_of.as_deref())?;
+            Ok(PreparedTask::MagpiePlugin(guard, recorder))
+        }
+        _ => Err("未知的维护任务".to_string()),
+    }
 }
 
 fn prepare(request: &Request) -> Result<(task_state::RunGuard, storage::Recorder), String> {
@@ -98,13 +185,7 @@ fn prepare(request: &Request) -> Result<(task_state::RunGuard, storage::Recorder
         1000,
     )? {
         task_state::Claim::Acquired(guard) => guard,
-        task_state::Claim::Deferred(state) => {
-            return Err(if manual {
-                state.waiting_message_bypassing()
-            } else {
-                state.waiting_message()
-            })
-        }
+        task_state::Claim::Deferred(state) => return Err(claim_deferred(manual, &state)),
     };
     let recorder = storage::Recorder::start(
         &request.task_id,
@@ -114,16 +195,65 @@ fn prepare(request: &Request) -> Result<(task_state::RunGuard, storage::Recorder
     Ok((guard, recorder))
 }
 
-pub fn launch(store: AccountStore, request: Request) -> Result<Detail, String> {
-    let (guard, recorder) = prepare(&request)?;
-    let started = Detail {
-        run: recorder.run.clone(),
-        results: Vec::new(),
-    };
-    crate::spawn_task(async move {
-        let _ = crate::server::core::runtime_capacity::background_scope(complete(&store, request, guard, recorder)).await;
-    });
-    Ok(started)
+pub fn launch_with_update(
+    store: AccountStore,
+    manager: update::UpdateManager,
+    request: Request,
+) -> Result<Detail, String> {
+    match prepare_task(&request, &manager)? {
+        PreparedTask::Standard(guard, recorder) => {
+            let started = Detail {
+                run: recorder.run.clone(),
+                results: Vec::new(),
+            };
+            crate::spawn_task(async move {
+                let _ = crate::server::core::runtime_capacity::background_scope(complete(
+                    &store, request, guard, recorder,
+                ))
+                .await;
+            });
+            Ok(started)
+        }
+        PreparedTask::UpdateCheck(guard, recorder) => {
+            let started = Detail {
+                run: recorder.run.clone(),
+                results: Vec::new(),
+            };
+            crate::spawn_task(async move {
+                let _ = crate::server::core::runtime_capacity::background_scope(
+                    tasks::complete_update_check(&manager, guard, recorder),
+                )
+                .await;
+            });
+            Ok(started)
+        }
+        PreparedTask::PluginCatalog(channel_key, channels, manual, guard, recorder) => {
+            let started = Detail {
+                run: recorder.run.clone(),
+                results: Vec::new(),
+            };
+            crate::spawn_task(async move {
+                let _ = crate::server::core::runtime_capacity::background_scope(
+                    tasks::complete_plugin_catalog(channel_key, channels, manual, guard, recorder),
+                )
+                .await;
+            });
+            Ok(started)
+        }
+        PreparedTask::MagpiePlugin(guard, recorder) => {
+            let started = Detail {
+                run: recorder.run.clone(),
+                results: Vec::new(),
+            };
+            crate::spawn_task(async move {
+                let _ = crate::server::core::runtime_capacity::background_scope(
+                    tasks::complete_magpie_plugin(guard, recorder),
+                )
+                .await;
+            });
+            Ok(started)
+        }
+    }
 }
 
 pub async fn execute(store: &AccountStore, request: Request) -> Result<Detail, String> {
@@ -265,7 +395,12 @@ fn complete_missing_targets(
     }
 }
 
-pub fn retry(store: AccountStore, run_id: &str, item_id: Option<&str>) -> Result<Detail, String> {
+pub fn retry(
+    store: AccountStore,
+    manager: update::UpdateManager,
+    run_id: &str,
+    item_id: Option<&str>,
+) -> Result<Detail, String> {
     let previous = storage::detail(run_id)?;
     if previous.run.status == "running" {
         return Err("该次维护尚未结束".to_string());
@@ -298,7 +433,7 @@ pub fn retry(store: AccountStore, run_id: &str, item_id: Option<&str>) -> Result
             .filter(|item| item.forced)
             .filter_map(|item| item.account_id.clone())
             .collect();
-    } else {
+    } else if request.task_id == MODEL {
         request.providers = Some(failed.iter().map(|item| item.provider.clone()).collect());
         for item in &failed {
             // 重试仍点名原账号，账号被删或禁用时不能悄悄换成另一个账号。
@@ -307,7 +442,7 @@ pub fn retry(store: AccountStore, run_id: &str, item_id: Option<&str>) -> Result
             }
         }
     }
-    launch(store, request)
+    launch_with_update(store, manager, request)
 }
 
 pub async fn refresh_single(

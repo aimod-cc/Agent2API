@@ -984,6 +984,17 @@ pub trait ProviderAdapter: Send + Sync {
         false
     }
 
+    /// 带最小提前量（毫秒）的临期判定；供凭证维护把窗口放大到覆盖维护间隔，
+    /// 不改变转发按需续期使用的 [`Self::credentials_expiring`]。
+    fn credentials_expiring_within(
+        &self,
+        store: &AccountStore,
+        account_id: &str,
+        _min_lead_ms: i64,
+    ) -> bool {
+        self.credentials_expiring(store, account_id)
+    }
+
     /// [`Self::credentials_expiring`] 的异步形态（插件架构新增，理由同
     /// [`Self::build_chat_request_async`]）。
     ///
@@ -1008,6 +1019,21 @@ pub trait ProviderAdapter: Send + Sync {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
         Box::pin(async move { Ok(self.credentials_expiring_async(store, account_id).await) })
+    }
+
+    /// 带最小提前量（毫秒）的异步临期检查；供凭证维护把窗口放大到覆盖维护间隔。
+    fn check_credentials_expiring_within<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+        min_lead_ms: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if min_lead_ms <= 0 {
+                return self.check_credentials_expiring(store, account_id).await;
+            }
+            Ok(self.credentials_expiring_within(store, account_id, min_lead_ms))
+        })
     }
 
     /// 本 provider 是否允许「一个账号都没有时用默认登录态转发」
@@ -2003,6 +2029,15 @@ impl ProviderAdapter for BuiltinAdapter {
         adapter_for(self.0).credentials_expiring(store, account_id)
     }
 
+    fn credentials_expiring_within(
+        &self,
+        store: &AccountStore,
+        account_id: &str,
+        min_lead_ms: i64,
+    ) -> bool {
+        adapter_for(self.0).credentials_expiring_within(store, account_id, min_lead_ms)
+    }
+
     fn credentials_expiring_async<'a>(
         &'a self,
         store: &'a AccountStore,
@@ -2017,6 +2052,15 @@ impl ProviderAdapter for BuiltinAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
         adapter_for(self.0).check_credentials_expiring(store, account_id)
+    }
+
+    fn check_credentials_expiring_within<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+        min_lead_ms: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        adapter_for(self.0).check_credentials_expiring_within(store, account_id, min_lead_ms)
     }
 
     fn allows_anonymous_default_session(&self) -> bool {

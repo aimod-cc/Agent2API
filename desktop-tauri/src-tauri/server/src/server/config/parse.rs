@@ -302,6 +302,12 @@ pub(super) fn scheduled_from(map: &Map<String, Value>) -> ScheduledSettings {
             INTERVAL_MIN_MINUTES,
             INTERVAL_MAX_MINUTES,
         ),
+        magpie_plugin_check: task(
+            KEY_MAGPIE_PLUGIN_CHECK,
+            defaults.magpie_plugin_check.interval,
+            INTERVAL_MIN_MINUTES,
+            INTERVAL_MAX_MINUTES,
+        ),
     }
 }
 

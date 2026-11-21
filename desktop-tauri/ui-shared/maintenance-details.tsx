@@ -8,28 +8,36 @@ import { t } from '../ui-kit/src/i18n'
 import { SearchableSelect } from './searchable-select'
 import { ItemStatus } from './maintenance-shared'
 import {
-  duration, hasFailures, itemChange, itemMessage, maintenanceLabel, maintenanceMessage, sourceLabel, stamp,
+  duration, hasFailures, itemChange, itemMessage, maintenanceLabel, maintenanceMessage, maintenanceRawDetail,
+  sourceLabel, stamp,
 } from './maintenance-format'
-import type { MaintenanceDetail, MaintenanceItem, MaintenanceResultStatus } from './maintenance-types'
-
-/**
- * 一次执行的逐项明细。
- *
- * ── 为什么是弹窗，不是行内展开 ────────────────────────────────
- * 逐项明细是一张 6 列的表格（提供商 / 账号 / 结果 / 变化 / 原因 / 操作），行内展开会把它
- * 塞进表格的一行里：列宽对不上、行内再套一层卡片、展开后这一行的高度把列表冲散。
- * 改成弹窗后每一行等高，列表还能多显示几行；明细自己一屏宽，读起来也顺。
- *
- * ── 高度固定 ─────────────────────────────────────────────────
- * 高度写死（min(720px, 视口-48px)），不随这次执行有几条、筛完剩几条而变 —— 否则连着点
- * 几条记录，弹窗就会忽高忽低。内容在正文里滚，行少时留白而不是把窗口缩掉。
- *
- * ── 两个筛选器 ───────────────────────────────────────────────
- * 状态（全部 / 失败 / 成功 / 跳过）与提供商（全部提供商 / 具体某家）。状态上的条数跟着
- * 提供商联动，两个筛选器看到的数字才是一致的。
- */
+import type { MaintenanceDetail, MaintenanceItem, MaintenanceResultStatus, MaintenanceTaskId } from './maintenance-types'
 
 const PAGE_SIZE = 10
+
+function targetColumnTitle(taskId: MaintenanceTaskId | undefined): string {
+  switch (taskId) {
+    case 'updateCheck': return t('检查对象')
+    case 'pluginCatalogCheck': return t('插件')
+    case 'magpiePluginCheck': return t('插件 / 清单')
+    default: return t('提供商')
+  }
+}
+
+function scopeColumnTitle(taskId: MaintenanceTaskId | undefined): string {
+  switch (taskId) {
+    case 'updateCheck': return t('更新通道')
+    case 'pluginCatalogCheck': return t('当前版本')
+    case 'magpiePluginCheck': return t('版本 / 来源')
+    default: return t('账号')
+  }
+}
+
+function changeColumnTitle(taskId: MaintenanceTaskId | undefined): string {
+  if (taskId === 'credentialMaintenance') return t('凭证变化')
+  if (taskId === 'modelRefresh') return t('模型目录')
+  return t('检查结果')
+}
 
 export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload, onClose, onRetry, onAccount }: {
   detail?: MaintenanceDetail
@@ -45,7 +53,6 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
   const [provider, setProvider] = React.useState('')
   const [page, setPage] = React.useState(1)
   const [selected, setSelected] = React.useState<MaintenanceItem | null>(null)
-  // 明细一到手就先看失败项（与本页原有一致），但只替用户选一次，之后不再抢筛选
   const appliedDefault = React.useRef(false)
   React.useEffect(() => {
     if (!detail || appliedDefault.current) return
@@ -53,9 +60,8 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
     if (detail.failed) setFilter('failed')
   }, [detail])
 
-  const credential = detail?.taskId === 'credentialMaintenance'
+  const taskId = detail?.taskId
   const stalled = !detail || detail.status === 'running' || detail.status === 'interrupted'
-  // 提供商选项来自这次执行的结果本身（去重后按名称排序）
   const providers = React.useMemo(() => {
     const map = new Map<string, string>()
     for (const item of detail?.results ?? []) map.set(item.provider, item.providerLabel || item.provider)
@@ -71,6 +77,9 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
   const emptyText = detail?.status === 'running' ? t('维护正在执行，完成后会显示逐项结果')
     : detail?.status === 'interrupted' ? t('该次执行未完成，没有完整明细')
       : t('本轮没有符合条件的项目')
+  const targetTitle = targetColumnTitle(taskId)
+  const scopeTitle = scopeColumnTitle(taskId)
+  const emptyScope = taskId === 'credentialMaintenance' || taskId === 'modelRefresh' ? t('未使用账号') : '—'
 
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
     <DialogContent className='flex h-[min(720px,calc(100vh-48px))] w-[min(1000px,calc(100vw-32px))] flex-col'>
@@ -102,23 +111,22 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
                 { value: 'skipped', label: t('跳过'), count: statusCount('skipped') },
               ]}
             />
-            <SearchableSelect value={provider} onValueChange={value => { setProvider(value); setPage(1) }}
-              aria-label={t('提供商')} className='min-w-[150px] max-w-[260px]' searchPlaceholder={t('搜索提供商')}
-              options={[{ value: '', label: t('全部提供商') }, ...providers.map(([value, label]) => ({ value, label }))]} />
+            {providers.length > 1 ? <SearchableSelect value={provider} onValueChange={value => { setProvider(value); setPage(1) }}
+              aria-label={targetTitle} className='min-w-[150px] max-w-[260px]' searchPlaceholder={t('搜索名称')}
+              options={[{ value: '', label: t('全部项目') }, ...providers.map(([value, label]) => ({ value, label }))]} /> : null}
           </div>
-          {/* 表格区吃掉剩余高度：行少时留白而不是缩窗，行多时在这里滚 */}
           <Table containerClassName='maintenance-detail-scroll min-h-0 flex-1' className='maintenance-detail-table'>
             <TableHeader><TableRow>
-              <TableHead>{t('提供商')}</TableHead>
-              <TableHead>{t('账号')}</TableHead>
+              <TableHead>{targetTitle}</TableHead>
+              <TableHead>{scopeTitle}</TableHead>
               <TableHead>{t('结果')}</TableHead>
-              <TableHead>{credential ? t('凭证变化') : t('模型目录')}</TableHead>
+              <TableHead>{changeColumnTitle(taskId)}</TableHead>
               <TableHead>{t('原因 / 说明')}</TableHead>
               <TableHead className='text-right'>{t('操作')}</TableHead>
             </TableRow></TableHeader>
             <TableBody>{shown.map(item => <TableRow key={item.id}>
               <TableCell>{item.providerLabel || item.provider || '—'}</TableCell>
-              <TableCell><span title={item.accountId ?? undefined}>{item.accountName || item.accountId || t('未使用账号')}</span></TableCell>
+              <TableCell><span title={item.accountId ?? undefined}>{item.accountName || item.accountId || emptyScope}</span></TableCell>
               <TableCell><ItemStatus status={item.status} /></TableCell>
               <TableCell>{itemChange(item, detail.taskId)}</TableCell>
               <TableCell className='maintenance-reason'>{itemMessage(item, detail.taskId)}</TableCell>
@@ -130,9 +138,11 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
             </TableRow>)}{!shown.length ? <TableRow><TableCell colSpan={6}><Empty>{emptyText}</Empty></TableCell></TableRow> : null}</TableBody>
           </Table>
           {detail.metadata ? <div className='maintenance-metadata'>
-            <span>{t('模型基础信息')} · models.dev</span>
+            <span>{detail.taskId === 'pluginCatalogCheck' ? t('官网社区插件目录') : `${t('模型基础信息')} · models.dev`}</span>
             <ItemStatus status={detail.metadata.status} />
-            <span>{detail.metadata.status === 'refreshed' ? t('已更新 {n} 条', { n: detail.metadata.count ?? 0 }) : itemMessage(detail.metadata, 'modelRefresh')}</span>
+            <span>{detail.taskId === 'modelRefresh' && detail.metadata.status === 'refreshed'
+              ? t('已更新 {n} 条', { n: detail.metadata.count ?? 0 })
+              : itemMessage(detail.metadata, detail.taskId)}</span>
           </div> : null}
           <div className='maintenance-detail-footer'>
             <span>{t('重试生成新记录，不覆盖本次结果')}</span>
@@ -152,7 +162,6 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
   </Dialog>
 }
 
-/** 单条明细的结果快照：同一批字段，排版走「标签淡、取值略深」的两列事实表 */
 export function MaintenanceItemDialog({ item, detail, busy, onClose, onRetry, onAccount }: {
   item: MaintenanceItem
   detail: MaintenanceDetail
@@ -162,23 +171,29 @@ export function MaintenanceItemDialog({ item, detail, busy, onClose, onRetry, on
   onAccount?(accountId: string): void
 }) {
   const credential = detail.taskId === 'credentialMaintenance'
+  const model = detail.taskId === 'modelRefresh'
+  const scopeTitle = scopeColumnTitle(detail.taskId)
+  const rawDetail = item.status === 'failed' ? maintenanceRawDetail(item.message) : ''
   const facts: Array<[string, React.ReactNode]> = [
     [t('执行时间'), stamp(detail.startedAt)],
     [t('触发方式'), sourceLabel(detail.source)],
-    [t('账号'), item.accountName || item.accountId || t('未使用账号')],
+    [scopeTitle, item.accountName || item.accountId || (credential || model ? t('未使用账号') : '—')],
     [t('耗时'), duration(item.durationMs)],
     ...(credential
       ? [[t('刷新前有效期'), stamp(item.expiresBefore)], [t('刷新后有效期'), stamp(item.expiresAfter)]] as Array<[string, React.ReactNode]>
-      : [[t('模型目录'), itemChange(item, 'modelRefresh')], [t('目录最近更新时间'), stamp(item.refreshedAt)]] as Array<[string, React.ReactNode]>),
-    ...(item.retryAt ? [[t('建议重试时间'), stamp(item.retryAt)]] as Array<[string, React.ReactNode]> : []),
+      : model
+        ? [[t('模型目录'), itemChange(item, 'modelRefresh')], [t('目录最近更新时间'), stamp(item.refreshedAt)]] as Array<[string, React.ReactNode]>
+        : [
+            [t('检查结果'), itemChange(item, detail.taskId)] as [string, React.ReactNode],
+            ...(item.latestVersion ? [[t('最新版本'), item.latestVersion] as [string, React.ReactNode]] : []),
+          ]),
+    ...(item.retryAt ? [[t('建议重试时间'), stamp(item.retryAt)] as [string, React.ReactNode]] : []),
   ]
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
-    {/* overlayForceRender：这一层是从明细弹窗里打开的（嵌套层），
-        要自己画一层遮罩才能压暗下层、并支持点空白处关闭 */}
     <DialogContent className='w-[min(560px,calc(100vw-32px))]' overlayForceRender>
       <DialogHeader className='flex-col items-start gap-1'>
         <DialogTitle>{item.providerLabel || item.provider} · {maintenanceLabel(detail.taskId)}</DialogTitle>
-        <DialogDescription className='text-xs leading-relaxed text-muted-foreground'>{t('执行时的结果快照，不随账号后续变化而改变')}</DialogDescription>
+        <DialogDescription className='text-xs leading-relaxed text-muted-foreground'>{t('执行时的结果快照，不随后续状态变化而改变')}</DialogDescription>
       </DialogHeader>
       <DialogBody className='gap-3.5'>
         <div className='flex flex-col gap-1.5'>
@@ -187,6 +202,11 @@ export function MaintenanceItemDialog({ item, detail, busy, onClose, onRetry, on
             {item.fixed ? <><span className='maintenance-sep'>·</span>{t('固定模型清单')}</> : null}
           </span>
           <p className='m-0 text-[13px] leading-relaxed'>{itemMessage(item, detail.taskId)}</p>
+          {rawDetail ? (
+            <div className='rounded-md border border-hairline bg-surface-2 px-3 py-2 text-[11.5px] leading-relaxed text-muted-foreground break-all'>
+              {rawDetail}
+            </div>
+          ) : null}
         </div>
         <dl className='maintenance-facts'>
           {facts.map(([label, value]) => <div key={label}>

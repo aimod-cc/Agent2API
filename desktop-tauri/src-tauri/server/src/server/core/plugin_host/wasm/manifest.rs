@@ -20,7 +20,7 @@ pub const CAPABILITIES: &[&str] = &[
     "resources.inbound-images.v1", "login.desktop.chatglm.v1", "http.catpaw-turn.v1",
     "claim.doubao-tasks.v1", "http.managed-task.v1",
     "http.codearts-session.v1", "login.codearts.v1", "desktop.credentials.v1", "http.doubao-turn.v1",
-    "crypto.monkeycode-cap.v1", "desktop.launch.v1", "resources.cookie-file.v1", "credential.kiro-external-refresh.v1", "credentials.legacy-import.v1",
+    "crypto.deepseek-pow.v1", "crypto.monkeycode-cap.v1", "desktop.launch.v1", "resources.cookie-file.v1", "credential.kiro-external-refresh.v1", "credentials.legacy-import.v1",
 ];
 
 #[derive(Clone, Debug, Deserialize)]
@@ -106,9 +106,10 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         ("http.doubao-turn.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1", "request.context.v1"][..]),
         ("http.codearts-session.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1"][..]),
         ("login.codearts.v1", &["login.forms.v1", "sessions.v1"][..]),
-        ("desktop.launch.v1", &["accounts.cas.v1", "accounts.identity.v1"][..]),
+        ("desktop.launch.v1", &["accounts.cas.v1"][..]),
         ("desktop.credentials.v1", &["accounts.cas.v1", "login.forms.v1", "native.helpers.v1"][..]),
         ("http.managed-task.v1", &["http.v1", "accounts.cas.v1", "chat.stream.v1", "request.context.v1"][..]),
+        ("crypto.deepseek-pow.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1", "clock.v1"][..]),
         ("crypto.monkeycode-cap.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "clock.v1"][..]),
         ("http.catpaw-turn.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1", "request.context.v1"][..]),
         ("http.account-origin.v1", &["http.v1", "accounts.cas.v1"][..]),
@@ -139,6 +140,9 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     }
     if (requires("http.codearts-session.v1") || requires("login.codearts.v1")) && manifest.providers[0].id.as_str() != "codearts" {
         return Err("CodeArts 会话和登录能力不能跨提供商使用".into());
+    }
+    if requires("crypto.deepseek-pow.v1") && manifest.providers[0].id.as_str() != "deepseek-web" {
+        return Err("DeepSeek 网页验证计算能力不能跨提供商使用".into());
     }
     if requires("crypto.monkeycode-cap.v1") && !matches!(manifest.providers[0].id.as_str(), "monkeycode" | "monkeycode-intl") {
         return Err("MonkeyCode 官方计算验证不能跨提供商使用".into());

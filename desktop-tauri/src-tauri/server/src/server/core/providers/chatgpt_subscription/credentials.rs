@@ -21,12 +21,17 @@ fn flights() -> &'static Table<Credentials> {
     FLIGHTS.get_or_init(Table::new)
 }
 
-pub(super) fn expiring(store: &AccountStore, account_id: &str) -> bool {
+pub(super) fn expiring_within(store: &AccountStore, account_id: &str, min_lead_ms: i64) -> bool {
+    let margin = MARGIN_MS.max(min_lead_ms.max(0));
     account::load(store, account_id).is_ok_and(|(_, credentials)| {
         !credentials.needs_relogin
             && (credentials.identity_pending
-                || credentials.expires_at <= logging::now_ms() + MARGIN_MS)
+                || credentials.expires_at <= logging::now_ms().saturating_add(margin))
     })
+}
+
+pub(super) fn expiring(store: &AccountStore, account_id: &str) -> bool {
+    expiring_within(store, account_id, 0)
 }
 
 pub(super) async fn fresh(

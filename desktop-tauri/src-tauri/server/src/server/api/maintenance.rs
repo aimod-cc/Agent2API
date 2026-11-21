@@ -17,7 +17,7 @@ pub async fn overview(
         let records = maintenance::storage::list(&query)?;
         let latest = maintenance::storage::latest()?;
         Ok(json!({
-            "tasks": scheduled_tasks::tasks_by_ids(&[maintenance::CREDENTIAL, maintenance::MODEL]),
+            "tasks": scheduled_tasks::tasks_by_ids(&maintenance::ALL_TASKS),
             "latest": latest,
             "records": records,
             "retentionDays": maintenance::storage::RETENTION_DAYS,
@@ -48,11 +48,12 @@ pub async fn entry(State(state): State<ServerState>, request: axum::extract::Req
             ),
         },
         (Method::POST, ["run", task_id]) => {
-            if !matches!(*task_id, maintenance::CREDENTIAL | maintenance::MODEL) {
+            if !maintenance::ALL_TASKS.contains(task_id) {
                 return error_response(400, "未知的维护任务");
             }
-            execution_response(maintenance::launch(
+            execution_response(maintenance::launch_with_update(
                 state.store().clone(),
+                state.update().clone(),
                 maintenance::Request::full(task_id, true),
             ))
         }
@@ -71,6 +72,7 @@ pub async fn entry(State(state): State<ServerState>, request: axum::extract::Req
                 .map(str::to_string);
             execution_response(maintenance::retry(
                 state.store().clone(),
+                state.update().clone(),
                 id,
                 item_id.as_deref(),
             ))

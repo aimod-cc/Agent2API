@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import { updateErrorMessage } from '../../../ui-shared/updates'
+import { summarizeNetworkError, updateErrorMessage } from '../../../ui-shared/updates'
 import { pluginPackName } from '../../../ui-shared/plugins'
 import type { PluginMutation } from './plugins-types'
 
@@ -24,7 +24,7 @@ export function errorMessage(error: unknown): string {
 }
 
 export function toast(message: string, kind?: 'err' | 'ok'): void {
-  bridge().wbApp?.toast?.(errorMessage(message), kind)
+  bridge().wbApp?.toast?.(kind === 'err' ? summarizeNetworkError(message, t).summary : errorMessage(message), kind)
 }
 
 export async function api<T>(method: string, path: string, body?: unknown, options?: { retry: 'never' }): Promise<T> {

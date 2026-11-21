@@ -55,24 +55,66 @@ pub(super) fn guard_token_exchange(context: &Context, params: &Value) -> Result<
     };
     if reserved {
         if provider == "kiro" && path == "/token" && context.managed.is_none()
-            && !context.account.is_empty() && params["method"] == "POST" {
-            use base64::Engine;
-            let body = params["body"].as_str().filter(|body| body.len() <= 176 * 1024)
-                .ok_or_else(|| super::error("Kiro续期正文无效"))?;
-            let raw = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.decode(body)
-                .map_err(|_| super::error("Kiro续期正文无效"))?);
-            let fields: serde_json::Map<String, Value> = super::managed_task::declaration::parse_object(&raw, 128 * 1024)
-                .map_err(|_| super::error("Kiro续期正文无效"))?;
-            if fields.len() == 4 && fields.get("grantType").and_then(Value::as_str) == Some("refresh_token")
-                && fields.keys().all(|key| matches!(key.as_str(), "clientId" | "clientSecret" | "refreshToken" | "grantType"))
-                && fields.values().all(|value| value.as_str().is_some_and(|text| !text.is_empty()
-                    && text.len() <= 8192 && !text.chars().any(|ch| ch.is_control() || ch.is_whitespace()))) {
-                return Ok(());
-            }
+            && !context.account.is_empty() && params["method"] == "POST"
+            && valid_kiro_refresh_body(params)?
+        {
+            return Ok(());
+        }
+        if provider == "codearts" && context.managed.is_none()
+            && !context.account.is_empty() && params["method"] == "POST"
+            && parsed.query().is_none()
+            && params.get("body_resource").is_none_or(Value::is_null)
+            && params.get("multipart").is_none_or(Value::is_null)
+            && valid_codearts_refresh_body(params)?
+        {
+            return Ok(());
         }
         return Err(proto::WireError::with_code("一次性授权兑换必须由本次原调用的固定宿主入口执行", "forbidden"));
     }
     Ok(())
+}
+
+fn decode_refresh_body(params: &Value, provider_label: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, proto::WireError> {
+    use base64::Engine;
+    let message = format!("{provider_label}续期正文无效");
+    let body = params["body"].as_str().filter(|body| body.len() <= 176 * 1024)
+        .ok_or_else(|| super::error(&message))?;
+    let raw = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.decode(body)
+        .map_err(|_| super::error(&message))?);
+    if raw.len() > 128 * 1024 { return Err(super::error(&message)); }
+    Ok(raw)
+}
+
+fn valid_refresh_scalar(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 8192 && !value.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
+fn valid_kiro_refresh_body(params: &Value) -> Result<bool, proto::WireError> {
+    let raw = decode_refresh_body(params, "Kiro")?;
+    let fields: serde_json::Map<String, Value> = super::managed_task::declaration::parse_object(&raw, 128 * 1024)
+        .map_err(|_| super::error("Kiro续期正文无效"))?;
+    Ok(fields.len() == 4
+        && fields.get("grantType").and_then(Value::as_str) == Some("refresh_token")
+        && fields.keys().all(|key| matches!(key.as_str(), "clientId" | "clientSecret" | "refreshToken" | "grantType"))
+        && fields.values().all(|value| value.as_str().is_some_and(valid_refresh_scalar)))
+}
+
+fn valid_codearts_refresh_body(params: &Value) -> Result<bool, proto::WireError> {
+    let raw = decode_refresh_body(params, "CodeArts")?;
+    if std::str::from_utf8(&raw).is_err() {
+        return Err(super::error("CodeArts续期正文无效"));
+    }
+    let mut fields = std::collections::HashMap::new();
+    for (key, value) in url::form_urlencoded::parse(&raw) {
+        if fields.len() >= 4
+            || !matches!(key.as_ref(), "client_id" | "code_verifier" | "grant_type" | "refresh_token")
+            || !valid_refresh_scalar(&value)
+            || fields.insert(key.into_owned(), value.into_owned()).is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(fields.len() == 4 && fields.get("grant_type").map(String::as_str) == Some("refresh_token"))
 }
 
 pub(super) fn deadline(context: &Context, params: &Value, started: tokio::time::Instant) -> Result<HttpDeadline, proto::WireError> {

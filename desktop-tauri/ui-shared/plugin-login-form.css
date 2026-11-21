@@ -53,6 +53,27 @@
 .plugin-login-diagnostic-meta dt { color: var(--ui-muted-foreground); }
 .plugin-login-diagnostic-meta dd { margin: 0; overflow-wrap: anywhere; }
 .plugin-login-diagnostic-body { max-height: 240px; min-width: 0; margin: 0; overflow: auto; padding: 12px; border: 1px solid var(--ui-hairline); border-radius: 8px; background: var(--ui-surface-2); color: var(--ui-text-2); font: 11px/1.6 var(--ui-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.plugin-login-sms { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
+.plugin-login-sms-group { overflow: hidden; }
+.plugin-login-sms-prefix { padding-left: 2px; padding-right: 0; gap: 2px; }
+.plugin-login-sms-prefix-static { padding-left: 10px; padding-right: 2px; font-size: 12.5px; font-weight: 500; color: var(--ui-text-2); font-variant-numeric: tabular-nums; }
+.plugin-login-sms-country,
+[data-slot='combobox-trigger'].plugin-login-sms-country,
+[data-slot='select-trigger'].plugin-login-sms-country { width: auto; min-width: 56px; height: 24px; min-height: 24px; padding: 0 6px 0 8px; border: 0; background: transparent; box-shadow: none; font-size: 12.5px; font-weight: 500; color: var(--ui-text-2); }
+.plugin-login-sms-country:hover,
+[data-slot='combobox-trigger'].plugin-login-sms-country:hover,
+[data-slot='select-trigger'].plugin-login-sms-country:hover { background: transparent; }
+.plugin-login-sms-sep { width: 1px; height: 14px; background: var(--ui-hairline); flex: none; margin: 0 4px; }
+.plugin-login-sms-group [data-slot='input-group-control']:disabled { background: transparent; }
+.plugin-login-sms-code-addon { padding-right: 3px; gap: 0; }
+.plugin-login-sms-end { padding-right: 3px; }
+.plugin-login-sms-send-btn, .plugin-login-sms-inline-btn { height: 24px; min-height: 24px; padding: 0 10px; font-size: 12px; font-weight: 500; color: var(--ui-primary-fg); }
+.plugin-login-sms-send-btn:hover:not(:disabled), .plugin-login-sms-inline-btn:hover:not(:disabled) { background: var(--ui-primary-soft); color: var(--ui-primary-fg); }
+.plugin-login-sms-send-btn:disabled, .plugin-login-sms-inline-btn:disabled { color: var(--ui-muted-foreground); opacity: .75; }
+.plugin-login-sms-status { font-size: 12px; line-height: 1.5; }
+.plugin-login-sms-status.is-sent { color: var(--ui-success); }
+.plugin-login-sms-status.is-expired { color: var(--ui-warning); }
+.plugin-login-submit { min-height: 34px; font-size: 13px; font-weight: 600; }
 @media (max-width: 720px) {
   .plugin-account-form { gap: 20px; }
   .plugin-login-methods [data-slot='segmented-item'] { flex: 1 1 calc(33% - 4px); padding: 8px; font-size: 12px; }

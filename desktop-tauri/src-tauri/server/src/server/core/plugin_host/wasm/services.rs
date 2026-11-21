@@ -113,6 +113,7 @@ impl Context {
             }
             "credentials.legacy.take" => super::legacy_credentials::take(self, &params),
             "credential.kiro.external.refresh" => super::external_refresh::invoke(self, &params).await,
+            "crypto.deepseek.pow.solve" => super::deepseek_pow::solve(self, &params).await,
             "crypto.monkeycode.cap.solve" => super::monkeycode_cap::solve(self, &params).await,
             "resource.cookie-file.take" => {
                 self.permission("resources.cookie-file.v1")?;

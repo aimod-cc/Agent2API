@@ -2,6 +2,7 @@ import { Button, Progress, Switch, Checkbox, cn, Card, Label, Collapsible, Colla
 import { Badge } from '../../components/ui'
 import type { PackSummary, PluginOperation, PluginUpdate, StorePlugin } from '../../api/plugins'
 import { pluginErrorMessage } from '../../api/plugins'
+import { summarizeNetworkError } from '../../../../ui-shared/updates'
 import { t } from '../../i18n'
 import { PluginArtwork, PluginSettingsButton, type PluginCardSelection } from '../../../../ui-shared/plugins-store'
 import { usePluginLoadStatus, requestPluginDiagnostics } from '../../../../ui-shared/plugin-startup-view'
@@ -52,7 +53,7 @@ export function StorePluginCard({ item, target, busy, operation, selection, onIn
     <Button variant='link' size='sm' className='px-0' aria-haspopup='dialog'
       aria-label={`${t(item.name || item.id)} · ${t('查看详情')}`} onClick={onDetails}>{t('查看详情')}</Button>
     <Badge tone='mute'>{t('社区插件')}</Badge>
-    {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(item.reason)}</p> : null}
+    {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}>{item.error ? summarizeNetworkError(item.reason, t).summary : pluginErrorMessage(item.reason)}</p> : null}
     <PluginProgress operation={operation} />
     {!operation?.active && !selection ? <div className='m-ck-actions'>
       <Button size='sm' disabled={busy || !asset || !item.version || item.error} onClick={onInstall}>{t('在网关下载并安装')}</Button>
@@ -100,7 +101,7 @@ export function PluginCard({ pack, target, busy, update, operation, selection, o
     {required ? <div className='mt-3 rounded-md border border-destructive/30 px-3 py-2' aria-live='polite'>
       <p className='m-ck-error'>{pack.compatibilityError || t('插件与当前网关的公共接口不兼容，暂未加载。')}</p>
       <p className='m-ck-note'>{t('请根据不兼容原因更新插件或网关；不会要求两者版本号一致。')}</p>
-      {update?.reason ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(update.reason)}</p> : null}
+      {update?.reason ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{update.error ? summarizeNetworkError(update.reason, t).summary : pluginErrorMessage(update.reason)}</p> : null}
       {update?.retryAt && update.retryAt > Date.now() ? <p className='m-ck-note'>
         {t('下次自动重试：{time}', { time: new Date(update.retryAt).toLocaleString() })}
       </p> : null}
@@ -109,7 +110,7 @@ export function PluginCard({ pack, target, busy, update, operation, selection, o
     {!pack.entryPresent ? <p className='m-ck-error'>{t('插件文件缺失，请重新安装插件包')}</p> : null}
     {pack.enabled && (startup ? (pluginFailed(startup) || startup.phase === 'blocked') && startup.error : pack.host?.lastError)
       ? <p className='m-ck-error line-clamp-2 break-words'>{startup?.error || pack.host?.lastError}</p> : null}
-    {update?.reason && !required ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(update.reason)}</p> : null}
+    {update?.reason && update.error && !update.catalogError && !required ? <p className='m-ck-error'>{summarizeNetworkError(update.reason, t).summary}</p> : null}
     <PluginProgress operation={operation} />
     {!selection ? <div className='m-ck-actions'>
       <Label className='m-ck-toolbar m-ck-note'>

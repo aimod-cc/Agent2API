@@ -491,8 +491,10 @@ pub const KEY_LOGS_AUTO_REFRESH: &str = "logsAutoRefresh";
 pub const KEY_REQUESTS_AUTO_REFRESH: &str = "requestsAutoRefresh";
 /// 报表页自动刷新在 `scheduledTasks` 下的子键（同上）
 pub const KEY_REPORT_AUTO_REFRESH: &str = "reportAutoRefresh";
-/// 软件版本检查在 `scheduledTasks` 下的子键（后端定时向 GitHub 查最新发布版本）
+/// 软件版本检查在 `scheduledTasks` 下的子键（后端定时向官网查最新发布版本）
 pub const KEY_UPDATE_CHECK: &str = "updateCheck";
+/// Magpie 插件清单与更新检查在 `scheduledTasks` 下的子键
+pub const KEY_MAGPIE_PLUGIN_CHECK: &str = "magpiePluginCheck";
 
 /// 凭证维护默认间隔（分钟）：与改造前的硬编码 600 秒一致
 pub const DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES: i64 = 10;
@@ -516,6 +518,8 @@ pub const DEFAULT_REPORT_AUTO_REFRESH_SECONDS: i64 = 1;
 /// `scheduledTasks.updateCheck.interval` 的配置按原值跑（`interval_field`
 /// 只在键缺失或越界时才回落到默认），所以调整它不会改写老用户的设置。
 pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 240;
+/// Magpie 插件清单与更新检查默认间隔（分钟）：6 小时。
+pub const DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES: i64 = 360;
 
 /// 间隔型任务的取值范围。上下限分两套（分钟 / 秒），因为两类任务的合理区间
 /// 差着量级：后端维护任务按分钟（1 分钟～1 天），前端刷新按秒（1 秒～10 分钟）。
@@ -551,6 +555,7 @@ pub struct ScheduledSettings {
     pub requests_auto_refresh: IntervalTask,
     pub report_auto_refresh: IntervalTask,
     pub update_check: IntervalTask,
+    pub magpie_plugin_check: IntervalTask,
 }
 
 impl Default for ScheduledSettings {
@@ -579,6 +584,10 @@ impl Default for ScheduledSettings {
             update_check: IntervalTask {
                 enabled: true,
                 interval: DEFAULT_UPDATE_CHECK_MINUTES,
+            },
+            magpie_plugin_check: IntervalTask {
+                enabled: true,
+                interval: DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES,
             },
         }
     }

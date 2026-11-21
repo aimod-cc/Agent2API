@@ -802,8 +802,17 @@ impl ProviderAdapter for RpcAdapter {
 
     fn check_credentials_expiring<'a>(
         &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        self.check_credentials_expiring_within(store, account_id, 0)
+    }
+
+    fn check_credentials_expiring_within<'a>(
+        &'a self,
         _store: &'a AccountStore,
         account_id: &'a str,
+        min_lead_ms: i64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
             if super::operations::active_for_provider(self.id) {
@@ -811,9 +820,15 @@ impl ProviderAdapter for RpcAdapter {
                     .with_code("credential_refresh_check_unavailable"));
             }
             let execution = self.execution().await?;
+            let mut params = execution.with_account(account_id);
+            if min_lead_ms > 0 {
+                if let Some(object) = params.as_object_mut() {
+                    object.insert("minLeadMs".into(), Value::from(min_lead_ms));
+                }
+            }
             let value = execution.control(
                 proto::methods::gateway::TOKEN_EXPIRING,
-                execution.with_account(account_id),
+                params,
             ).await?;
             value.as_bool().ok_or_else(|| GatewayError::with_status(
                 502, "无法检查凭证有效期，插件返回的结果无效。",

@@ -63,6 +63,8 @@
   "插件启动存在异常": "Alguns plugins não puderam iniciar",
   "插件启动完成，{n} 个已就绪": "Inicialização dos plugins concluída: {n} prontos",
   "插件启动超时": "Tempo de inicialização do plugin esgotado",
+  "插件已停止": "O plugin parou",
+  "插件已停止，远端状态未确认": "O plugin parou, mas o estado remoto não foi confirmado",
   "插件已就绪": "Plugin pronto",
   "插件已恢复运行": "O plugin voltou a funcionar",
   "插件暂不可用，等待运行环境恢复": "Plugin indisponível enquanto aguarda a recuperação do ambiente de execução",

@@ -4,7 +4,7 @@ import { t } from '../ui-kit/src/i18n'
 import { MaintenanceSettings } from './maintenance-settings'
 import { MaintenanceRecords } from './maintenance-records'
 import { MaintenanceSummary } from './maintenance-summary'
-import { hasFailures } from './maintenance-format'
+import { hasFailures, maintenanceMessage } from './maintenance-format'
 import { MAINTENANCE_TASKS, type MaintenanceApi, type MaintenanceDetail, type MaintenanceOverview, type MaintenanceQuery, type MaintenanceRun, type MaintenanceTaskId } from './maintenance-types'
 import './maintenance.css'
 import { PluginTasks } from './plugin-tasks'
@@ -32,7 +32,7 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
   revision?: number
   onAccount?(id: string): void
   onChanged?(): void | Promise<unknown>
-  notify?(message: string, kind?: 'ok' | 'err'): void
+  notify?(message: string, kind?: 'ok' | 'err' | 'warn'): void
   pluginTaskRequest?: PluginTaskRequest
 }) {
   const [overview, setOverview] = React.useState<MaintenanceOverview | null>(null)
@@ -54,6 +54,10 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
   const mounted = React.useRef(true)
   const currentQuery = React.useRef(query)
   currentQuery.current = query
+  const latestNotify = React.useRef(notify)
+  latestNotify.current = notify
+  const hasOverview = React.useRef(false)
+  hasOverview.current = Boolean(overview)
   React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current += 1 } }, [])
   React.useEffect(() => {
     const media = window.matchMedia('(max-width: 700px)')
@@ -71,7 +75,16 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
       setOverview(data)
       setError('')
     } catch (failure) {
-      if (mounted.current && ticket === sequence.current) setError(failure instanceof Error ? failure.message : String(failure))
+      if (!mounted.current || ticket !== sequence.current) return
+      const message = maintenanceMessage(failure instanceof Error ? failure.message : String(failure))
+      if (hasOverview.current) {
+        if (!quiet) {
+          if (latestNotify.current) latestNotify.current(message, 'err')
+          else setError(message)
+        }
+      } else {
+        setError(message)
+      }
     } finally {
       if (mounted.current && ticket === sequence.current) setLoading(false)
     }
@@ -84,6 +97,16 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
     document.addEventListener('visibilitychange', visibility)
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', visibility); sequence.current += 1 }
   }, [active, query, revision, load])
+  const hasRunning = Boolean(
+    overview?.tasks.some(task => task.running)
+    || overview?.records.items.some(run => run.status === 'running')
+    || (expanded && details[expanded]?.status === 'running'),
+  )
+  React.useEffect(() => {
+    if (!active || !hasRunning) return
+    const timer = window.setInterval(() => { if (!document.hidden) void load(true) }, 2_000)
+    return () => window.clearInterval(timer)
+  }, [active, hasRunning, load])
   React.useEffect(() => {
     const timer = setTimeout(() => setQuery(previous => previous.keyword === search.trim() ? previous : { ...previous, keyword: search.trim(), offset: 0 }), 300)
     return () => clearTimeout(timer)
@@ -130,12 +153,18 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
       setQuery(initialQuery)
       currentQuery.current = initialQuery
       setSearch('')
-      notify?.(detail.status === 'running' ? t('维护已开始，结果会自动更新，可离开此页') : hasFailures(detail) ? t('维护已结束，有失败项，请查看明细') : t('维护已完成，结果已保存'), hasFailures(detail) ? 'err' : 'ok')
+      latestNotify.current?.(detail.status === 'running' ? t('维护已开始，结果会自动更新，可离开此页') : hasFailures(detail) ? t('维护已结束，有失败项，请查看明细') : t('维护已完成，结果已保存'), hasFailures(detail) ? 'err' : 'ok')
       await load(true)
       try { await onChanged?.() } catch { /* 执行结果已经保存，页面同步失败不重新执行维护。 */ }
     } catch (failure) {
       if (!mounted.current) return
-      setActionError(failure instanceof Error ? failure.message : String(failure))
+      const raw = failure instanceof Error ? failure.message : String(failure)
+      const message = maintenanceMessage(raw)
+      const busyNotice = raw === '任务正在执行中，请稍候'
+        || raw === '刚刚已执行，请稍后重试'
+        || raw.startsWith('请求处于冷却期')
+      if (latestNotify.current) latestNotify.current(message, busyNotice ? 'warn' : 'err')
+      else setActionError(message)
       await load(true)
     } finally { operation.current = false; if (mounted.current) setBusy('') }
   }
@@ -161,7 +190,7 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
     <div className='maintenance-heading'>
       <div>
         <h2>{t('自动维护')}</h2>
-        <p>{t('查看凭证与模型目录的每次维护结果，失败和跳过都有原因')}</p>
+        <p>{t('查看凭证、模型目录、软件与插件更新的每次维护结果，失败和跳过都有原因')}</p>
       </div>
       <div className='maintenance-heading-actions'>
         {pluginTaskRequest ? <PluginTasks request={pluginTaskRequest} t={t} active={active} /> : null}
@@ -170,7 +199,13 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
       </div>
     </div>
 
-    {error || actionError ? <Alert variant='destructive'>{actionError || error}</Alert> : null}
+    {error || actionError ? <Alert variant='destructive' className='flex items-center justify-between gap-3'>
+      <span className='min-w-0 flex-1 [overflow-wrap:anywhere]'>{actionError || error}</span>
+      <div className='flex shrink-0 items-center gap-1'>
+        {error && !overview ? <Button size='sm' variant='ghost' disabled={loading} onClick={() => void load()}>{t('重试')}</Button> : null}
+        <Button size='sm' variant='ghost' aria-label={t('关闭')} title={t('关闭')} onClick={() => { setError(''); setActionError('') }}>✕</Button>
+      </div>
+    </Alert> : null}
     {!overview && loading ? <Empty><Spinner />{t('正在读取维护记录…')}</Empty> : null}
 
     {overview ? <>

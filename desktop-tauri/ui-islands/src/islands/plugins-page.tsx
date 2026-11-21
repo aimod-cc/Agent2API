@@ -29,6 +29,8 @@ import { applicablePluginItems, missingPluginItems, packSelectionKey, pluginBatc
 import { usePluginBatch } from '../../../ui-shared/plugins-batch-runner'
 import { PluginBatchConfirm, PluginBatchProgress, PluginBatchToolbar } from '../../../ui-shared/plugins-batch-view'
 import { PluginMissingBanner, PluginMissingDialog } from '../../../ui-shared/plugins-missing'
+import { PluginCatalogStatus } from '../../../ui-shared/plugins-catalog-status'
+import { summarizeNetworkError } from '../../../ui-shared/updates'
 import '../styles/plugins-page.css'
 
 type SourceFilter = PluginSourceFilter
@@ -147,7 +149,7 @@ function PluginsPage(): React.ReactElement {
         api('GET', '/api/plugins/scripts/check').catch(() => undefined),
       ])
       await load()
-      if (result.error) toast(result.reason || t('检查更新失败'), 'err')
+      if (result.error) toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
     })
   }
 
@@ -155,7 +157,7 @@ function PluginsPage(): React.ReactElement {
     await run('refresh', async () => {
       const result = await api<ReleaseState>('GET', '/api/plugins/release')
       await load()
-      if (result.error) toast(result.reason || t('检查更新失败'), 'err')
+      if (result.error) toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
     })
   }
 
@@ -334,6 +336,8 @@ function PluginsPage(): React.ReactElement {
       {showNative && (installedRows.length > 0 || storeRows.length > 0) ? <section className='@container/plugin-gallery min-w-0 shrink-0' aria-label={t('Agent2API 社区')}>
         <PluginSectionHeading t={t} title={t('Agent2API 社区')} count={installedRows.length + storeRows.length}
           hint={t('独立插件，来自项目插件仓库')} actions={selecting ? <Button variant='link' size='xs' disabled={locked} onClick={() => selectGroup('pack')}>{t('全选本组')}</Button> : null} />
+        <PluginCatalogStatus catalog={catalog} refreshing={busy === 'refresh' || busy === 'check' || catalog?.checking === true}
+          disabled={locked} onRetry={refreshStore} t={t} />
         <div className={PLUGIN_GRID_CLASS}>
           {installedRows.map(pack => {
             const operation = operations.find(item => item.id === pack.id)
@@ -355,11 +359,13 @@ function PluginsPage(): React.ReactElement {
         <EmptyTitle>{!payload || (!hasAny && catalog?.checking) ? t('正在读取插件列表…')
           : hasAny ? t('没有符合筛选条件的插件') : t('暂无可安装的插件')}</EmptyTitle>
         <EmptyDescription>{hasAny ? t('换一组筛选条件，或把来源和状态都切回「全部」。')
-          : errorMessage(catalog?.reason) || (unpublishedCount > 0
+          : summarizeNetworkError(catalog?.reason, t).summary || (unpublishedCount > 0
             ? t('插件发布后会显示在这里。')
             : t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。'))}</EmptyDescription>
         {payload && hasAny && filtersActive ? <Button variant='outline' size='sm' className='mt-2'
-          onClick={clearFilters}>{t('清除筛选')}</Button> : null}
+          onClick={clearFilters}>{t('清除筛选')}</Button>
+          : payload && !hasAny && catalog?.error ? <Button variant='outline' size='sm' className='mt-2' disabled={locked || catalog.checking}
+            onClick={() => void refreshStore()}>{t('刷新重试')}</Button> : null}
       </Empty></Card> : null}
       {scripts ? <div className='shrink-0'><ScriptPluginsPanel state={scripts} t={t} disabled={locked} query={search}
         resolveIcon={resolveIcon} onOpenExternal={openExternal}

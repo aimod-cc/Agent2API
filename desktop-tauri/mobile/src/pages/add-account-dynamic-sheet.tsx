@@ -694,6 +694,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
   const proxyLabel = proxyMode === 'pool' ? t('已保存的代理') : proxyMode === 'custom' ? t('自定义代理') : t('无代理（直连）')
   const instructions = mergeLoginInstructions(methods.instructions, flow?.managed ? '' : method?.instructions,
     method?.browserMode === 'plugin' && !method.embeddedOnly ? pluginBrowserInstructions(provider) : '', progress)
+  const optionsLocked = method?.type === 'sms' ? busy || canceling || readingSystemProxy : locked
 
   return <div className='plugin-account-form' hidden={!active}>
     {methods.phase === 'loading' ? <p><Spinner /> {t('正在读取插件登录方式…')}</p> : null}
@@ -710,6 +711,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
           smsConfig={methods.phase === 'ready' && method.type === 'sms' && !method.reason ? method.sms : undefined}
           onStartSms={startSmsFlow} startingSms={busy || Boolean(flow)}
           smsStartDisabled={submitLocked || Boolean(method.reason)}
+          remark={accountName} onRemarkChange={setName}
           managed={managedScope} request={interactionRequest} /> : null}
       {method.reason ? <Alert variant='warning'><AlertDescription>{method.reason}</AlertDescription></Alert> : null}
       {instructions ? <p className='plugin-login-instructions'>{instructions}</p> : null}
@@ -719,16 +721,17 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       <PluginLoginFields method={method} values={inputs} prompts={formPrompts} prefix={prefix} disabled={locked}
         upload={upload} onUpload={setUpload} onReading={setReadingFile}
         onChange={(key, value) => setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [key]: value } }))} />
-      <PluginLoginOptions disabled={locked} summary={method.type === 'sms' ? proxyLabel : `${accountName || t('默认账号名')} · ${proxyLabel}`}>
-        {method.type !== 'sms' && (optionalName || !hasNamePrompt) ? <div className='plugin-login-field'>
+      <PluginLoginOptions disabled={optionsLocked} summary={`${accountName || t('默认账号名')} · ${proxyLabel}`}>
+        {optionalName || !hasNamePrompt ? <div className='plugin-login-field'>
           <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>
-          <Input id={`${prefix}-name`} value={accountName} maxLength={100} disabled={locked}
+          <Input id={`${prefix}-name`} value={accountName} maxLength={100} disabled={optionsLocked}
             onChange={event => {
               const value = event.currentTarget.value
               if (optionalName) setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [optionalName.key]: value } }))
               else setName(value)
             }} placeholder={t('可选，留空使用账号昵称')} />
         </div> : null}
+      <div className='flex flex-col gap-2' inert={locked}>
       <Label>{t('账号 / 登录出网代理')}</Label>
       <Select value={proxyMode} disabled={locked} onValueChange={value => setProxyMode(value || 'direct')}>
         <SelectTrigger className='w-full'><SelectValue>{proxyMode === 'pool' ? t('已保存的代理') : proxyMode === 'custom' ? t('自定义') : t('无代理（直连）')}</SelectValue></SelectTrigger>
@@ -762,6 +765,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
         <Label className='flex flex-col items-start gap-1'>{t('密码')}<Input value={password} type='password' disabled={locked} autoComplete='new-password' onChange={event => setPassword(event.currentTarget.value)} /></Label>
       </Card> : null}
       <p className='plugin-login-note'>{t('所选代理会保存到账号设置，后续请求继续使用。')}</p>
+      </div>
       </PluginLoginOptions>
       <PluginLoginActions host={footerHost} active={active}>
         <Button disabled={submitLocked || Boolean(method.reason)} hidden={method.type === 'sms'} onClick={() => void submit()}>

@@ -27,6 +27,12 @@ pub struct Item {
     pub retry_at: Option<i64>,
     #[serde(default)]
     pub forced: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -134,6 +140,9 @@ pub fn item(raw: &Value, index: usize, snapshots: &HashMap<String, AccountSnapsh
         fixed: raw.get("fixed").and_then(Value::as_bool),
         retry_at: millis(raw.get("retryAt")),
         forced: raw.get("forced").and_then(Value::as_bool).unwrap_or(false),
+        current_version: text(raw, "currentVersion"),
+        latest_version: text(raw, "latestVersion"),
+        change_label: text(raw, "changeLabel"),
     }
 }
 

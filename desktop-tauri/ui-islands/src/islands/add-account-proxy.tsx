@@ -54,11 +54,12 @@ export function accountProxySummary(draft: ProxyDraft): string {
   return t('请重新选择代理')
 }
 
-export function AccountProxySection({ draft, onChange, idPrefix, disabled = false, onSystemImportBusy, children, summary, label }: {
+export function AccountProxySection({ draft, onChange, idPrefix, disabled = false, proxyDisabled, onSystemImportBusy, children, summary, label }: {
   draft: ProxyDraft
   onChange: (draft: ProxyDraft) => void
   idPrefix: string
   disabled?: boolean
+  proxyDisabled?: boolean
   onSystemImportBusy?: (busy: boolean) => void
   children?: React.ReactNode
   summary?: React.ReactNode
@@ -66,7 +67,7 @@ export function AccountProxySection({ draft, onChange, idPrefix, disabled = fals
 }) {
   return <PluginLoginOptions disabled={disabled} label={label || t('账号代理')} summary={summary || accountProxySummary(draft)}>
     {children}
-    <div inert={disabled}>
+    <div inert={proxyDisabled ?? disabled}>
       <ProxyForm draft={draft} onChange={onChange} idPrefix={idPrefix}
         allowSystemImport onSystemImportBusy={onSystemImportBusy} />
     </div>

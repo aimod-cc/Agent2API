@@ -13,7 +13,7 @@ use crate::server::core::task_state::{self, Claim, ManualBackoff};
 use crate::server::core::update::UpdateError;
 use crate::server::logging;
 
-fn key() -> String {
+pub fn key() -> String {
     key_for(settings::current().channels())
 }
 
@@ -109,6 +109,8 @@ fn snapshot_from_state(channels: crate::server::config::UpdateChannels, state: &
     let stale = state.last_error.is_some() || invalidated;
     result["checked"] = json!(state.last_success_at > 0 && !invalidated);
     result["checkedAt"] = json!(state.last_success_at);
+    result["lastAttemptAt"] = json!(state.last_attempt_at);
+    result["retryAt"] = json!(state.retry_at);
     result["checking"] = json!(state.running());
     result["stale"] = json!(stale);
     result["current"] = json!(super::host_target());
@@ -125,18 +127,98 @@ fn snapshot_from_state(channels: crate::server::config::UpdateChannels, state: &
     result
 }
 
-pub async fn refresh(manual: bool) -> Result<Value, String> {
+pub(crate) fn claim_refresh(
+    manual: bool,
+) -> Result<(String, crate::server::config::UpdateChannels, Claim), String> {
     let settings = settings::current();
     let channels = settings.channels();
     let channel_key = key_for(channels);
     let interval = settings.interval * 60_000;
-    let guard = match task_state::claim(
-        &channel_key,
-        interval,
-        manual,
-        ManualBackoff::Bypass,
-        0,
-    )? {
+    let backoff = if manual { ManualBackoff::Bypass } else { ManualBackoff::Respect };
+    let claim = task_state::claim(&channel_key, interval, manual, backoff, 0)?;
+    Ok((channel_key, channels, claim))
+}
+
+fn channel_label(channels: crate::server::config::UpdateChannels) -> &'static str {
+    match (channels.stable, channels.beta) {
+        (true, true) => "正式版 + beta 版",
+        (false, true) => "仅 beta 版",
+        _ => "仅正式版",
+    }
+}
+
+pub(crate) async fn run_claimed_refresh(
+    channel_key: String,
+    channels: crate::server::config::UpdateChannels,
+    manual: bool,
+    guard: task_state::RunGuard,
+    recorder: Option<crate::server::core::maintenance::storage::Recorder>,
+) -> Result<Value, String> {
+    let started = std::time::Instant::now();
+    let outcome = fetch_catalog(channels).await;
+    let current_settings = settings::current();
+    let interval = current_settings.interval * 60_000;
+    if channel_key != key() {
+        drop(guard);
+        schedule_now();
+        if let Some(recorder) = recorder {
+            let raw = json!({
+                "provider": "pluginCatalog",
+                "providerLabel": "官网社区插件目录",
+                "accountName": channel_label(channels),
+                "status": "skipped",
+                "changeLabel": "已切换通道",
+                "message": "更新通道已切换，即将按新通道重新检查",
+                "durationMs": started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            });
+            let item = crate::server::core::maintenance::types::item(&raw, 0, &HashMap::new());
+            let _ = recorder.finish(vec![item], None);
+        }
+        return Ok(snapshot());
+    }
+    match outcome {
+        Ok(mut value) => {
+            value["channels"] = json!(channels);
+            let _ = task_state::store_value(&channel_key, value.clone());
+            let upgrades = if !manual && current_settings.auto_check && current_settings.auto_update {
+                apply_automatic_tracked(&value, channels).await
+            } else {
+                HashMap::new()
+            };
+            let partial = value["plugins"].as_array().is_some_and(|items| items.iter().any(|item| item["error"] == true));
+            let summary = if partial { "插件列表已刷新，部分版本查询失败" } else { "插件检查完成" };
+            guard.finish(true, summary.to_string(), Some(value.clone()), 0, interval)?;
+            if let Some(recorder) = recorder {
+                finish_maintenance_success(recorder, &value, channels, current_settings.auto_update, manual, &upgrades, started);
+            }
+            Ok(snapshot())
+        }
+        Err(error) => {
+            let value = task_state::read(&channel_key)?.value.filter(Value::is_object)
+                .unwrap_or_else(|| json!({ "plugins": [] }));
+            let state = guard.finish(false, error.message.clone(), Some(value), 0, interval)?;
+            if let Some(recorder) = recorder {
+                let raw = json!({
+                    "provider": "pluginCatalog",
+                    "providerLabel": "官网社区插件目录",
+                    "accountName": channel_label(channels),
+                    "status": "failed",
+                    "changeLabel": "检查失败",
+                    "message": error.message,
+                    "retryAt": state.retry_at,
+                    "durationMs": started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                });
+                let item = crate::server::core::maintenance::types::item(&raw, 0, &HashMap::new());
+                let _ = recorder.finish(vec![item], None);
+            }
+            Err(error.message)
+        }
+    }
+}
+
+pub async fn refresh(manual: bool) -> Result<Value, String> {
+    let (channel_key, channels, claim) = claim_refresh(manual)?;
+    let guard = match claim {
         Claim::Acquired(guard) => guard,
         Claim::Deferred(mut state) => {
             let started = logging::now_ms();
@@ -149,28 +231,13 @@ pub async fn refresh(manual: bool) -> Result<Value, String> {
             return Err(update::waiting_message(&state));
         }
     };
-    let outcome = fetch_catalog(channels).await;
-    let interval = settings::current().interval * 60_000;
-    if channel_key != key() {
-        drop(guard);
-        schedule_now();
-        return Ok(snapshot());
-    }
-    match outcome {
-        Ok(mut value) => {
-            value["channels"] = json!(channels);
-            let partial = value["plugins"].as_array().is_some_and(|items| items.iter().any(|item| item["error"] == true));
-            let summary = if partial { "插件列表已刷新，部分版本查询失败" } else { "插件检查完成" };
-            guard.finish(true, summary.to_string(), Some(value), 0, interval)?;
-            Ok(snapshot())
-        }
-        Err(error) => {
-            let value = task_state::read(&channel_key)?.value.filter(Value::is_object)
-                .unwrap_or_else(|| json!({ "plugins": [] }));
-            guard.finish(false, error.message.clone(), Some(value), 0, interval)?;
-            Err(error.message)
-        }
-    }
+    let recorder = crate::server::core::maintenance::storage::Recorder::start(
+        crate::server::core::maintenance::PLUGIN_CATALOG,
+        if manual { "manual" } else { "automatic" },
+        None,
+    )
+    .ok();
+    run_claimed_refresh(channel_key, channels, manual, guard, recorder).await
 }
 
 async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Result<Value, UpdateError> {
@@ -340,9 +407,10 @@ pub fn updates_with_packs(packs: &[super::PackSummary], catalog: &Value) -> Valu
         let available = supported && version.is_some_and(|version| {
             crate::server::core::update::compare_versions(version, &pack.version) == Some(1)
         }) && platform.is_some();
-        let error = entry.and_then(|item| item["error"].as_bool()).unwrap_or(false)
-            || catalog["stale"] == true;
-        let failure = if catalog["stale"] == true { catalog }
+        let catalog_error = catalog["stale"] == true;
+        let item_error = entry.and_then(|item| item["error"].as_bool()).unwrap_or(false);
+        let error = item_error || catalog_error;
+        let failure = if catalog_error { catalog }
             else { entry.filter(|item| item["error"] == true).unwrap_or(catalog) };
         json!({
             "id": pack.id, "current": pack.version, "latest": version,
@@ -350,7 +418,7 @@ pub fn updates_with_packs(packs: &[super::PackSummary], catalog: &Value) -> Valu
             "notes": entry.map(|entry| &entry["notes"]), "page": entry.map(|entry| &entry["page"]),
             "publishedAt": entry.map(|entry| &entry["publishedAt"]),
             "prerelease": entry.map(|entry| entry["prerelease"] == true).unwrap_or(false),
-            "asset": platform, "error": error,
+            "asset": platform, "error": error, "catalogError": catalog_error,
             "reason": if !supported { Some(super::support::LEGACY_REASON.to_string()) }
             else if error {
                 failure["reason"].as_str().map(str::to_string)
@@ -366,23 +434,131 @@ pub fn updates_with_packs(packs: &[super::PackSummary], catalog: &Value) -> Valu
         "checking": catalog["checking"], "error": catalog["error"], "reason": catalog["reason"] })
 }
 
-async fn apply_automatic() {
-    let settings = settings::current();
-    if !settings.auto_check || !settings.auto_update {
-        return;
-    }
-    let channels = settings.channels();
-    let catalog = snapshot();
-    if catalog["stale"] == true || catalog["checked"] != true {
-        return;
-    }
+fn finish_maintenance_success(
+    recorder: crate::server::core::maintenance::storage::Recorder,
+    catalog: &Value,
+    channels: crate::server::config::UpdateChannels,
+    auto_update: bool,
+    manual: bool,
+    upgrades: &HashMap<String, Result<String, String>>,
+    started: std::time::Instant,
+) {
+    let packs = super::list_packs();
+    let entries = catalog["plugins"].as_array();
+    let total_plugins = entries.map(Vec::len).unwrap_or(0);
+    let empty_snapshots = HashMap::new();
+    let items: Vec<_> = packs
+        .iter()
+        .enumerate()
+        .map(|(index, pack)| {
+            let entry = entries.and_then(|list| list.iter().find(|item| item["id"] == pack.id));
+            let platform = entry
+                .and_then(|item| item["platforms"].as_array())
+                .and_then(|list| list.iter().find(|item| item["target"] == super::wasm::manifest::TARGET));
+            let latest = entry.and_then(|item| item["version"].as_str());
+            let supported = pack.support_state == super::PackSupportState::Supported;
+            let available = supported
+                && latest.is_some_and(|version| {
+                    crate::server::core::update::compare_versions(version, &pack.version) == Some(1)
+                })
+                && platform.is_some();
+            let display = super::pack_view::display_name(&pack.name);
+            let (status, change_label, message, latest_version) = match upgrades.get(&pack.id) {
+                Some(Ok(version)) => (
+                    "refreshed",
+                    format!("已升至 v{version}"),
+                    format!("已自动更新到 v{version}"),
+                    Some(version.clone()),
+                ),
+                Some(Err(error)) => (
+                    "failed",
+                    "自动更新失败".to_string(),
+                    format!("自动更新失败：{error}"),
+                    latest.map(str::to_string),
+                ),
+                None if !supported => (
+                    "skipped",
+                    "已停止支持".to_string(),
+                    super::support::LEGACY_REASON.to_string(),
+                    latest.map(str::to_string),
+                ),
+                None if entry.is_some_and(|item| item["error"] == true) => (
+                    "failed",
+                    "信息异常".to_string(),
+                    entry.and_then(|item| item["reason"].as_str()).unwrap_or("插件更新检查失败").to_string(),
+                    latest.map(str::to_string),
+                ),
+                None if available => {
+                    let next = latest.unwrap_or("");
+                    let reason = if manual {
+                        "发现新版本，手动检查不自动升级"
+                    } else if !auto_update {
+                        "发现新版本，未开启自动更新"
+                    } else if !pack.enabled {
+                        "发现新版本，插件当前已停用"
+                    } else if !pack.signed {
+                        "发现新版本，未签名插件需手动更新"
+                    } else {
+                        "发现新版本，可前往插件页更新"
+                    };
+                    ("skipped", format!("可更新 v{next}"), reason.to_string(), Some(next.to_string()))
+                }
+                None if entry.is_none() => (
+                    "skipped",
+                    "未在目录中".to_string(),
+                    "插件不在官网目录中，暂无可用更新".to_string(),
+                    None,
+                ),
+                None => (
+                    "skipped",
+                    "已是最新".to_string(),
+                    "已经是最新版本".to_string(),
+                    latest.map(str::to_string),
+                ),
+            };
+            let raw = json!({
+                "provider": pack.id,
+                "providerLabel": display,
+                "accountName": format!("v{}", pack.version),
+                "status": status,
+                "message": message,
+                "currentVersion": format!("v{}", pack.version),
+                "latestVersion": latest_version.map(|v| format!("v{v}")),
+                "changeLabel": change_label,
+            });
+            crate::server::core::maintenance::types::item(&raw, index, &empty_snapshots)
+        })
+        .collect();
+    let partial = entries.is_some_and(|list| list.iter().any(|item| item["error"] == true));
+    let meta_raw = json!({
+        "provider": "pluginCatalog",
+        "providerLabel": "官网社区插件目录",
+        "accountName": channel_label(channels),
+        "status": "refreshed",
+        "count": total_plugins as u64,
+        "message": if partial {
+            format!("目录已刷新（{total_plugins} 个插件），部分条目存在异常")
+        } else {
+            format!("目录已刷新（共 {total_plugins} 个插件）")
+        },
+        "durationMs": started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+    });
+    let metadata = crate::server::core::maintenance::types::item(&meta_raw, 0, &empty_snapshots);
+    let _ = recorder.finish(items, Some(metadata));
+}
+
+async fn apply_automatic_tracked(
+    catalog: &Value,
+    channels: crate::server::config::UpdateChannels,
+) -> HashMap<String, Result<String, String>> {
+    let mut outcomes = HashMap::new();
     let Some(items) = catalog["plugins"].as_array() else {
-        return;
+        return outcomes;
     };
     for entry in items {
         let settings = settings::current();
         if !settings.auto_check || !settings.auto_update || settings.channels() != channels {
-            return;
+            return outcomes;
         }
         let Some(id) = entry["id"].as_str() else {
             continue;
@@ -418,14 +594,26 @@ async fn apply_automatic() {
         else {
             continue;
         };
-        let version = entry["version"].as_str().unwrap_or("");
-        if let Err(error) =
-            super::operations::start_cached(id, "update", &target, version, asset, true)
-        {
-            logging::verbose("[Plugin]", &format!("自动处理 {id}：{error}"));
-            continue;
+        let version = entry["version"].as_str().unwrap_or("").to_string();
+        match super::operations::start_cached_with_wait(id, "update", &target, &version, asset, true) {
+            Ok((_, handle)) => {
+                let outcome = match handle.await {
+                    Ok(Ok(value)) => match value["hostError"].as_str() {
+                        Some(host_err) if !host_err.is_empty() => Err(host_err.to_string()),
+                        _ => Ok(version),
+                    },
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(format!("自动更新任务中断：{error}")),
+                };
+                outcomes.insert(id.to_string(), outcome);
+            }
+            Err(error) => {
+                logging::verbose("[Plugin]", &format!("自动处理 {id}：{error}"));
+                outcomes.insert(id.to_string(), Err(error));
+            }
         }
     }
+    outcomes
 }
 
 pub fn spawn() {
@@ -439,9 +627,6 @@ pub fn spawn() {
                 if let Err(error) = refresh(false).await {
                     logging::verbose("[Plugin]", &format!("插件自动检查：{error}"));
                 }
-            }
-            if network_enabled {
-                apply_automatic().await;
             }
             tokio::select! {
                 _ = signal().notified() => {},

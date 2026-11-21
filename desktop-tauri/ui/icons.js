@@ -12,6 +12,10 @@
  * 图标按 24×24 画布绘制，通过 width/height 缩放到目标尺寸。
  */
 (() => {
+  const GLOBE = '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">'
+    + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>'
+    + '<ellipse cx="12" cy="12" rx="4.2" ry="9"/></g>';
+
   const ICONS = {
     // 概览：仪表盘
     overview: '<path d="M12 3a9 9 0 0 0-9 9 8.94 8.94 0 0 0 2.2 5.9c.3.34.73.53 1.18.53h11.24c.45 0 .88-.2 1.18-.53A8.94 8.94 0 0 0 21 12a9 9 0 0 0-9-9Zm0 2a7 7 0 0 1 7 7 6.95 6.95 0 0 1-1.6 4.5H6.6A6.95 6.95 0 0 1 5 12a7 7 0 0 1 7-7Zm0 1.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM11 12v4h2v-4h-2Z"/>',
@@ -29,9 +33,9 @@
     // 网络代理：地球（圆 + 赤道 + 经线椭圆）。「这个出口通往哪里」的既有意象。
     // 这一枚用描边而不是填充（同组的其余导航图标都是填充）：17px 下「圆里再挖三条线」
     // 会糊成一团，描边反而清楚；粗细取 1.8，与设置页那一组描边图标同一套约定。
-    proxies: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">'
-      + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>'
-      + '<ellipse cx="12" cy="12" rx="4.2" ry="9"/></g>',
+    proxies: GLOBE,
+    // 全局通用地球图标（路由页「全局默认」等全球/全局作用域入口复用同一造型）
+    globe: GLOBE,
     // Agent：插头（本机客户端接到网关）。用描边而不是填充，与 proxies 同一套
     // 约定（17px 下填充块会糊成一团，见上面 proxies 那条的说明）。
     // 形状：两脚 + 插头身 + 引线，是「接入」最通用的意象。

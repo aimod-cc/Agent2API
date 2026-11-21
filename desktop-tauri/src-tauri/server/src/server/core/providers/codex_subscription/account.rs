@@ -228,9 +228,14 @@ impl Tokens {
         format!("codex-{:x}", digest)
     }
 
-    pub(super) fn expiring(&self) -> bool {
+    pub(super) fn expiring_within(&self, min_lead_ms: i64) -> bool {
+        let margin = 300_000_i64.max(min_lead_ms.max(0));
         self.expires_at
-            .is_some_and(|expires| expires <= logging::now_ms().saturating_add(300_000))
+            .is_some_and(|expires| expires <= logging::now_ms().saturating_add(margin))
+    }
+
+    pub(super) fn expiring(&self) -> bool {
+        self.expiring_within(0)
     }
 
     pub(super) fn public(&self, name: Option<&str>, needs_relogin: bool) -> Value {

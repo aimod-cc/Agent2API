@@ -276,7 +276,7 @@ pub(super) async fn shutdown_packs(ids: &[String]) -> Result<(), String> {
     let results = join_all(hosts.iter().map(|host| host.finish_shutdown().boxed())).await;
     let mut failures = 0;
     for (host, report) in hosts.iter().zip(results) {
-        report_shutdown(&report);
+        report_shutdown(&report, single_pack_id(&targets, host));
         if report.local_exited && host.local_shutdown_complete() {
             for (id, target) in &targets {
                 if Arc::ptr_eq(host, target) {
@@ -304,24 +304,25 @@ pub async fn shutdown_all() -> Result<(), String> {
 /// 外层启动/退出协调传入同一绝对截止；不延长既有关闭窗口，也不超过55秒。
 pub async fn shutdown_all_until(requested: Instant) -> Result<(), String> {
     let requested = requested.min(Instant::now() + TIMEOUT);
-    let (deadline, mut hosts, existing) = {
+    let (deadline, targets, mut hosts, existing) = {
         let mut registry = table().lock().unwrap_or_else(|error| error.into_inner());
         CLOSED.store(true, Ordering::Release);
         let deadline = registry
             .global_deadline
             .map_or(requested, |old| old.min(requested));
         registry.global_deadline = Some(deadline);
-        (
-            deadline,
-            unique_hosts(
-                registry
-                    .hosts
-                    .values()
-                    .map(|pack| pack.host.clone())
-                    .chain(registry.retired.iter().cloned()),
-            ),
-            registry.managed_drain.clone(),
-        )
+        let targets: Vec<_> = registry
+            .hosts
+            .iter()
+            .map(|(id, pack)| (id.clone(), pack.host.clone()))
+            .collect();
+        let hosts = unique_hosts(
+            targets
+                .iter()
+                .map(|(_, host)| host.clone())
+                .chain(registry.retired.iter().cloned()),
+        );
+        (deadline, targets, hosts, registry.managed_drain.clone())
     };
     // 从typed scope登记补齐旧Host，必须在开始通知任何scope前先封闭所有目标Host。
     for old in managed::registered_hosts() {
@@ -366,7 +367,7 @@ pub async fn shutdown_all_until(requested: Instant) -> Result<(), String> {
     );
     let mut unfinished_hosts = 0;
     for (host, report) in hosts.iter().zip(reports) {
-        report_shutdown(&report);
+        report_shutdown(&report, single_pack_id(&targets, host));
         if report.local_exited && host.local_shutdown_complete() {
             let ids: Vec<_> = table()
                 .lock()
@@ -436,23 +437,54 @@ fn remove_closed(id: &str, host: &Arc<Host>) {
     drop(removed);
 }
 
-fn report_shutdown(report: &Report) {
-    let message = if report.local_exited {
-        "插件宿主本地已退出；停止接口受理情况单独记录，不能据此确认远端回收"
-    } else {
+fn single_pack_id<'a>(targets: &'a [(String, Arc<Host>)], host: &Arc<Host>) -> Option<&'a str> {
+    let mut ids = targets
+        .iter()
+        .filter(|(id, target)| {
+            Arc::ptr_eq(host, target) && id != super::script::HOST_ID && id != "legacy"
+        })
+        .map(|(id, _)| id.as_str());
+    let first = ids.next()?;
+    ids.next().is_none().then_some(first)
+}
+
+fn report_shutdown(report: &Report, plugin_id: Option<&str>) {
+    let routine = report.local_exited
+        && !report.deadline_reached
+        && report.ordinary_active == 0
+        && report.managed.unfinished == 0
+        && report.managed.remote_unknown == 0;
+    let message = if !report.local_exited {
         "插件宿主本地尚未确认退出，保留旧运行实例；远端状态未知"
+    } else if report.managed.remote_unknown > 0 {
+        "插件宿主本地已退出；停止接口受理情况单独记录，不能据此确认远端回收"
+    } else if report.managed.stop_acknowledged > 0 {
+        "插件宿主已正常停止；受控任务停止请求已确认受理"
+    } else {
+        "插件宿主已正常停止"
     };
+    let mut data = serde_json::json!({
+        "source": "plugin",
+        "action": "plugin.shutdown",
+        "routine": routine,
+        "localExited": report.local_exited,
+        "deadlineReached": report.deadline_reached,
+        "ordinaryActive": report.ordinary_active,
+        "unfinished": report.managed.unfinished,
+        "creating": report.managed.creating,
+        "owned": report.managed.owned,
+        "stopping": report.managed.stopping,
+        "stopAcknowledged": report.managed.stop_acknowledged,
+        "remoteUnknown": report.managed.remote_unknown,
+    });
+    if let Some(id) = plugin_id {
+        data["pluginId"] = serde_json::json!(id);
+    }
     crate::server::logging::log_event(
         if report.local_exited { "info" } else { "warn" },
         "plugin",
         message,
-        Some(
-            serde_json::json!({ "source": "plugin", "action": "plugin.shutdown",
-            "localExited": report.local_exited, "deadlineReached": report.deadline_reached,
-            "ordinaryActive": report.ordinary_active, "unfinished": report.managed.unfinished,
-            "creating": report.managed.creating, "owned": report.managed.owned, "stopping": report.managed.stopping,
-            "stopAcknowledged": report.managed.stop_acknowledged, "remoteUnknown": report.managed.remote_unknown }),
-        ),
+        Some(data),
     );
 }
 

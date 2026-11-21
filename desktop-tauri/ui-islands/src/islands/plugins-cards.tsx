@@ -1,5 +1,6 @@
 import { Badge, Button, Progress, Switch } from '@ui'
 import { errorMessage, formatSize, formatTime, pluginDescription, pluginName } from './plugins-shared'
+import { summarizeNetworkError } from '../../../ui-shared/updates'
 import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
 import { PluginGetButton, PluginSettingsButton, PluginStoreCard, type PluginCardSelection } from '../../../ui-shared/plugins-store'
@@ -56,7 +57,7 @@ export function PluginUpdateDetails({ pack, update, operation, disabled, onUpdat
         </Button> : null}
       </div>
     </div>
-    {update?.reason && (update.error || required) ? <div className='text-[12px] text-destructive'>{errorMessage(update.reason)}</div> : null}
+    {update?.reason && (update.error || required) ? <div className='text-[12px] text-destructive'>{summarizeNetworkError(update.reason, t).summary}</div> : null}
     {!pack.entryPresent ? <p className='m-0 text-[12px] text-destructive'>{t('插件包的可执行文件不在磁盘上（可能被手工删除或移动），请重新安装。')}</p> : null}
     {operation?.error ? <p className='m-0 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
     {operation?.hostError ? <p className='m-0 text-[12px] text-warning'>{operation.hostError}</p> : null}
@@ -89,7 +90,7 @@ export function StorePluginCard({ item, target, operation, disabled, selection, 
     footerAction={item.version ? <Button variant='link' size='xs' onClick={onNotes}>{t('更新日志')}</Button> : null}
     feedback={<>
       {item.version && !platform ? <p className='m-0 text-[12px] text-warning'>{t('当前平台暂无包')}</p> : null}
-      {item.error ? <div className='text-[12px] text-destructive'>{errorMessage(item.reason)}</div> : null}
+      {item.error ? <div className='text-[12px] text-destructive'>{summarizeNetworkError(item.reason, t).summary}</div> : null}
       {operation?.error ? <p className='m-0 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
       {operation?.active ? <OperationProgress operation={operation} /> : null}
     </>} />
@@ -136,7 +137,7 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
         {pack.compatibilityError || t('插件与当前网关的公共接口不兼容，暂未加载。')}
         <Button variant='link' size='xs' onClick={onSettings}>{t('查看详情')}</Button>
       </p> : null}
-      {update?.error && !pack.updateRequired ? <div className='text-[12px] text-destructive'>{errorMessage(update.reason)}</div> : null}
+      {update?.error && !update.catalogError && !pack.updateRequired ? <div className='text-[12px] text-destructive'>{summarizeNetworkError(update.reason, t).summary}</div> : null}
       {operation?.error ? <p className='m-0 break-words text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
       {pack.enabled && (startup ? (pluginFailed(startup) || startup.phase === 'blocked') && startup.error : packHost?.lastError)
         ? <p className='m-0 line-clamp-2 break-words text-[12px] text-destructive'>{startup?.error || packHost?.lastError}</p> : null}

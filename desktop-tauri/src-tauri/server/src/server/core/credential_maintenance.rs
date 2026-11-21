@@ -52,19 +52,26 @@ pub const STATUS_SKIPPED: &str = "skipped";
 /// 尝试刷新但失败（结果里带可读的 `message`）
 pub const STATUS_FAILED: &str = "failed";
 
-/// 周期维护的**默认**间隔说明：10 分钟。
+/// 周期维护的**默认**间隔说明：10 分钟（可在定时任务页配置 1–1440 分钟）。
 ///
-/// 为什么默认是 10 分钟（而不是更密）：三家的临期窗口是 2~5 分钟，10 分钟的间隔
-/// 意味着「进入窗口后最多等一轮就被刷」——对「账号页显示得对不对」这个目的
-/// 足够。反过来，绝大多数轮次是空操作（没有临期账号时直接早退），
-/// 间隔调密只是让空转变多，不会让凭证更早恢复；调疏则会让列表上的
-/// 「已过期」停留更久。
-///
-/// ── 间隔是可配的，本模块不再持有它 ────────────────────────────
-/// 调度由 `core::scheduled_tasks` 负责，间隔取自 config.json 的
-/// `scheduledTasks.credentialMaintenance.interval`；默认值（10 分钟）定义在
-/// `config::DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES`，在定时任务页可改。
-/// 本模块因此不再导出间隔常量 —— 留一个没人读的数字只会让人以为改它有效。
+/// ── 临期窗口如何与维护间隔配合 ─────────────────────────────────
+/// 多家提供商自带的临期窗口只有 3～5 分钟，若只按自带窗口判定，在默认 10 分钟
+/// 间隔下经常上一轮因还剩 6～10 分钟跳过、下一轮到点时已跌到 0 分（已过期）。
+/// 因此本模块每次检查都会把「当前维护间隔 + 5 分钟缓冲」作为最小提前量传给
+/// 适配器/插件，与各家原有提前量取较大值；正常对话的按需续期仍走各家原窗口，
+/// 不受维护间隔影响。
+pub const MAINTENANCE_BUFFER_MS: i64 = 5 * 60_000;
+
+/// 本轮凭证维护要求的最小临期提前量（毫秒）：维护间隔 + 5 分钟缓冲。
+pub fn maintenance_lead_ms() -> i64 {
+    let minutes = crate::server::config::scheduled_settings()
+        .credential_maintenance
+        .interval
+        .max(1);
+    minutes
+        .saturating_mul(60_000)
+        .saturating_add(MAINTENANCE_BUFFER_MS)
+}
 
 /// 遍历全部账号，把「该家支持刷新 且 凭证已过期 / 临期」的那些刷新一遍。
 ///
@@ -145,6 +152,7 @@ pub async fn refresh_accounts(store: &AccountStore, selected: Option<&[String]>,
     // 结果按**账号下标**占位（`slots[i]`），刷新那一遍写回各自的位置 ——
     // 于是返回顺序与账号列表一致，而不是「先一堆跳过、后面才是刷新的」。
     // 界面上逐条对照时，顺序一致省掉一次按 id 重排。
+    let min_lead_ms = maintenance_lead_ms();
     let mut slots: Vec<Option<Value>> = vec![None; accounts.len()];
     // 待刷新项带着适配器本身（而不是 `ProviderKind`）：插件家没有枚举值，
     // 而这里已经查过一次表，再查一次是白费
@@ -189,7 +197,10 @@ pub async fn refresh_accounts(store: &AccountStore, selected: Option<&[String]>,
             continue;
         }
         if !forced.iter().any(|account_id| account_id == &id) {
-            match adapter.check_credentials_expiring(store, &id).await {
+            match adapter
+                .check_credentials_expiring_within(store, &id, min_lead_ms)
+                .await
+            {
                 Ok(true) => {}
                 Ok(false) => {
                     slots[index] = Some(skipped(&id, provider, "凭证未过期或临期"));

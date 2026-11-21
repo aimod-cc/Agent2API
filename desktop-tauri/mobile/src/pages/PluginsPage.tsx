@@ -26,6 +26,8 @@ import { applicablePluginItems, missingPluginItems, packSelectionKey, pluginBatc
 import { PluginBatchConfirm, PluginBatchProgress, PluginBatchToolbar } from '../../../ui-shared/plugins-batch-view'
 import { usePluginBatch } from '../../../ui-shared/plugins-batch-runner'
 import { PluginMissingBanner, PluginMissingDialog } from '../../../ui-shared/plugins-missing'
+import { PluginCatalogStatus } from '../../../ui-shared/plugins-catalog-status'
+import { summarizeNetworkError } from '../../../ui-shared/updates'
 import { usePluginRequest } from './plugins/usePluginRequest'
 import { clampMaxPackBytes, PluginFileInstallDialog, PluginFileInstallProgress, usePluginFileInstall } from '../../../ui-shared/plugins-file-install'
 
@@ -120,11 +122,11 @@ export function PluginsPage() {
 
   const refresh = async () => {
     const result = await run('catalog', refreshPluginCatalog)
-    if (result?.error) store.toast(pluginErrorMessage(result.reason) || t('读取插件仓库失败'), 'err')
+    if (result?.error) store.toast(summarizeNetworkError(result.reason, t).summary || t('读取插件仓库失败'), 'err')
   }
   const check = async () => {
     const result = await run('check', checkPluginUpdates)
-    if (result?.error) store.toast(pluginErrorMessage(result.reason) || t('检查更新失败'), 'err')
+    if (result?.error) store.toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
   }
   const install = async (id: string, update: boolean) => {
     if (!payload?.target) return
@@ -206,6 +208,10 @@ export function PluginsPage() {
       {fileInstall.backgroundVisible ? <div className='m-section'><PluginFileInstallProgress model={fileInstall} t={t} /></div> : null}
       {error ? <ErrorNote text={error} /> : null}
       {payload?.host?.lastError ? <ErrorNote text={payload.host.lastError} /> : null}
+      {payload?.catalog?.error ? <div className='m-section'>
+        <PluginCatalogStatus catalog={payload.catalog} refreshing={busy === 'catalog' || busy === 'check' || payload.catalog.checking === true}
+          disabled={pageLocked} onRetry={refresh} t={t} />
+      </div> : null}
       {uninstalled.length || unpublishedCount > 0 ? <div className='m-section'><SectionHead title={t('可安装插件')} />
         {uninstalled.map(item => <StorePluginCard key={item.id} item={item} target={payload?.target || ''}
           operation={payload?.operations?.find(operation => operation.id === item.id)} busy={pageLocked} onInstall={() => void install(item.id, false)}
@@ -231,7 +237,6 @@ export function PluginsPage() {
           selection={selecting ? selectionFor : undefined} onSelectGroup={() => { const keys = batchItems.filter(item => item.kind === 'script' && !item.active).map(item => item.key); changeSelection(keys, !keys.every(key => selected.has(key))) }}
           request={(path, body) => apiCall(path, { method: 'POST', body })} refresh={load} />
       </Card></div> : null}
-      {payload?.catalog?.reason ? <div className='m-section'><p className='m-ck-note'>{pluginErrorMessage(payload.catalog.reason)}</p></div> : null}
       {payload ? <div className='m-section'><Collapsible className='m-card m-card-pad'>
         <CollapsibleTrigger className='m-ck-title'>{t('诊断信息')}</CollapsibleTrigger><CollapsibleContent keepMounted>
         <p className='m-ck-note'>{t('插件目录')}：<span className='m-mono'>{payload.pluginsDir}</span></p>

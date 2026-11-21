@@ -8,7 +8,7 @@ function applies(window, model) {
   if (window.model && !id.includes(window.model.toLowerCase())) return false
   if (window.models?.length && !window.models.some(matches)) return false
   if (window.notModels?.some(matches)) return false
-  return window.aside !== true && window.unlimited !== true
+  return window.aside !== true && window.routingAside !== true && window.unlimited !== true
 }
 
 export async function checkAllowance(model) {

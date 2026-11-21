@@ -86,7 +86,7 @@ async fn start(context: &Context) -> Result<Value,proto::WireError> {
         if let Ok(mut items) = flows().lock() { items.remove(&flow_id); }
     });
     Ok(json!({"flow":id,"url":url,"poll_interval_ms":1500,"external_browser":false,"allowed_hosts":["huaweicloud.com"],
-        "instructions":"请完成华为云官方登录，完成后自动添加账号。远程面板可粘贴浏览器最后的本机回调地址；临时兜底登录无法自动续期。"}))
+        "instructions":"在华为云官方页面完成登录即可添加账号；远程访问面板时，按提示粘贴登录后的回调地址即可。"}))
 }
 
 async fn poll(flow: &Arc<Flow>) -> Result<Value,proto::WireError> {

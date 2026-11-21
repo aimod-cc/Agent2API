@@ -60,6 +60,9 @@ pub async fn import_account_file(
     if payload.get("format").and_then(Value::as_str) != Some(ACCOUNT_FILE_FORMAT) {
         return None;
     }
+    if crate::server::core::plugin_host::script::known_provider(provider) {
+        return None;
+    }
     if payload.get("provider").and_then(Value::as_str) != Some(provider) {
         return Some(management_error(
             400,

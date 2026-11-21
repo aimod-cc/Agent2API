@@ -58,7 +58,7 @@ import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
 import { GroupBalanceBadge, groupBalanceOf } from './accounts-usage-group'
 import { accountReloginText } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
-import { balanceWalletOf, creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { balanceWalletOf, creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageModelQuotasOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { LimiterStatus } from './accounts-limiter-status'
@@ -578,7 +578,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
   }
   if (Array.isArray(data.windows) && data.windows.length) {
     const windows = data.windows as Array<Record<string, unknown>>
-    const modelRows = Array.isArray(data.modelQuotas) ? data.modelQuotas as Array<Record<string, unknown>> : []
+    const modelRows = usageModelQuotasOf(data)
     const missing = usageWarningsOf(data)
     return {
       text: t('分窗口额度'),
@@ -587,7 +587,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
         ...usageSupplementReadingsOf(data, t, numberText),
         subscriptionText(data.subscription),
         ...windows.filter(row => row && typeof row === 'object').map(row => [usageWindowLabel(row.label, t), usageWindowView(row, t, numberText)].filter(Boolean).join(' ')),
-        ...modelRows.filter(row => row && typeof row === 'object').map(row => [typeof row.name === 'string' ? row.name : String(row.id || ''), usageWindowView(row, t, numberText)].filter(Boolean).join(' ')),
+        ...modelRows.map(item => [item.name || item.id, usageWindowView(item.row, t, numberText)].filter(Boolean).join(' ')),
         ...missing.map(line => t(line)),
       ].filter(Boolean))].join(' · '),
     }

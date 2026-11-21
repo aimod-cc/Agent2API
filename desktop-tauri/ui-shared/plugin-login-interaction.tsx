@@ -18,7 +18,7 @@ type Interaction = {
   qr?: { url: string; expiresAt: number } | null
 }
 
-export function PluginLoginInteraction({ flow, request, t, openExternal, openEmbedded, managed, smsConfig, onStartSms, startingSms, smsStartDisabled }: {
+export function PluginLoginInteraction({ flow, request, t, openExternal, openEmbedded, managed, smsConfig, onStartSms, startingSms, smsStartDisabled, remark, onRemarkChange }: {
   flow: string
   request: LoginRequest
   t: (key: string, vars?: Record<string, string | number>) => string
@@ -29,6 +29,8 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
   onStartSms?: () => unknown | Promise<unknown>
   startingSms?: boolean
   smsStartDisabled?: boolean
+  remark?: string
+  onRemarkChange?: (value: string) => void
 }) {
   const [interaction, setInteraction] = React.useState<Interaction | SmsInteraction | ManagedInteraction | null>(null)
   const [flowDone, setFlowDone] = React.useState(false)
@@ -194,7 +196,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
   </p>
   if (smsFallback) return <SmsLoginInteraction flow={flow} interaction={smsFallback}
     request={request} refresh={refresh} openExternal={openExternal} onStart={onStartSms} starting={startingSms}
-    startDisabled={smsStartDisabled}
+    startDisabled={smsStartDisabled} remark={remark} onRemarkChange={onRemarkChange}
     onBusy={value => {
       generation.current += 1; submitting.current = value
       if (value) { read.current?.abort(); read.current = null }

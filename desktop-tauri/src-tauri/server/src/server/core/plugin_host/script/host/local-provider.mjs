@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto"
-
-import { existsSync } from "node:fs"
+import { accessSync, constants, statSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -9,30 +8,90 @@ export function isLocalProvider(provider) {
   return Boolean(cli && typeof cli.name === "string" && cli.name.trim().length > 0)
 }
 
-function cliCandidates(cliName) {
-  const name = cliName.trim()
-  const list = []
-  const resolved = Bun.which(name)
-  if (resolved) list.push(resolved)
-  if (name.toLowerCase() === "agy") {
-    if (process.env.AGY_BIN) list.push(process.env.AGY_BIN)
-    if (process.platform === "win32") {
-      const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local")
-      const programFiles = process.env.ProgramFiles || "C:\\Program Files"
-      list.push(
-        path.join(localAppData, "agy", "bin", "agy.exe"),
-        path.join(programFiles, "agy", "agy.exe"),
-        path.join(os.homedir(), ".local", "bin", "agy.exe"),
-      )
-    } else {
-      list.push(
-        path.join(os.homedir(), ".local", "bin", "agy"),
-        "/opt/homebrew/bin/agy",
-        "/usr/local/bin/agy",
-      )
-    }
+function isAgyCli(provider, cliName) {
+  const id = String(provider?.originalID || provider?.id || "").trim().toLowerCase()
+  const pkg = String(provider?.packageName || "").trim().toLowerCase()
+  if (id === "agy-cli" || pkg === "@magpie-community/opencode-agy-cli-auth") return true
+  return /^(?:agy|antigravity(?:\s+cli)?)$/i.test(String(cliName || "").trim())
+}
+
+function isExecutableFile(filePath) {
+  if (typeof filePath !== "string" || !filePath) return false
+  try {
+    if (!statSync(filePath).isFile()) return false
+    if (process.platform !== "win32") accessSync(filePath, constants.X_OK)
+    return true
+  } catch {
+    return false
   }
-  return list.find(candidate => typeof candidate === "string" && candidate && existsSync(candidate)) || resolved || ""
+}
+
+function ownAgyCandidate(home) {
+  if (process.platform === "win32") {
+    const local = process.env.LOCALAPPDATA || path.win32.join(home, "AppData", "Local")
+    return path.win32.join(local, "magpie-agy-cli", "agy.exe")
+  }
+  const data = process.env.XDG_DATA_HOME && path.posix.isAbsolute(process.env.XDG_DATA_HOME)
+    ? process.env.XDG_DATA_HOME
+    : path.posix.join(home, ".local", "share")
+  return path.posix.join(data, "magpie-agy-cli", "agy")
+}
+
+function cliCandidates(cliName, isAgy) {
+  const name = cliName.trim()
+  if (!isAgy) {
+    const resolved = Bun.which(name)
+    return isExecutableFile(resolved) ? resolved : ""
+  }
+  const win = process.platform === "win32"
+  const paths = win ? path.win32 : path.posix
+  const home = os.homedir()
+  const names = win ? ["agy.exe", "agy.cmd", "agy.bat"] : ["agy"]
+  const list = []
+  for (const key of ["AGY_PATH", "AGY_BIN"]) {
+    if (process.env[key]) list.push(process.env[key])
+  }
+  const searchPath = process.env.PATH || (win ? process.env.Path : "") || ""
+  for (const dir of searchPath.split(win ? ";" : ":")) {
+    const clean = dir.replace(/^"|"$/g, "")
+    if (clean) list.push(...names.map(item => paths.join(clean, item)))
+  }
+  const resolved = Bun.which("agy")
+  if (resolved) list.push(resolved)
+  const dirs = win ? [
+    paths.join(process.env.LOCALAPPDATA || paths.join(home, "AppData", "Local"), "agy", "bin"),
+    paths.join(process.env.LOCALAPPDATA || paths.join(home, "AppData", "Local"), "Programs", "Antigravity", "bin"),
+    paths.join(home, ".local", "bin"),
+    paths.join(home, ".gemini", "bin"),
+    paths.join(process.env.ProgramFiles || "C:\\Program Files", "agy"),
+  ] : [
+    paths.join(home, ".local", "bin"),
+    paths.join(home, ".gemini", "bin"),
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+  ]
+  for (const dir of dirs) list.push(...names.map(item => paths.join(dir, item)))
+  list.push(ownAgyCandidate(home))
+  return list.find(isExecutableFile) || ""
+}
+
+function probeCommand(exe, args) {
+  if (process.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(exe)) {
+    return [exe, ...args]
+  }
+  const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe"
+  return [comspec, "/d", "/v:off", "/c", path.win32.normalize(exe), ...args]
+}
+
+function killProbe(proc) {
+  try { proc.kill() } catch {}
+  if (process.platform === "win32" && Number.isInteger(proc.pid) && proc.pid > 0) {
+    try {
+      Bun.spawn(["taskkill", "/T", "/F", "/PID", String(proc.pid)], {
+        stdout: "ignore", stderr: "ignore", stdin: "ignore", windowsHide: true,
+      })
+    } catch {}
+  }
 }
 
 function compareSemver(a, b) {
@@ -51,39 +110,61 @@ function parseSemver(text) {
 
 async function runCliProbe(exe, args, signal, timeoutMs = 5000) {
   signal?.throwIfAborted?.()
-  const proc = Bun.spawn([exe, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: "ignore",
-    windowsHide: true,
-  })
+  let proc
+  try {
+    proc = Bun.spawn(probeCommand(exe, args), {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+      windowsHide: true,
+    })
+  } catch (error) {
+    return { exitCode: -1, timedOut: false, stdout: "", stderr: String(error?.message || error) }
+  }
   let timedOut = false
+  let done = false
+  let graceTimer
+  let resolveGrace
+  const grace = new Promise(resolve => { resolveGrace = resolve })
+  const stopProbe = () => {
+    killProbe(proc)
+    // 子进程或孙进程仍占用管道时，避免读取 stdout/stderr 无限等待 EOF。
+    if (!graceTimer) graceTimer = setTimeout(() => { if (!done) resolveGrace() }, 250)
+    graceTimer.unref?.()
+  }
   const timer = setTimeout(() => {
     timedOut = true
-    try { proc.kill() } catch {}
+    stopProbe()
   }, timeoutMs)
-  const onAbort = () => { try { proc.kill() } catch {} }
+  const onAbort = () => stopProbe()
   signal?.addEventListener?.("abort", onAbort, { once: true })
   try {
-    const [exitCode, stdout, stderr] = await Promise.all([
+    const finished = Promise.all([
       proc.exited,
-      proc.stdout ? new Response(proc.stdout).text() : Promise.resolve(""),
-      proc.stderr ? new Response(proc.stderr).text() : Promise.resolve(""),
+      proc.stdout ? new Response(proc.stdout).text().catch(() => "") : Promise.resolve(""),
+      proc.stderr ? new Response(proc.stderr).text().catch(() => "") : Promise.resolve(""),
     ])
+    const result = await Promise.race([
+      finished.then(([exitCode, stdout, stderr]) => ({ exitCode, stdout, stderr })),
+      grace.then(() => ({ exitCode: null, stdout: "", stderr: "" })),
+    ])
+    done = true
     signal?.throwIfAborted?.()
     return {
-      exitCode,
+      exitCode: result.exitCode,
       timedOut,
-      stdout: stdout.trim(),
-      stderr: stderr.trim(),
+      stdout: String(result.stdout || "").trim(),
+      stderr: String(result.stderr || "").trim(),
     }
   } finally {
+    done = true
     clearTimeout(timer)
+    clearTimeout(graceTimer)
     signal?.removeEventListener?.("abort", onAbort)
   }
 }
 
-export async function ensureLocalCliReady(provider, _context, signal, untilCancelled) {
+export async function ensureLocalCliReady(provider, _context, signal, untilCancelled, methodIndex = 0) {
   const cli = provider?.hooks?.auth?.cli
   if (!cli || typeof cli.name !== "string" || !cli.name.trim()) return
   const cliName = cli.name.trim()
@@ -101,9 +182,11 @@ export async function ensureLocalCliReady(provider, _context, signal, untilCance
     }
   }
 
-  if (cliName.toLowerCase() !== "agy") return
-  const exe = cliCandidates(cliName)
+  // 插件自报的 cli.name 是 "Antigravity CLI" 而非 "agy"，不能只按名称字面匹配。
+  if (!isAgyCli(provider, cliName)) return
+  const exe = cliCandidates(cliName, true)
   if (!exe) return
+  const manualTip = typeof cli.manual === "string" && cli.manual.trim() ? `（升级命令：${cli.manual.trim()}）` : ""
   const versionProbe = await runCliProbe(exe, ["--version"], signal, 5000)
   const rawVersionOutput = [versionProbe.stdout, versionProbe.stderr].filter(Boolean).join("\n")
   if (versionProbe.timedOut) {
@@ -114,15 +197,19 @@ export async function ensureLocalCliReady(provider, _context, signal, untilCance
   }
   const parsed = parseSemver(rawVersionOutput)
   if (parsed && compareSemver(parsed.parts, [1, 4, 12]) < 0) {
-    throw new Error(`本地 agy 客户端版本过老（当前版本：${parsed.raw}，路径：${exe}，插件要求 >= 1.4.12，登录需 >= 1.5；--version 原始输出：${rawVersionOutput}）。请先升级本地 agy 后重试。`)
+    throw new Error(`本地 agy 客户端版本过老（当前版本：${parsed.raw}，路径：${exe}，插件要求 >= 1.4.12，登录需 >= 1.5.0；--version 原始输出：${rawVersionOutput}）。请先升级本地 agy 后重试${manualTip}。`)
   }
   if (!parsed || compareSemver(parsed.parts, [1, 5, 0]) < 0) {
     const helpProbe = await runCliProbe(exe, ["acp", "--help"], signal, 5000)
     const rawHelpOutput = [helpProbe.stdout, helpProbe.stderr].filter(Boolean).join("\n")
-    const supportsAcp = helpProbe.exitCode === 0 && (/\bacp\b/i.test(rawHelpOutput) || /--login\b/i.test(rawHelpOutput))
-    if (!supportsAcp) {
+    const hasLoginFlag = /--login\b/i.test(rawHelpOutput)
+    const hasAcpSubcommand = /\b(?:acp|--gemini[-_]dir|--include-default-customizations)\b/i.test(rawHelpOutput)
+    // 「添加另一个 Google 账号」(methodIndex 1) 必须调用 `agy acp --login`。
+    const supported = !helpProbe.timedOut && helpProbe.exitCode === 0
+      && (methodIndex === 1 ? hasLoginFlag : (hasLoginFlag || hasAcpSubcommand))
+    if (!supported) {
       const verText = parsed ? parsed.raw : (rawVersionOutput || "未知")
-      throw new Error(`本地 agy 客户端版本过老或不支持 acp 登录（当前版本：${verText}，路径：${exe}；原始输出：${rawHelpOutput || rawVersionOutput || "(无输出)"}）。请先升级本地 agy 后重试。`)
+      throw new Error(`本地 agy 客户端版本过老或不支持 acp 登录（当前版本：${verText}，路径：${exe}；原始输出：${rawHelpOutput || rawVersionOutput || "(无输出)"}）。请先升级本地 agy 后重试${manualTip}。`)
     }
   }
 }

@@ -143,3 +143,47 @@ export function updateErrorMessage(error: unknown, t: Translator): string {
   const message = error instanceof Error ? error.message : String(error ?? '')
   return message ? t(message) : ''
 }
+
+export function summarizeNetworkError(error: unknown, t: Translator): { summary: string; detail: string } {
+  const raw = (error instanceof Error ? error.message : String(error ?? '')).trim()
+  if (!raw) return { summary: '', detail: '' }
+  const lower = raw.toLowerCase()
+  const official = raw.includes('官网更新服务') || raw.includes('官网社区') || lower.includes('agent2api.dev')
+  const hasDetail = lower.includes('error sending request') || lower.includes('client error') || raw.includes('→') || raw.includes('->') || raw.length > 120
+  let summary = ''
+  if (lower.includes('tls handshake eof') || lower.includes('unexpected eof')) {
+    summary = official
+      ? t('连接官网服务时加密握手中断，可能是临时网络波动或代理异常')
+      : t('网络加密握手中断，可能是临时网络波动或代理异常')
+  } else if (lower.includes('certificate') || lower.includes('invalid peer') || lower.includes('ssl')) {
+    summary = official
+      ? t('连接官网服务时安全校验失败，请检查系统时间或代理配置')
+      : t('安全连接校验失败，请检查系统时间或代理配置')
+  } else if (lower.includes('dns') || lower.includes('failed to lookup') || lower.includes('no such host')) {
+    summary = official
+      ? t('无法解析官网域名，请检查网络或 DNS 设置')
+      : t('域名解析失败，请检查网络或 DNS 设置')
+  } else if (lower.includes('connection refused')) {
+    summary = official
+      ? t('官网服务连接被拒绝，请检查网络或代理端口是否正常')
+      : t('网络连接被拒绝，请检查网络或代理设置')
+  } else if (lower.includes('connection reset') || lower.includes('broken pipe')) {
+    summary = official
+      ? t('与官网服务的连接意外中断，请稍后重试')
+      : t('网络连接被重置，可能是临时波动或代理中断')
+  } else if (lower.includes('timed out') || raw.includes('超时')) {
+    summary = official
+      ? t('连接官网服务超时，请稍后重试或检查出网代理')
+      : t('网络请求超时，请稍后重试或检查代理设置')
+  } else if (lower.includes('429') || lower.includes('rate limit') || raw.includes('限流')) {
+    summary = t('请求过于频繁或触发限流，请稍后再试')
+  } else if (/\bhttp\s*5\d\d\b/i.test(raw) || /\b50[234]\b/.test(raw)) {
+    summary = official
+      ? t('官网服务暂时不可用，请稍后再试')
+      : t('上游服务暂时不可用，请稍后再试')
+  } else if (hasDetail && official) {
+    summary = t('无法连接官网服务，请检查网络或出网代理设置')
+  }
+  if (!summary) return { summary: t(raw), detail: '' }
+  return { summary, detail: raw }
+}

@@ -177,7 +177,6 @@ pub async fn start(store: AccountStore) -> Result<(), String> {
     let mut registry = super::storage::read()?;
     if !registry.packages.is_empty() {
         super::icons::spawn();
-        super::updates::spawn();
     }
     revoke_ownership_sources(&registry);
     plugin_host::startup::configure_scripts(&registry);

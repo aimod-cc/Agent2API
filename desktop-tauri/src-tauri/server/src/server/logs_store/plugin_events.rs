@@ -4,8 +4,23 @@ use serde_json::{json, Map, Value};
 
 use super::LogEntry;
 
+fn is_clean_shutdown(data: &Map<String, Value>) -> bool {
+    data.get("localExited").and_then(Value::as_bool) == Some(true)
+        && data.get("deadlineReached").and_then(Value::as_bool) != Some(true)
+        && data.get("ordinaryActive").and_then(Value::as_u64).unwrap_or(0) == 0
+        && data.get("unfinished").and_then(Value::as_u64).unwrap_or(0) == 0
+        && data.get("remoteUnknown").and_then(Value::as_u64).unwrap_or(0) == 0
+}
+
 pub(super) fn prepare(message: &str, data: &mut Map<String, Value>) {
-    if data.get("action").and_then(Value::as_str) == Some("plugin.startup") {
+    let action = data.get("action").and_then(Value::as_str);
+    if action == Some("plugin.startup") {
+        return;
+    }
+    if action == Some("plugin.shutdown") {
+        if !data.contains_key("routine") && is_clean_shutdown(data) {
+            data.insert("routine".into(), json!(true));
+        }
         return;
     }
     if let Some((id, loaded)) = message.strip_prefix("插件包「").and_then(|text| text.split_once("」v")) {

@@ -244,7 +244,7 @@ pub fn list(query: &Query) -> Result<Value, String> {
 pub fn latest() -> Result<Value, String> {
     database()?.with(|conn| -> Result<Value, String> {
         let mut latest = serde_json::Map::new();
-        for task_id in [super::CREDENTIAL, super::MODEL] {
+        for task_id in super::ALL_TASKS {
             let run = sql(conn.query_row(&format!("SELECT {COLUMNS} FROM maintenance_runs WHERE task_id=?1 ORDER BY started_at DESC, id DESC LIMIT 1"), [task_id], read_row).optional())?;
             if let Some(run) = run { latest.insert(task_id.to_string(), json!(run)); }
         }

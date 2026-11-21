@@ -18,6 +18,7 @@ pub(crate) mod desktop_launch;
 mod inline_images;
 mod doubao_upload;
 mod doubao_turn;
+mod deepseek_pow;
 mod monkeycode_cap;
 pub(crate) mod codearts_login;
 mod client_device;

@@ -9,81 +9,141 @@ use super::{failed, request::Context, CLOSE, MAX_ARGUMENT_BYTES, MAX_CALLS, OPEN
 
 pub enum Output {
     Text(String),
-    Calls(Vec<Value>),
+    Calls { text: String, calls: Vec<Value> },
 }
 
 pub fn parse(text: &str, context: &Context) -> Result<Output, GatewayError> {
     if !context.active() {
         return Ok(Output::Text(text.to_string()));
     }
-    let Some(inner) = text
-        .trim()
-        .strip_prefix(OPEN)
-        .and_then(|text| text.strip_suffix(CLOSE))
-    else {
-        if text.trim_start().starts_with(OPEN) {
-            return Err(failed("网页模型的工具调用未完整结束，未返回可执行调用"));
-        }
+    let Some((lead_text, blocks)) = extract_blocks(text)? else {
         return no_call(text, context);
     };
-    let payload =
-        parse_json(inner).map_err(|_| failed("网页模型的工具调用不是完整有效的 JSON，未执行"))?;
-    let object = payload
-        .as_object()
-        .ok_or_else(|| failed("网页工具调用必须是对象"))?;
-    if object.len() != 2
-        || object.get("nonce").and_then(Value::as_str) != Some(context.nonce.as_str())
-    {
-        return no_call(text, context);
+    let mut normalized = Vec::new();
+    for inner in blocks {
+        let payload =
+            parse_json(inner).map_err(|_| failed("网页模型的工具调用不是完整有效的 JSON，未执行"))?;
+        let object = payload
+            .as_object()
+            .ok_or_else(|| failed("网页工具调用必须是对象"))?;
+        if object.len() != 2
+            || object.get("nonce").and_then(Value::as_str) != Some(context.nonce.as_str())
+        {
+            return Err(failed("网页模型的工具调用校验码无效或结构不完整，未执行"));
+        }
+        let calls = object
+            .get("calls")
+            .and_then(Value::as_array)
+            .filter(|calls| !calls.is_empty() && calls.len() <= MAX_CALLS)
+            .ok_or_else(|| failed("网页工具调用列表为空或数量过多"))?;
+        for call in calls {
+            if normalized.len() >= MAX_CALLS {
+                return Err(failed("网页工具调用列表为空或数量过多"));
+            }
+            let fields = call
+                .as_object()
+                .filter(|fields| fields.len() == 2)
+                .ok_or_else(|| failed("网页工具调用包含无效字段"))?;
+            let name = fields
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| failed("网页工具调用缺少名称"))?;
+            let arguments = fields
+                .get("arguments")
+                .filter(|arguments| arguments.is_object())
+                .ok_or_else(|| failed("网页工具参数必须是对象"))?;
+            if context
+                .quoted
+                .iter()
+                .any(|(quoted_name, quoted_arguments)| {
+                    quoted_name == name && quoted_arguments == arguments
+                })
+            {
+                // 随机值只能关联本次请求，不能证明模型没有复制输入中的调用示例。
+                return Err(failed("网页模型重复了对话中的工具示例，未作为新调用执行"));
+            }
+            let validator = context
+                .tools
+                .get(name)
+                .ok_or_else(|| failed("网页模型调用了本次未允许的工具，未执行"))?;
+            let encoded = arguments.to_string();
+            if encoded.len() > MAX_ARGUMENT_BYTES || !validator.is_valid(arguments) {
+                return Err(failed(format!(
+                    "网页模型给工具 {name} 的参数不符合声明或超过大小上限，未执行"
+                )));
+            }
+            let index = normalized.len();
+            normalized.push(json!({
+                "index": index,
+                "id": format!("call_{}_{index}", context.nonce),
+                "type": "function",
+                "function": { "name": name, "arguments": encoded }
+            }));
+        }
     }
-    let calls = object
-        .get("calls")
-        .and_then(Value::as_array)
-        .filter(|calls| !calls.is_empty() && calls.len() <= MAX_CALLS)
-        .ok_or_else(|| failed("网页工具调用列表为空或数量过多"))?;
-    if !context.parallel && calls.len() != 1 {
+    if !context.parallel && normalized.len() != 1 {
         return Err(failed("网页模型未遵守禁止并行调用的设置，未执行"));
     }
-    let mut normalized = Vec::new();
-    for (index, call) in calls.iter().enumerate() {
-        let fields = call
-            .as_object()
-            .filter(|fields| fields.len() == 2)
-            .ok_or_else(|| failed("网页工具调用包含无效字段"))?;
-        let name = fields
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| failed("网页工具调用缺少名称"))?;
-        let arguments = fields
-            .get("arguments")
-            .filter(|arguments| arguments.is_object())
-            .ok_or_else(|| failed("网页工具参数必须是对象"))?;
-        if context
-            .quoted
-            .iter()
-            .any(|(quoted_name, quoted_arguments)| {
-                quoted_name == name && quoted_arguments == arguments
-            })
-        {
-            // 随机值只能关联本次请求，不能证明模型没有复制输入中的调用示例。
-            return no_call(text, context);
+    Ok(Output::Calls {
+        text: lead_text,
+        calls: normalized,
+    })
+}
+
+fn extract_blocks(text: &str) -> Result<Option<(String, Vec<&str>)>, GatewayError> {
+    let mut cursor = 0usize;
+    let mut first_before: Option<&str> = None;
+    let mut blocks = Vec::new();
+    while let Some(rel_open) = text[cursor..].find(OPEN) {
+        let open_start = cursor + rel_open;
+        if text[cursor..open_start].contains(CLOSE) {
+            return Err(failed("网页模型的工具调用标记不完整，未返回可执行调用"));
         }
-        let validator = context
-            .tools
-            .get(name)
-            .ok_or_else(|| failed("网页模型调用了本次未允许的工具，未执行"))?;
-        let encoded = arguments.to_string();
-        if encoded.len() > MAX_ARGUMENT_BYTES || !validator.is_valid(arguments) {
-            return Err(failed(format!(
-                "网页模型给工具 {name} 的参数不符合声明或超过大小上限，未执行"
-            )));
+        if first_before.is_none() {
+            first_before = Some(&text[..open_start]);
         }
-        normalized.push(
-            json!({ "index": index, "id": format!("call_{}_{index}", context.nonce),
-            "type": "function", "function": { "name": name, "arguments": encoded } }),
-        );
+        let inner_start = open_start + OPEN.len();
+        let Some(rel_close) = text[inner_start..].find(CLOSE) else {
+            return Err(failed("网页模型的工具调用未完整结束，未返回可执行调用"));
+        };
+        let inner_end = inner_start + rel_close;
+        let inner = &text[inner_start..inner_end];
+        if inner.contains(OPEN) {
+            return Err(failed("网页模型的工具调用标记格式无效，未执行"));
+        }
+        blocks.push(inner);
+        cursor = inner_end + CLOSE.len();
     }
-    Ok(Output::Calls(normalized))
+    if text[cursor..].contains(CLOSE) {
+        return Err(failed("网页模型的工具调用标记不完整，未返回可执行调用"));
+    }
+    if blocks.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((
+        strip_leading_prose(first_before.unwrap_or("")),
+        blocks,
+    )))
+}
+
+fn strip_leading_prose(before: &str) -> String {
+    let trimmed = before.trim();
+    let line_start = trimmed.rfind('\n').map_or(0, |index| index + 1);
+    let last_line = trimmed[line_start..].trim();
+    let is_fence = last_line.strip_prefix("```").is_some_and(|info| {
+        info.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+'))
+    });
+    if is_fence {
+        let prior_fences = trimmed[..line_start]
+            .lines()
+            .filter(|line| line.trim_start().starts_with("```"))
+            .count();
+        if prior_fences % 2 == 0 {
+            return trimmed[..line_start].trim_end().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn no_call(text: &str, context: &Context) -> Result<Output, GatewayError> {

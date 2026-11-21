@@ -72,9 +72,12 @@ export type ReleaseState = {
   plugins: StorePlugin[]
   reason: string | null
   error: boolean
+  stale?: boolean
   checked?: boolean
   checking?: boolean
   checkedAt?: number
+  lastAttemptAt?: number
+  retryAt?: number
 }
 
 export type PluginUpdate = {
@@ -95,6 +98,7 @@ export type PluginUpdate = {
   asset: ReleasePlatform | null
   reason: string | null
   error: boolean
+  catalogError?: boolean
 }
 
 export type PluginOperation = {

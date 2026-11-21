@@ -96,6 +96,8 @@ fn configure(id: &str, body: &Bytes) -> Response {
         Err(error) => return bad_request(error.message),
     };
     let mut patch = IntervalTaskPatch::default();
+    let mut check_mode: Option<String> = None;
+    let mut auto_update: Option<bool> = None;
     if let Some(object) = payload.as_object() {
         if let Some(value) = object.get("enabled") {
             // 与 auto_checkin 的 configure 同一口径：`enabled !== undefined` 时
@@ -116,8 +118,17 @@ fn configure(id: &str, body: &Bytes) -> Response {
                 None => return bad_request(format!("「{id}」的间隔必须是整数")),
             }
         }
+        if let Some(value) = object.get("checkMode") {
+            match value.as_str() {
+                Some(mode) if matches!(mode, "follow" | "custom") => check_mode = Some(mode.to_string()),
+                _ => return bad_request("checkMode 必须是 follow 或 custom".to_string()),
+            }
+        }
+        if let Some(value) = object.get("autoUpdate") {
+            auto_update = Some(value == &Value::Bool(true));
+        }
     }
-    match scheduled_tasks::configure(id, patch) {
+    match scheduled_tasks::configure_extended(id, patch, check_mode.as_deref(), auto_update) {
         Ok(task) => ok_json(task),
         Err(message) => bad_request(message),
     }
