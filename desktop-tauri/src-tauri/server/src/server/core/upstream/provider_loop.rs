@@ -1868,7 +1868,54 @@ async fn attempt_queue(
             }
         }
     }
-    Err(GatewayError::with_status(500, "上游转发重试次数超限"))
+    // ── 「换号轮转用完」：给下游一个**可重试**的答案，而不是一条 500 ──────
+    // 改造前这里恒返回 `500 上游转发重试次数超限`：客户端把它当服务器错误，
+    // 既不知道能不能重试，也看不到最后一次真实原因（排队里 43 个账号试到
+    // 预算用尽，日志只剩这一句）。见 [`exhausted_error`]。
+    Err(exhausted_error(last_error))
+}
+
+/// 换号 / 排队轮转走到尽头时的收尾错误。
+///
+/// 判据只有一条：**这条最终错误是否「等一会儿再试可能就好」**。
+///
+/// * 是（402 余额、408、425、429 限流/无套餐、5xx、以及并发排队超时的
+///   `account_busy`）→ 收成 **503 + `Retry-After`**，正文带上最后一次的上游
+///   原文。理由：换号 / 排队已经试遍整个池子，这一轮确实没人能答；对下游来说
+///   这属于「网关暂时没有承载者」，重发一次就有机会落到已经恢复的账号上。
+///   保持上游的 429 反而更糟 —— 同一个模型名在下一分钟可能就由另一家答上来，
+///   而 429 让客户端以为「是它自己的额度问题」。
+/// * 否（400 参数 / 401 凭据 / 403 权限 / 404 模型不存在这类）→ **原样返回**。
+///   换个账号重发必然还是同一个结论，改写成 503 只会让客户端把一个永久错误
+///   当成抖动无限重试。
+fn exhausted_error(last: Option<GatewayError>) -> GatewayError {
+    let Some(error) = last else {
+        return GatewayError::with_status(
+            503, "上游转发重试次数超限：这一轮没有任何候选账号应答，请稍后重试",
+        )
+        .with_code("route_exhausted")
+        .with_retry_after_seconds(1);
+    };
+    let retryable = matches!(error.status_code, 402 | 408 | 425 | 429 | 500 | 502 | 503 | 504)
+        || matches!(error.code.as_deref(), Some("account_busy" | "route_empty" | "route_exhausted"));
+    if !retryable {
+        return error;
+    }
+    crate::server::logging::log_with_level(
+        "[Upstream]",
+        &format!(
+            "⚠️ 候选池本轮全部失败（最后一次 HTTP {} {}），按可重试的 503 route_exhausted 收尾",
+            error.status_code, error.message,
+        ),
+        "warn",
+    );
+    GatewayError::with_status(503, format!(
+        "本轮候选账号都没答上来（最后一次：HTTP {} {}）；已进入冷却或排队的账号会自动恢复，请稍后重试",
+        error.status_code, error.message,
+    ))
+    .with_code("route_exhausted")
+    .with_reason("route_exhausted")
+    .with_retry_after_seconds(error.retry_after_secs.unwrap_or(1))
 }
 
 /// 门控后的 Chat 响应形态：`Live` = 未消费的 `Response`（原样直通）；

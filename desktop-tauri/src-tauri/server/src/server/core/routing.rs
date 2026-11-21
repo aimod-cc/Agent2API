@@ -471,6 +471,11 @@ pub struct PlanEntry {
     pub provider: String,
     /// 状态码：`usable` / `tried` / `disabled` / `cooldown` / `concurrency` /
     /// `limiter` / `no-credentials`
+    ///
+    /// `concurrency` 会出现在**两份清单里**：仍然算「不可用」的只有真正的死状态
+    /// （禁用 / 冷却 / 余额不足 / 无凭证 / 本轮已试），而「并发已满」只是「现在
+    /// 没空」—— 它被收在 `ordered` 的**队尾**排队等槽位（见 `plan_route` 里那段
+    /// 说明），所以同一个状态码在 `ordered` 里出现时表示「排队中」。
     pub state: &'static str,
     /// 一句「为什么排这 / 为什么跳过」（队列面板与请求详情直接展示）
     pub reason: String,
@@ -478,7 +483,7 @@ pub struct PlanEntry {
     pub reset_at: i64,
 }
 
-/// 一份选路计划：可用候选（排好序）+ 被跳过的候选（各带原因）。
+/// 一份选路计划：可用候选（排好序，末尾接着「忙、排队等槽位」的那几个）+ 被跳过的候选（各带原因）。
 pub struct RoutePlan {
     pub ordered: Vec<PlanEntry>,
     pub blocked: Vec<PlanEntry>,
@@ -632,6 +637,8 @@ pub fn plan_route(
 ) -> RoutePlan {
     let mut ordered: Vec<Value> = Vec::new();
     let mut blocked: Vec<PlanEntry> = Vec::new();
+    // 「忙」单独一队：并发满不等于不可用（见收集循环里那处说明）。
+    let mut queued: Vec<Value> = Vec::new();
     for account in accounts {
         let Some(id) = account_id(account) else { continue };
         let id = id.to_string();
@@ -674,13 +681,21 @@ pub fn plan_route(
             continue;
         }
         if at_concurrency_limit(account, &id, counts) {
-            blocked.push(entry(
-                "concurrency",
-                format!(
-                    "并发已满（{}/上限），等一个在途回落再参与",
-                    counts.get(&id).copied().unwrap_or(0)
-                ),
-            ));
+            // ── 忙 ≠ 不可用（2026-11-21 修正）───────────────────────────
+            // 改造前这里与「禁用 / 冷却 / 余额不足」同一条路：直接进 `blocked`。
+            // 后果是「该家三个账号同时有在途请求」时整家从候选里消失，请求于是
+            // 落到唯一「看起来空闲」的另一家 —— 而那一家的失败往往是确定性的
+            // （没套餐 / 没余额 / 没权限），客户端最后拿到的就是一条 429。实测
+            // 一次 `pro` 组请求：43 个账号里 55 个候选被拦，队里只剩 1 个没套餐
+            // 的账号，撞 429 后连「顺延到下一家」都做不了（`pick_next_account`
+            // 走的是同一份 `plan_route`，忙账号在里面也已经被剔掉）。
+            //
+            // 正确定性顺序是「能立刻发 > 忙，等几秒就可用 > 永远不行（禁用 /
+            // 冷却 / 没余额）」。所以忙账号**不进 `blocked`**，收进 `queued`，
+            // 排到所有立刻能发的账号之后；发送前的并发预占失败时由
+            // `account_admission::select` 原地等槽位（有 `queue_wait_seconds`
+            // 上限，超时给可重试的 503），而不是把它们当死人跳过。
+            queued.push(account.clone());
             continue;
         }
         if super::plugin_host::wasm::catalog::route_allowed(account, &keys.for_account(account)) == Some(false) {
@@ -830,8 +845,38 @@ pub fn plan_route(
         })
         .collect();
 
+    // ── 排队候选接在可用候选之后 ────────────────────────────────────
+    // 顺序即优先级：立刻能发的先发，都不行（或发失败要顺延）时再轮到「忙」的那几个，
+    // 由并发预占处等槽位。它们排在「禁用 / 冷却 / 余额不足」之前 —— 后三类叫
+    // 「永远不行」，忙只是「现在没空」，两者不该被同等丢弃。
+    //
+    // 不再按策略轮转：忙账号的先后只由优先级决定。轮转的目的是均摊负载，而这几个
+    // 账号此刻本来就被占满，轮到谁都得先等槽位。
+    queued.sort_by(compare_by_priority);
+    let queued_entries: Vec<PlanEntry> = queued
+        .into_iter()
+        .map(|account| {
+            let id = account_id(&account).unwrap_or("").to_string();
+            let busy = counts.get(&id).copied().unwrap_or(0);
+            PlanEntry {
+                name: account_name(&account, &id),
+                provider: provider_of(&account).to_string(),
+                account,
+                id,
+                // 状态沿用 `concurrency`（界面已把它翻成「并发已满」并标成 warning），
+                // 它们的**位置**和原因句已经在说「排队等槽位」这件事，再新增一个状态
+                // 只会让面板、请求详情、状态文案三处各补一遍词条。
+                state: "concurrency",
+                reason: format!(
+                    "并发已满（{busy} 个在途已达上限），排队等一个槽位空出来 —— 前面的候选都发不出去时它接着上"
+                ),
+                reset_at: 0,
+            }
+        })
+        .collect();
+
     RoutePlan {
-        ordered: ordered_entries,
+        ordered: ordered_entries.into_iter().chain(queued_entries).collect(),
         blocked,
         sticky_hit,
     }
@@ -931,6 +976,39 @@ mod tests {
             provider_sizes(&accounts),
             vec![("A".to_string(), 2), ("B".to_string(), 1)]
         );
+    }
+
+    /// 忙 ≠ 不可用：并发已满的账号排在可用账号之后，而不是进 `blocked`。
+    ///
+    /// 证据（2026-11-21）：`pro` 组一条请求 56 个候选里 55 个被跳过，队里只剩一个
+    /// 没套餐的账号，撞 429 之后连「顺延到下一家」都做不了 —— 因为顺延走的
+    /// `pick_next_account` 用的是同一份 `plan_route`，忙账号在里面也已经被剔掉。
+    /// 那几个账号其实只是**都有在途请求**（上限 1、在途 1），等几秒就空出来了。
+    #[test]
+    fn a_busy_account_queues_behind_usable_ones_instead_of_being_dropped() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let keys = CooldownKeys::new("test-model");
+        let busy = json!({ "id": "a1", "provider": "A", "priority": 100, "maxConcurrent": 1 });
+        let accounts = vec![busy, account("b1", "B", 120)];
+        // a1 有一个在途请求、上限 1 ⇒ 忙；b1 没设上限 ⇒ 立刻能发
+        let counts: HashMap<String, usize> = HashMap::from([("a1".to_string(), 1usize)]);
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: None,
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(order, vec!["b1", "a1"], "立刻能发的在前，忙的接在后面排队");
+        assert_eq!(plan.ordered[1].state, "concurrency");
+        assert!(plan.ordered[1].reason.contains("排队等一个槽位"), "{}", plan.ordered[1].reason);
+        assert!(plan.blocked.is_empty(), "忙账号不该再被算成「被跳过」");
     }
 
     #[test]

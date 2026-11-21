@@ -314,7 +314,19 @@ fn select_target_account_sync(
     decision["scope"] = Value::String(request_routing.scope.clone());
     decision["configSnapshot"] = request_routing.json();
     if let Some(blocked) = decision.get_mut("blocked").and_then(Value::as_array_mut) {
-        blocked.extend(request_routing.group_projection.blocked.iter().take(12usize.saturating_sub(blocked.len())).cloned());
+        // 路由组投影里被挡下的成员同样全量带上（理由见 `decision_json`）：
+        // 「成员不可用原因」是「为什么要换家」的头号证据，截断后只剩前几条。
+        blocked.extend(request_routing.group_projection.blocked.iter().take(DECISION_LIST_CAP).cloned());
+    }
+    // 路由组投影（成员级：网关 Key 不允许 / 提供商不可用 / 生图模型 / 模型不在目录 /
+    // 该家没有可用账号）的拦截也并进同一条聚合 —— 排障时「为什么换家」与「为什么
+    // 换号」是同一个问题的两面，分在两处看就又得靠人脑拼。
+    if let Some(map) = decision.get_mut("blockedByReason").and_then(Value::as_object_mut) {
+        for entry in &request_routing.group_projection.blocked {
+            let Some(state) = entry.get("state").and_then(Value::as_str) else { continue };
+            let count = map.get(state).and_then(Value::as_u64).unwrap_or(0) + 1;
+            map.insert(state.to_string(), Value::from(count));
+        }
     }
     decision["blockedTotal"] = (plan.blocked.len() + request_routing.group_projection.blocked.len()).into();
     if !conv_key.is_empty() {
@@ -769,8 +781,15 @@ pub(super) fn allows_route_skip(service: &UpstreamService, account_id: &str) -> 
 /// `keys` 见 [`select_target_account`]：冷却按各家真名判定。
 /// 排序走与第一级选路**同一个** `routing::plan_route`（同一策略、同一份运行期
 /// 状态快照，只是不做粘性查找、不前进轮转游标）—— 429 降级 / 失败顺延接的
-/// 「下一个」与队列面板画的顺序因此一致；并发上限的过滤由此自动获得，
-/// 换号顺延不会把请求塞回一个已达上限的账号。
+/// 「下一个」与队列面板画的顺序因此一致。
+///
+/// ── 并发满的账号现在也在「下一个」里（2026-11-21 改）──────────────
+/// 改造前 `plan_route` 把「并发已满」与「禁用 / 冷却 / 余额不足」同等剔掉，于是
+/// 某家三个账号同时有在途请求时整家从顺延链里消失：一次 `pro` 组请求 56 个候选
+/// 跳过 55 个，唯一剩下的那个没套餐，撞 429 之后这里返回 `None` ⇒ 客户端直接
+/// 收到 429「没有下一家」。现在忙账号排在可用账号之后的**队尾**，会被当成
+/// 「下一个」返回，由发送前的并发预占（`account_admission`）原地等槽位。
+/// 「不会塞回已达上限的账号」这条仍然成立：预占失败就不发，只是**等**而不是**跳**。
 ///
 /// `pinned` 见 [`select_target_account`]：钉住账号时，候选池里只有那一个账号、
 /// 它已经在 `tried_ids` 里 —— 本函数因此必然返回 None，也就是「不顺延」。
@@ -876,8 +895,16 @@ fn last_resort(
 
 /// 选路决策快照（请求日志「路由回放」的数据源）。
 ///
-/// 有界：排序清单与被跳过者各最多带 12 条 —— 账号几十个时全部带上只会
-/// 让每条请求日志膨胀，而前 12 位已足以回答「为什么是它、为什么不是那个」。
+/// ── 为什么不再截断到 12 条（2026-11-21 修正）─────────────────────
+/// 改造前这里的排序清单与被跳过者各 `take(12)`，`blockedTotal` 只给一个数。
+/// 现实里的队列是这个量级：`pro` 组 14 个成员、43 个账号、56 个候选，
+/// 一次请求里 55 个被跳过 —— 12 条窗口永远只露出同一批「便宜账号」
+/// （workbuddy / catpaw / trae / raccoon），剩下 43 条为什么被跳过一个字都没留。
+/// 排障时看到的就是「池子莫名其妙全不可用」，却查不出哪几家被谁拦了。
+///
+/// 现在改成**全量落库**，并额外给一份 `blockedByReason`（状态 → 个数）聚合：
+/// 前者回答「具体谁被跳过」，后者一眼能看出「55 个里 40 个是冷却、10 个是忙」。
+/// 上限只留一个防爆的硬顶（[`DECISION_LIST_CAP`]），正常队列碰不到。
 fn decision_json(
     plan: &routing::RoutePlan,
     settings: &config::RoutingSettings,
@@ -896,17 +923,26 @@ fn decision_json(
             "reason": entry.reason,
         })
     };
+    let mut by_reason: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    for entry in &plan.blocked {
+        *by_reason.entry(entry.state).or_insert(0) += 1;
+    }
     json!({
         "strategy": settings.strategy.as_str(),
         "sticky": settings.sticky.as_str(),
         "stickyHit": plan.sticky_hit,
         "picked": plan.ordered.first().map(|entry| entry.id.clone()).unwrap_or_default(),
-        "ordered": plan.ordered.iter().take(12).map(entry_json).collect::<Vec<_>>(),
-        "blocked": plan.blocked.iter().take(12).map(entry_json).collect::<Vec<_>>(),
+        "ordered": plan.ordered.iter().take(DECISION_LIST_CAP).map(entry_json).collect::<Vec<_>>(),
+        "blocked": plan.blocked.iter().take(DECISION_LIST_CAP).map(entry_json).collect::<Vec<_>>(),
+        "blockedByReason": by_reason,
+        "queuedTotal": plan.ordered.iter().filter(|entry| entry.state == "concurrency").count(),
         "orderedTotal": plan.ordered.len(),
         "blockedTotal": plan.blocked.len(),
     })
 }
+
+/// 决策快照里每份清单的硬顶（防爆，正常队列几十个成员碰不到）。
+const DECISION_LIST_CAP: usize = 200;
 
 /// 限制器软跳过的候选剔除：**余额不足**（限制器余额 skip 规则命中：最近读数
 /// 低于阈值）或 **Token 限额**（Token skip 规则命中：当前重置窗口内消耗已达
