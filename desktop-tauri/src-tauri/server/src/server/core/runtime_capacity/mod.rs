@@ -80,15 +80,21 @@ fn effective(settings: &CapacitySettings, resources: monitor::Resources) -> Limi
     let memory_bytes = if settings.memory_mib == 0 { auto_memory.max(16 * MIB) }
         else { settings.memory_mib.saturating_mul(MIB).min((resources.total_bytes * 3 / 4) as usize).max(16 * MIB) };
     let process_ceiling = resources.total_bytes.saturating_mul(4) / 5;
-    let memory_ceiling = resources.container_bytes.unwrap_or(resources.process_bytes) >= process_ceiling;
-    // macOS 优先以内核压力等级为准（1 正常 / 2 警告 / 4 危险）：
-    // 2 级在正常桌面使用中就会触发，只有 4（critical）才代表真正紧张；
-    // 其它平台或取不到内核等级时沿用可用内存比例判据。进程/容器超总内存 4/5 的硬上限不变。
-    let host_memory_pressure = match resources.os_pressure_level {
-        Some(level) => level >= 4,
-        None => resources.available_bytes < resources.total_bytes / 10,
-    };
-    let memory_pressure = host_memory_pressure || memory_ceiling;
+    let used_bytes = resources.container_bytes.unwrap_or(resources.process_bytes);
+    // ── 内存压力只看网关自己，不看系统剩余 ──────────────────────────
+    // 以前的判据是「系统可用内存低于总内存 10%」或「本进程/容器占用 ≥ 总内存 4/5」。
+    // 前者等于让别的程序替网关做主：编译一次 Rust（rustc 常吃 3～4 GB）就把可用内存
+    // 压到 10% 以下，一个只占几百 MB 的网关立刻判定「内存紧张」，把所有对话请求
+    // 排满 10 秒后回 503「系统或容器可用内存紧张」。网关自己能要多少内存本来就由
+    // 分配预算（`MemoryBudget`）卡住，系统层面再加一道只会误伤 —— 用户的口径也是
+    // 「网关本身没什么内存，不该做这种限制」。
+    // 现在只有三种情况算紧张：
+    //   - 自身占用 ≥ 总内存 4/5（真正的 OOM 硬顶，任何时候都保留）；
+    //   - 自身占用 ≥ 运行内存预算（设置项，`memory_guard` 打开时生效）；
+    //   - macOS 内核压力到 4 级（critical），同受 `memory_guard` 控制。
+    let memory_pressure = used_bytes >= process_ceiling
+        || (settings.memory_guard
+            && (used_bytes >= memory_bytes || resources.os_pressure_level.is_some_and(|level| level >= 4)));
     let cpu_pressure = resources.cpu_percent >= 90.0;
     let automatic = settings.mode == CapacityMode::Auto;
     let conversations = if automatic {

@@ -33,6 +33,10 @@ pub struct CapacitySettings {
     pub queue_requests: usize,
     pub queue_memory_mib: usize,
     pub queue_wait_seconds: u64,
+    /// 内存紧张保护：开启时按本进程（容器）自己的占用与运行内存预算判断，
+    /// 关掉后只剩总内存 80% 那道硬顶。以前还会看「系统可用内存 < 10%」，
+    /// 于是机器上任何一个吃内存的程序（编译器、浏览器、其它容器）都能让网关拒单。
+    pub memory_guard: bool,
     pub provider_limits: BTreeMap<String, usize>,
 }
 
@@ -42,7 +46,8 @@ impl Default for CapacitySettings {
             mode: CapacityMode::Auto, max_conversations: 1024, max_interactive: 64,
             max_background: 32, background_per_provider: 8, max_images: 16,
             max_connections: 4096, memory_mib: 0, queue_requests: 2048,
-            queue_memory_mib: 256, queue_wait_seconds: 10, provider_limits: BTreeMap::new(),
+            queue_memory_mib: 256, queue_wait_seconds: 10, memory_guard: true,
+            provider_limits: BTreeMap::new(),
         }
     }
 }

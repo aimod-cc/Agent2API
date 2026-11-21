@@ -961,6 +961,8 @@
   "运行内存预算（MiB）": "",
   "运行容量": "",
   "运行容量已保存": "",
+  "内存紧张保护": "",
+  "只看本程序自己的占用：超过运行内存预算才暂停接收新任务；关闭后仅保留「本机占用达 4/5」的硬顶。编译、浏览器等其它程序占多少内存不影响网关。": "",
   "运行日志": "",
   "运行时不内置于安装包，首次安装脚本插件时自动下载并校验。": "The runtime is not bundled with the installer. It is downloaded and verified when you first install a script plugin.",
   "运行正常 · {url}": "Running normally · {url}",

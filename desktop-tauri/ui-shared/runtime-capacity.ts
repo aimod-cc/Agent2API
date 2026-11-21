@@ -10,6 +10,7 @@ export type CapacitySettings = {
   queueRequests: number
   queueMemoryMib: number
   queueWaitSeconds: number
+  memoryGuard: boolean
   providerLimits: Record<string, number>
 }
 

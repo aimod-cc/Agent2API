@@ -1,10 +1,10 @@
 import * as React from 'react'
-import { Button, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { Button, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch } from '@ui'
 import type { CapacityApi, CapacitySettings, CapacitySnapshot } from './runtime-capacity'
 import type { PluginTranslate } from './plugins-store'
 
 const MIB = 1024 * 1024
-const fields = (t: PluginTranslate): Array<{ key: keyof Omit<CapacitySettings, 'mode' | 'providerLimits'>; label: string; min: number; max: number }> => [
+const fields = (t: PluginTranslate): Array<{ key: keyof Omit<CapacitySettings, 'mode' | 'memoryGuard' | 'providerLimits'>; label: string; min: number; max: number }> => [
   { key: 'maxConversations', label: t('对话并发上限'), min: 1, max: 4096 },
   { key: 'maxInteractive', label: t('登录与续期并发'), min: 4, max: 256 },
   { key: 'maxBackground', label: t('后台任务并发'), min: 1, max: 256 },
@@ -89,11 +89,19 @@ export function RuntimeCapacityPanel({ api, t, identity = '', onSaved }: {
   const effective = snapshot?.effective
   const usage = snapshot?.usage
   return <div className='space-y-4'>
-    <p className='text-[12px] leading-5 text-subtle'>{t('自动管理按可用内存调节容量；手动设置仍保留内存保护和上游账号限制。')}</p>
+    <p className='text-[12px] leading-5 text-subtle'>{t('自动管理按运行内存预算调节容量；手动设置仍保留内存保护和上游账号限制。')}</p>
     <Select value={draft?.mode || 'auto'} disabled={!draft || busy} onValueChange={value => patch('mode', value)}>
       <SelectTrigger className='w-full' aria-label={t('运行容量')}><SelectValue>{modes.find(mode => mode.value === (draft?.mode || 'auto'))?.label}</SelectValue></SelectTrigger>
       <SelectContent>{modes.map(mode => <SelectItem key={mode.value} value={mode.value}>{mode.label}</SelectItem>)}</SelectContent>
     </Select>
+    <div className='space-y-1.5'>
+      <div className='flex items-center justify-between gap-3 text-[12px]'>
+        <span>{t('内存紧张保护')}</span>
+        <Switch checked={draft?.memoryGuard ?? true} disabled={!draft || busy}
+          onCheckedChange={value => patch('memoryGuard', value)} aria-label={t('内存紧张保护')} />
+      </div>
+      <p className='text-[12px] leading-5 text-subtle'>{t('只看本程序自己的占用：超过运行内存预算才暂停接收新任务；关闭后仅保留「本机占用达 4/5」的硬顶。编译、浏览器等其它程序占多少内存不影响网关。')}</p>
+    </div>
     {effective && usage ? <div className='grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-hairline p-3 text-[12px] tabular-nums'>
       <span>{t('正在处理')}</span><span className='text-right'>{usage.requests} / {effective.conversations}</span>
       <span>{t('排队中')}</span><span className='text-right'>{usage.queued}</span>
