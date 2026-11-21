@@ -82,7 +82,7 @@ impl Step {
             { return Err(GatewayError::bad_request("请完成当前登录步骤的阿里云验证")); }
         } else if self.browser.as_ref().is_some_and(|browser| browser.manual_callback) {
             if !input.captcha.is_null() || fields.len() != 1 || !fields.contains_key("callbackUrl")
-                || fields["callbackUrl"].as_str().is_none_or(|raw| raw.is_empty() || raw.len() > 8192) {
+                || fields["callbackUrl"].as_str().is_none_or(|raw| raw.is_empty() || raw.len() > 32 * 1024) {
                 return Err(GatewayError::bad_request("当前步骤只接受本次授权的完整回调地址"));
             }
         } else { return Err(GatewayError::bad_request("当前登录步骤不接受输入")); }

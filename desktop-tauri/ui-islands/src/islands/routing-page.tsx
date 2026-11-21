@@ -64,6 +64,8 @@ export function RoutingPage() {
   const compactEditor = useSpecialEditor(special.compact, mode === 'config' && specialKey === 'compact')
   const visionEditor = useSpecialEditor(special.vision, mode === 'config' && specialKey === 'vision')
   const titleEditor = useSpecialEditor(special.title, mode === 'config' && specialKey === 'title')
+  const specialEditors = { compact: compactEditor, vision: visionEditor, title: titleEditor } as const
+  const activeSpecial = specialKey ? specialEditors[specialKey] : null
   const specialDirty = (compactEditor.dirty ? 1 : 0) + (visionEditor.dirty ? 1 : 0) + (titleEditor.dirty ? 1 : 0)
   const dirtyCount = editor.dirtyCount + groups.dirtyCount + specialDirty + Number(errorsDirty)
   const [modal, setModal] = React.useState<
@@ -81,7 +83,7 @@ export function RoutingPage() {
   const profile = editor.draft?.mode === 'inherit' ? workspace?.inheritedProfile : editor.draft?.profile
   const strategy = groups.draft?.group.strategy || profile?.strategy || workspace?.globalSettings?.routingStrategy || workspace?.settings.routingStrategy
   const sticky = groups.draft?.group.sticky || profile?.sticky || workspace?.globalSettings?.routingSticky || workspace?.settings.routingSticky
-  const scopeModel = groups.draft?.group.model || editor.scope
+  const scopeModel = errorsOpen || specialKey ? '' : groups.draft?.group.model || editor.scope
 
   React.useEffect(() => { void editor.load('') }, [editor.load])
   React.useEffect(() => { if (sortSnapshot) adoptAccountSorting(sortSnapshot) }, [sortSnapshot])
@@ -135,14 +137,28 @@ export function RoutingPage() {
   }, [mode, selected?.id, selected?.ts, selected && isTraceRunning(selected)])
 
   const openRequest = (row: ReplayRow) => { setSelected(row); setMode('replay') }
-  const openScope = (model: string) => {
-    if (busyRef.current || groups.busy) return
-    // 从特殊路由切回账号路由：左栏的选中态必须跟着走，否则会同时亮两项。
+  const clearNonAccountViews = () => {
+    // 切回账号路由 / 路由组前必须同时退出错误处理和特殊路由，否则左栏选中态与画布会被后者继续占住。
     setErrorsOpen(false)
     setSpecialKey(null)
+  }
+  const openScope = (model: string) => {
+    if (busyRef.current || groups.busy) return
+    clearNonAccountViews()
     const group = Object.values(groups.drafts).find(draft => draft.group.model.toLowerCase() === model.toLowerCase())
     groups.select(group?.group.id || '')
     if (!group) void editor.load(model)
+  }
+  const openGroup = (id: string) => {
+    if (busyRef.current || groups.busy) return
+    clearNonAccountViews()
+    groups.select(id)
+  }
+  const openSpecial = (key: SpecialKey) => {
+    if (busyRef.current || groups.busy) return
+    setErrorsOpen(false)
+    groups.select('')
+    setSpecialKey(key)
   }
   const openConfig = (model: string) => { setMode('config'); openScope(model) }
   const refreshReplay = async () => {
@@ -161,6 +177,15 @@ export function RoutingPage() {
       if (!errorsDirty || await confirmDialog(t('重新读取会丢弃未保存的错误处理修改。'), { title: t('重新读取配置'), confirmText: t('重新读取') })) setErrorsReload(value => value + 1)
       return
     }
+    if (specialKey) {
+      const current = specialEditors[specialKey]
+      if (current.loading || current.saving) return
+      if (!current.dirty || await confirmDialog(t('重新读取会丢弃当前范围的未保存草稿，其他范围的草稿保留。'), { title: t('重新读取配置'), confirmText: t('重新读取') })) {
+        setRefreshToken(value => value + 1)
+        await current.reload()
+      }
+      return
+    }
     if (groups.selected) { await groups.reload(); return }
     if (editor.draft && draftDirty(editor.draft)
       && !await confirmDialog(t('重新读取会丢弃当前范围的未保存草稿，其他范围的草稿保留。'), { title: t('重新读取配置'), confirmText: t('重新读取') })) return
@@ -177,17 +202,17 @@ export function RoutingPage() {
     ...(groups.data?.catalog || []).map(choice => choice.model), ...groupModels]
   // 特殊请求路由的编辑器已在上面创建，这里不再重复声明。
   const openErrors = React.useCallback((tab: 'rules' | 'protection' = 'rules') => {
-    setErrorsMounted(true); setErrorsOpen(true); setErrorsTab(tab); setSpecialKey(null); setMode('config')
-  }, [])
+    setErrorsMounted(true); setErrorsOpen(true); setErrorsTab(tab); setSpecialKey(null); groups.select(''); setMode('config')
+  }, [groups.select])
   React.useEffect(() => {
     const open = () => openErrors()
     window.addEventListener('wb:routing-errors-open', open)
     return () => window.removeEventListener('wb:routing-errors-open', open)
   }, [openErrors])
   const onErrorsSaved = React.useCallback(() => { refreshRouting() }, [refreshRouting])
-  const rail = <RoutingRail editor={pageEditor} groups={groups} workspace={workspace} onModel={openScope} onGroup={id => { if (!busyRef.current) { setErrorsOpen(false); groups.select(id) } }}
-    errors={errorsOpen} errorsDirty={errorsDirty} onErrors={() => openErrors()}
-    special={specialKey} onSpecial={key => { if (!busyRef.current) { setErrorsOpen(false); setSpecialKey(key) } }}
+  const rail = <RoutingRail editor={pageEditor} groups={groups} workspace={workspace} onModel={openScope} onGroup={openGroup}
+    errors={errorsOpen} errorsDirty={errorsDirty} onErrors={() => { if (!busyRef.current && !groups.busy) openErrors() }}
+    special={specialKey} onSpecial={openSpecial}
     onAdd={() => setModal({ kind: 'create' })} />
   const accountSettings = (id: string) => {
     if (busyRef.current) return
@@ -214,7 +239,7 @@ export function RoutingPage() {
         <Button variant='ghost' size='sm' onClick={() => setModal({ kind: 'sticky' })}><RouteIcon name='lock' />{t('会话粘滞')}</Button>
         {mode === 'replay'
           ? <Button variant='ghost' size='sm' disabled={replay.loading} onClick={() => void refreshReplay()}><RouteIcon name='refresh' />{t('刷新')}</Button>
-          : <Button variant='ghost' size='sm' disabled={editor.loading || pageEditor.busy || groups.loading || groups.busy} onClick={() => void reloadConfig()}><RouteIcon name='refresh' />{t('重新读取')}</Button>}
+          : <Button variant='ghost' size='sm' disabled={editor.loading || pageEditor.busy || groups.loading || groups.busy || Boolean(activeSpecial && (activeSpecial.loading || activeSpecial.saving))} onClick={() => void reloadConfig()}><RouteIcon name='refresh' />{t('重新读取')}</Button>}
       </div>
     </div>
 
@@ -264,8 +289,16 @@ export function RoutingPage() {
     {modal?.kind === 'create' && workspace && groups.data ? <RoutingCreateDialog workspace={workspace} choices={groups.data.catalog}
       accounts={replay.workspace?.accounts || workspace.accounts} lastUsed={modelLastUsed} reserved={reserved} groupModels={groupModels}
       disabled={pageEditor.busy || editor.loading || groups.busy || groups.loading} modelError={editor.error} onClose={() => setModal(null)}
-      onCreateModel={async model => { const created = await editor.create(model); if (created) groups.select(''); return created }}
-      onCreateGroup={groups.create} /> : null}
+      onCreateModel={async model => {
+        const created = await editor.create(model)
+        if (created) { clearNonAccountViews(); groups.select('') }
+        return created
+      }}
+      onCreateGroup={group => {
+        const created = groups.create(group)
+        if (created) clearNonAccountViews()
+        return created
+      }} /> : null}
     {modal?.kind === 'sticky' ? <RoutingStickyDialog model={mode === 'config' ? scopeModel : replay.model} onClose={close} /> : null}
     {modal?.kind === 'sort' ? <GroupSettingsDialog key={modal.id} provider={modal.id} onClose={close}
       accounts={workspace?.accounts} sorting={sorting}

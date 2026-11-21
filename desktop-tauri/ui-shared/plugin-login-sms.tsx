@@ -28,10 +28,26 @@ type Props = {
   refresh: () => Promise<void>
   onBusy: (busy: boolean) => void
   openExternal: (url: string) => void | Promise<void>
+  onStart?: () => unknown | Promise<unknown>
+  starting?: boolean
+  startDisabled?: boolean
   t: (key: string, vars?: Record<string, string | number>) => string
 }
 
-export function SmsLoginInteraction({ flow, interaction, request, refresh, onBusy, openExternal, t }: Props) {
+function describeSmsError(cause: unknown, t: Props['t'], depth = 0): string {
+  if (typeof cause === 'string' && cause.trim()) return t(cause.trim())
+  if (cause instanceof Error && cause.message.trim()) return t(cause.message.trim())
+  if (cause && typeof cause === 'object' && depth < 3) {
+    const record = cause as Record<string, unknown>
+    for (const key of ['message', 'error', 'msg', 'reason']) {
+      const text = describeSmsError(record[key], t, depth + 1)
+      if (text) return text
+    }
+  }
+  return depth === 0 ? t('短信登录失败，请重试') : ''
+}
+
+export function SmsLoginInteraction({ flow, interaction, request, refresh, onBusy, openExternal, onStart, starting, startDisabled, t }: Props) {
   const { sms } = interaction
   const { config } = sms
   const prefix = React.useId()
@@ -45,17 +61,28 @@ export function SmsLoginInteraction({ flow, interaction, request, refresh, onBus
   const [error, setError] = React.useState('')
   const [countdown, setCountdown] = React.useState(sms.retryAfterSeconds)
   const inFlight = React.useRef(false)
+  const pendingSend = React.useRef(false)
+  const hadServerPhone = React.useRef(Boolean(sms.phone))
   const generation = React.useRef(0)
-  const current = React.useRef({ request, refresh, onBusy })
-  current.current = { request, refresh, onBusy }
+  const current = React.useRef({ request, refresh, onBusy, onStart })
+  current.current = { request, refresh, onBusy, onStart }
 
   React.useEffect(() => {
-    generation.current += 1
+    if (!flow && !pendingSend.current) hadServerPhone.current = false
     return () => { generation.current += 1; current.current.onBusy(false) }
   }, [flow])
   React.useEffect(() => {
-    setPhone(sms.phone)
-    setCountry(sms.countryCode)
+    if (sms.phone) {
+      hadServerPhone.current = true
+      setPhone(sms.phone)
+      setCountry(sms.countryCode)
+    } else if (hadServerPhone.current) {
+      hadServerPhone.current = false
+      setPhone('')
+      setCountry(sms.countryCode)
+    } else if (!country && sms.countryCode) {
+      setCountry(sms.countryCode)
+    }
     setCode('')
     setCaptcha(null)
   }, [interaction.id, sms.phone, sms.countryCode])
@@ -66,6 +93,18 @@ export function SmsLoginInteraction({ flow, interaction, request, refresh, onBus
     const timer = window.setInterval(update, 250)
     return () => window.clearInterval(timer)
   }, [sms.retryAfterSeconds, interaction.id])
+  React.useEffect(() => {
+    if (!pendingSend.current) return
+    if (flow && interaction.id && !inFlight.current) {
+      pendingSend.current = false
+      void submit('send')
+      return
+    }
+    if (!flow && !starting) {
+      pendingSend.current = false
+      setBusy('')
+    }
+  }, [flow, interaction.id, starting])
 
   async function submit(action: 'send' | 'verify' | 'change_phone') {
     if (inFlight.current) return
@@ -74,6 +113,23 @@ export function SmsLoginInteraction({ flow, interaction, request, refresh, onBus
     }
     if (action === 'verify' && (!/^\d+$/.test(code) || code.length < config.codeMinLength || code.length > config.codeMaxLength)) {
       setError(t('请填写正确的验证码')); return
+    }
+    if (action === 'send' && (!flow || !interaction.id)) {
+      if (!current.current.onStart || pendingSend.current) return
+      pendingSend.current = true
+      setBusy('send'); setError('')
+      try {
+        const started = await current.current.onStart()
+        if (started !== true) {
+          pendingSend.current = false
+          setBusy('')
+        }
+      } catch (cause) {
+        pendingSend.current = false
+        setBusy('')
+        setError(describeSmsError(cause, t))
+      }
+      return
     }
     const token = generation.current
     const live = () => generation.current === token
@@ -88,7 +144,7 @@ export function SmsLoginInteraction({ flow, interaction, request, refresh, onBus
       if (live()) { setCode(''); setCaptcha(null); setCaptchaGeneration(value => value + 1) }
     } catch (cause) {
       if (live()) {
-        setError(cause instanceof Error ? t(cause.message) : t('短信登录失败，请重试'))
+        setError(describeSmsError(cause, t))
         if (action === 'send') { setCaptcha(null); setCaptchaGeneration(value => value + 1) }
       }
     } finally {
@@ -128,7 +184,7 @@ export function SmsLoginInteraction({ flow, interaction, request, refresh, onBus
           {t('打开人机验证')}</Button> : <p>{t('人机验证地址无效，请重新发起登录')}</p>}
     </AlertDescription></Alert> : null}
     <Button type='button' variant='outline' className='self-start'
-      disabled={Boolean(busy) || countdown > 0 || !phone || (sms.challenge?.type === 'geetest' && !captcha)}
+      disabled={Boolean(busy) || (!flow && Boolean(startDisabled)) || countdown > 0 || !phone || (sms.challenge?.type === 'geetest' && !captcha)}
       onClick={() => void submit('send')}>
       {busy === 'send' ? t('发送中…') : countdown > 0 ? t('{n} 秒后重发', { n: countdown }) : t('获取验证码')}
     </Button>

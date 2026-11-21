@@ -1,16 +1,6 @@
-//! 固定三家共用宿主私有出生版本；CodeArts独占凭据写入，两家只读来源无发送权限。
+//! 固定只读行来源共用的宿主私有出生版本；不含凭据写入或发送许可。
 //! 普通SQL维护版本；本进程恢复/同步/旧导入单向撤销来源。外部写入不在此合同内。
 
-// 封闭开发基础：不导出发送许可或首次纳管入口，也不改变现有 RowSource 接口。
-mod codearts_slot;
-pub(crate) use codearts_slot::{ReadyRead, PendingSlot, PendingBinding, SlotOutcome, SlotFailure, SlotSettlement};
-pub(crate) use codearts_slot::{PendingFinalCheck, PendingFinalState, PendingFinalCallback, PendingCommitFact, PendingFinalError};
-pub(crate) use codearts_slot::{PendingCompletion, PendingCompletionCheck, PendingCompletionState, PendingCompletionCallback};
-pub(in crate::server::core::account_store) use codearts_slot::{PendingFinalRead, PendingCompletionRead};
-mod codearts_enrollment_input;
-mod codearts_enrollment;
-pub(crate) use codearts_enrollment_input::EnrollmentInput;
-pub(crate) use codearts_enrollment::{EnrollmentOrigin, EnrollmentCommitOutcome, EnrollmentError as EnrollmentStorageError};
 pub(crate) mod doubao_state;
 
 use std::{any::Any, panic::{catch_unwind, AssertUnwindSafe}};
@@ -22,7 +12,7 @@ use super::{sql, AccountStore};
 use crate::server::core::crypto::{self, SecretScope};
 use crate::server::db::{CredentialSource, CredentialSourceError, TaskTransaction, TaskTransactionError};
 
-pub(crate) use sql::credential_version::{CommitReceipt, Conflict, Error, StorageFailure};
+pub(crate) use sql::credential_version::{Conflict, Error, StorageFailure};
 
 /// 只存在于加密账号行的顶层；插件secret或公开字段中的同名项不是版本凭据。
 pub(super) const PRIVATE_FIELD: &str = "_hostCredentialVersion";
@@ -219,27 +209,6 @@ impl RowSource {
     }
 }
 
-/// 字段只能由真实事务返回；不实现Clone/Debug/serde，不按路径或JSON恢复。
-/// 持有原AccountStore的克隆，提交入口不接受另一份store来替换它。
-#[must_use]
-pub(crate) struct ReadStamp {
-    store: AccountStore,
-    inner: sql::credential_version::Stamp,
-    source: CredentialSource,
-}
-
-/// 仅是经过有界字段校验的候选改动，不代表身份、执行批准或上游成功。
-/// 接口只允许固定CodeArts凭据字段和必要公开标量，不接受任意整条账号记录。
-pub(crate) struct CredentialChange {
-    inner: sql::credential_version::Change,
-}
-
-impl CredentialChange {
-    pub(crate) fn new(credentials: &Value, public: &Value) -> Result<Self, Error> {
-        sql::credential_version::Change::new(credentials, public).map(|inner| Self { inner })
-    }
-}
-
 impl AccountStore {
     /// 只读来源的唯一构造：原账号锁/Db连接锁内读取或建立版本，提交确认后才交付。
     /// 不创建账号，不返回bool批准；任务/签到消费者仍未接入。
@@ -272,75 +241,6 @@ impl AccountStore {
             inner,
             source,
         })
-    }
-
-    /// 显式建立尚未加入本合同的旧账号版本，或读取已有有效版本；不创建账号。
-    /// 恢复出的有效旧版本若与当前kv不一致，仅在这次真实读取事务内重建目标行。
-    /// 缺版本不是第0代：只有事务已写入并COMMIT后才返回ReadStamp。
-    /// key仅取已选缓存，避免持账号/Db锁进入配置、文件或密钥加载路径。
-    pub(crate) fn prepare_codearts_credential_version(
-        &self,
-        provider: &str,
-        id: &str,
-    ) -> Result<ReadStamp, Error> {
-        sql::credential_version::check_target(provider, id)?;
-        let key = cached_key()?;
-        let _guard = self.guard();
-        let db = self
-            .database()
-            .ok_or(Error::Storage(StorageFailure::Unavailable))?;
-        // 账号锁 -> 实际Db连接锁 -> SQL事务；来源签发与读取提交处于同一个连接借用期。
-        let (inner, source) = db
-            .prepare_credential_source(|conn| {
-                sql::credential_version::prepare(conn, &key, provider, id)
-            })
-            .map_err(source_error)??;
-        Ok(ReadStamp {
-            store: self.clone(),
-            inner,
-            source,
-        })
-    }
-}
-
-impl ReadStamp {
-    pub(crate) fn provider(&self) -> &'static str {
-        "codearts"
-    }
-
-    pub(crate) fn account(&self) -> &str {
-        self.inner.account()
-    }
-
-    /// 只向宿主调用方借出这一次的授权材料；不会输出版本标识、代理或其他账号。
-    /// 旧原生行使用固定CodeArts字段投影，已有pluginSecret则保留其全部未知字段。
-    pub(crate) fn secret(&self) -> &Value {
-        self.inner.secret()
-    }
-
-    /// 同步提交：只有返回Ok才确认COMMIT；没有返回不等于没有保存。
-    /// 若上层放入spawn_blocking，必须自行持有任务直到真正结束，超时不能推断未保存。
-    pub(crate) fn commit(self, change: CredentialChange) -> Result<CommitReceipt, Error> {
-        self.write(change, false)
-    }
-
-    /// 独立的可信重新授权入口；同一账号保留born，即使材料未变也强制推进revision。
-    /// 本批没有登录/插件JSON调用者，也没有新增账号或按ID重建许可的旁路。
-    pub(crate) fn reauthorize(self, change: CredentialChange) -> Result<CommitReceipt, Error> {
-        self.write(change, true)
-    }
-
-    fn write(self, change: CredentialChange, reauthorize: bool) -> Result<CommitReceipt, Error> {
-        let key = cached_key()?;
-        let _guard = self.store.guard();
-        let db = self
-            .store
-            .database()
-            .ok_or(Error::Storage(StorageFailure::Unavailable))?;
-        db.commit_credential_source(&self.source, |conn| {
-            sql::credential_version::commit(conn, &key, &self.inner, change.inner, reauthorize)
-        })
-        .map_err(source_error)?
     }
 }
 

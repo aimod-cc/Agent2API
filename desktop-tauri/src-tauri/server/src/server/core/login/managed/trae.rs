@@ -433,7 +433,10 @@ pub(super) fn manual_callback(task: &super::LoginTaskHandle, interaction: &str, 
         let context = state.trae.context.as_ref().ok_or_else(unavailable)?;
         (context.receiver.clone(), context.protocol.callback.clone())
     };
-    if raw.is_empty() || raw.len() > 8192 || raw.contains('\\') || raw.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+    if raw.is_empty()
+        || raw.len() > 32 * 1024
+        || raw.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+    {
         return Err(invalid());
     }
     let url = url::Url::parse(raw).map_err(|_| invalid())?;

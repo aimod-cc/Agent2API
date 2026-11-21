@@ -71,8 +71,14 @@ impl Drop for Waiting {
 }
 
 fn block_reason(state: &State, class: Class, provider: &str, limits: &Limits) -> Option<RejectReason> {
-    if limits.memory_pressure
+    if limits.memory_ceiling
         && matches!(class, Class::Conversation | Class::Image | Class::Background | Class::Request | Class::ImageRequest)
+    {
+        return Some(RejectReason::MemoryCeiling);
+    }
+    if limits.memory_pressure
+        && matches!(class, Class::Image | Class::Background | Class::ImageRequest)
+        && limits.for_class(class) == 0
     {
         return Some(RejectReason::MemoryPressure);
     }
@@ -143,6 +149,7 @@ fn record_rejection(
         available_bytes: resources.available_bytes,
         total_bytes: resources.total_bytes,
         used_bytes: resources.container_bytes.unwrap_or(resources.process_bytes),
+        os_pressure_level: resources.os_pressure_level,
     }
 }
 

@@ -120,31 +120,6 @@ impl AccountChange<'_> {
 }
 
 impl Db {
-    /// CodeArts首次登记只捕获此Db当前私有代次；不读账号/kv、不写版本、不接任意action。
-    /// 只有同一实际连接已收尾且可用才交付，不能从路径、账号ID、JSON或摘要重建。
-    pub(crate) fn capture_codearts_enrollment_source(
-        &self,
-    ) -> Result<CredentialSource, CredentialSourceError> {
-        let state = self
-            .inner
-            .conn
-            .lock()
-            .map_err(|_| CredentialSourceError::Unavailable)?;
-        if self.inner.task_guard_unusable.load(Ordering::Acquire) {
-            return Err(CredentialSourceError::Unavailable);
-        }
-        if !state.connection.is_autocommit() {
-            self.inner
-                .task_guard_unusable
-                .store(true, Ordering::Release);
-            return Err(CredentialSourceError::Unavailable);
-        }
-        Ok(CredentialSource {
-            owner: Arc::downgrade(&self.inner),
-            epoch: state.epoch.clone(),
-        })
-    }
-
     /// 新来源只伴随成功的真实读取返回；调用者负责有界SQL事务与COMMIT事实。
     /// 此对象本身不能构造ReadStamp，也没有重写账号或出网的能力。
     pub(crate) fn prepare_credential_source<T, E>(

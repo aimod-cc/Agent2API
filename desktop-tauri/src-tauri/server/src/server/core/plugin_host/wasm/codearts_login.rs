@@ -6,10 +6,7 @@ use agent2api_provider_protocol as proto;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use super::context::{Context,Shared};
-use crate::server::core::{account_store::credential_version::EnrollmentInput, egress::managed::FrozenHttpClient};
-
-pub(crate) struct Completed { input: EnrollmentInput }
-impl Completed { pub(crate) fn into_input(self) -> EnrollmentInput { self.input } }
+use crate::server::core::egress::managed::FrozenHttpClient;
 
 struct Flow {
     flow_id: String,
@@ -23,18 +20,6 @@ struct Flow {
     client: FrozenHttpClient,
 }
 struct Progress { result: Option<Value>, submitted: bool, ticket_secret: Option<String>, attempts: usize, redirected_at: Option<tokio::time::Instant> }
-struct Candidate {
-    shared: std::sync::Weak<Shared>,
-    flow: String,
-    account: Value,
-    until: tokio::time::Instant,
-    completed: Completed,
-    cancel: CancellationToken,
-}
-fn candidates() -> &'static Mutex<HashMap<String,Candidate>> {
-    static ITEMS: OnceLock<Mutex<HashMap<String,Candidate>>> = OnceLock::new();
-    ITEMS.get_or_init(Mutex::default)
-}
 fn flows() -> &'static Mutex<HashMap<String,Arc<Flow>>> { static ITEMS: OnceLock<Mutex<HashMap<String,Arc<Flow>>>> = OnceLock::new(); ITEMS.get_or_init(Mutex::default) }
 
 pub(super) async fn invoke(context: &Context,method: &str,params: &Value) -> Result<Value,proto::WireError> {
@@ -54,7 +39,6 @@ pub(super) async fn invoke(context: &Context,method: &str,params: &Value) -> Res
     if method == "codearts.login.cancel" {
         flow.cancel.cancel();
         flows().lock().map_err(|_| invalid())?.remove(id);
-        candidates().lock().map_err(|_| invalid())?.retain(|_, candidate| candidate.flow != id);
         return Ok(Value::Null);
     }
     if flow.until <= tokio::time::Instant::now() || flow.cancel.is_cancelled() { return Err(invalid()); }
@@ -100,8 +84,6 @@ async fn start(context: &Context) -> Result<Value,proto::WireError> {
         tokio::select! { _ = tokio::time::sleep_until(expired.until) => {}, _ = expired.cancel.cancelled() => {} }
         expired.cancel.cancel();
         if let Ok(mut items) = flows().lock() { items.remove(&flow_id); }
-        if let Ok(mut items) = candidates().lock() { items.retain(|_, candidate| candidate.flow != flow_id); }
-        if let Ok(mut items) = accepted().lock() { items.retain(|_, accepted| accepted.2 > tokio::time::Instant::now() && accepted.0.strong_count() > 0 && !accepted.4.is_cancelled()); }
     });
     Ok(json!({"flow":id,"url":url,"poll_interval_ms":1500,"external_browser":false,"allowed_hosts":["huaweicloud.com"],
         "instructions":"请完成华为云官方登录，完成后自动添加账号。远程面板可粘贴浏览器最后的本机回调地址；临时兜底登录无法自动续期。"}))
@@ -141,24 +123,9 @@ async fn poll(flow: &Arc<Flow>) -> Result<Value,proto::WireError> {
     if flow.cancel.is_cancelled() || flow.until <= tokio::time::Instant::now() { return Err(invalid()); }
     state.submitted = true;
     let account = material.account();
-    if let Some(input) = material.input {
-        let token = protocol::nonce()?;
-        let mut candidates = candidates().lock().map_err(|_| invalid())?;
-        candidates.retain(|_, candidate| candidate.until > tokio::time::Instant::now() && candidate.shared.strong_count() > 0);
-        if candidates.len() >= 64 { return Err(invalid()); }
-        candidates.insert(token.clone(),Candidate {
-            shared:flow.shared.clone(),flow:flow.flow_id.clone(),account:account.clone(),until:flow.until,completed:Completed {input},cancel:flow.cancel.clone(),
-        });
-        drop(candidates);
-        let mut result = json!({"state":"done","account":account});
-        result["codeartsLoginReceipt"] = json!(token);
-        state.result = Some(result.clone());
-        Ok(result)
-    } else {
-        let result = json!({"state":"done","account":account});
-        state.result = Some(result.clone());
-        Ok(result)
-    }
+    let result = json!({"state":"done","account":account});
+    state.result = Some(result.clone());
+    Ok(result)
 }
 
 fn failed(flow: &Flow, state: &mut Progress, message: &'static str) -> Value {
@@ -169,30 +136,6 @@ fn failed(flow: &Flow, state: &mut Progress, message: &'static str) -> Value {
     // 已失败的一次调用保留失败回执，不复用授权码或临时ticket材料。
     flow.cancel.cancel();
     result
-}
-
-pub(super) fn accept(shared: &Arc<Shared>,flow: &str,value: &Value) -> Result<(),proto::WireError> {
-    let Some(token) = value["codeartsLoginReceipt"].as_str() else { return Ok(()); };
-    let candidate = candidates().lock().map_err(|_| invalid())?.remove(token).ok_or_else(invalid)?;
-    if candidate.flow != flow || candidate.until <= tokio::time::Instant::now() || candidate.cancel.is_cancelled()
-        || candidate.shared.upgrade().is_none_or(|bound| !Arc::ptr_eq(&bound,shared)) || candidate.account != value["account"] { return Err(invalid()); }
-    let identity = candidate.account["identity"].as_str().ok_or_else(invalid)?.to_string();
-    let mut accepted = accepted().lock().map_err(|_| invalid())?;
-    accepted.retain(|_, value| value.2 > tokio::time::Instant::now() && value.0.strong_count() > 0 && !value.4.is_cancelled());
-    if accepted.len() >= 64 && !accepted.contains_key(&identity) { return Err(invalid()); }
-    accepted.insert(identity,(Arc::downgrade(shared),candidate.account,candidate.until,candidate.completed,candidate.cancel));
-    Ok(())
-}
-
-type Accepted = (std::sync::Weak<Shared>, Value, tokio::time::Instant, Completed, CancellationToken);
-fn accepted() -> &'static Mutex<HashMap<String,Accepted>> { static ITEMS: OnceLock<Mutex<HashMap<String,Accepted>>> = OnceLock::new(); ITEMS.get_or_init(Mutex::default) }
-
-pub(crate) fn take(provider: &str, account: &proto::NormalizedAccount) -> Option<Completed> {
-    if provider != "codearts" { return None; }
-    let mut items = accepted().lock().ok()?;
-    let (shared,value,until,completed,cancel) = items.remove(&account.identity)?;
-    if until <= tokio::time::Instant::now() || cancel.is_cancelled() || shared.upgrade().is_none() || serde_json::to_value(account).ok()? != value { return None; }
-    Some(completed)
 }
 
 fn invalid() -> proto::WireError { proto::WireError::with_code("CodeArts 登录流程失效或未完成，请重新发起；没有复用旧授权码或公开凭据","codearts_login_unavailable") }

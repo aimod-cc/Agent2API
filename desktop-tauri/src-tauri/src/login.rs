@@ -1306,14 +1306,18 @@ fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instruction
     let callback_input = if manual_callback && started.get("callbackInput").and_then(Value::as_str) == Some("code") {
         "code"
     } else { "url" };
-    let progress = json!({
+    let managed = started["managedLogin"] == true;
+    let mut progress = json!({
         "active": true, "provider": active.provider, "edition": active.edition, "mode": active.mode,
         "state": flow, "manualCallback": manual_callback, "callbackInput": callback_input,
-        "managedLogin": started["managedLogin"] == true, "methodIndex": started["methodIndex"],
+        "managedLogin": managed, "methodIndex": started["methodIndex"],
         "remainingMs": started["remainingMs"], "timeoutMs": started["timeoutMs"],
-        "phase": started["phase"], "saved": started["saved"],
         "instructions": instructions, "hint": hint,
     });
+    if managed {
+        progress["phase"] = started["phase"].clone();
+        progress["saved"] = started["saved"].clone();
+    }
     let _ = app.emit("login:progress", &progress);
     // 兼容仅订阅 onLoginState 的共享 UI 桥，新增字段不会改变旧状态结构。
     let _ = app.emit("login:state", &progress);
@@ -1427,6 +1431,7 @@ impl DynamicNavigation {
 
     fn allows(&self, url: &url::Url) -> bool {
         if !url.username().is_empty() || url.password().is_some() { return false; }
+        if url.as_str() == "about:blank" { return true; }
         let Some(host) = url.host_str() else { return false; };
         match url.scheme() {
             "https" => self.hosts.is_empty() || self.hosts.iter().any(|item| {

@@ -106,6 +106,7 @@ type SharedWindow = {
   wbApp?: {
     toast?: (message: string, kind?: 'err' | 'ok') => void
     getState?: () => { accounts?: { accounts?: Account[] } } | null | undefined
+    refresh?: (options?: { force?: boolean }) => Promise<unknown>
     formatTime?: (value: unknown) => string
   }
   /** 裸全局：app.js 的顶层函数声明，旧实现直接写 formatTime(...) */
@@ -119,6 +120,8 @@ type SharedWindow = {
   wbModelsPanel?: {
     /** 模型管理页左栏**实有清单**的家（本弹窗的刷新范围读它） */
     builtinProviders?: () => string[]
+    /** 模型管理页已取到的内置提供商 `{id, label}`，作为主状态未及时轮询时的补充元数据 */
+    builtinProviderMetas?: () => ProviderMeta[]
     /** 某家清单当前的拉取时刻（毫秒，0 = 未知 / 从未成功过） */
     providerRefreshedAt?: (providerId: string) => number
   }
@@ -213,11 +216,14 @@ function scopeProviders(): string[] {
   return [...ids]
 }
 
-/** 待获取那一屏要列的家：按注册表顺序（与模型管理页左栏同一序）列 scoped 名单 —— `all()` 只有
- *  内置家，自定义家的 id 即使进了 scopeProviders 也不会出现在这里。 */
+/** 待获取那一屏要列的家：优先沿用注册表顺序，并补入模型管理页已加载但主状态尚未同步的家
+ *  （例如刚补全或启用插件后立即切到模型管理页）。 */
 function pendingProviders(): ProviderMeta[] {
   const scoped = new Set(scopeProviders())
-  return (shared().wbProviders?.all?.() || []).filter(item => scoped.has(item?.id ?? ''))
+  const known = shared().wbProviders?.all?.() || []
+  const extras = (shared().wbModelsPanel?.builtinProviderMetas?.() || [])
+    .filter(item => item?.id && !known.some(meta => meta?.id === item.id))
+  return [...known, ...extras].filter(item => scoped.has(item?.id ?? ''))
 }
 
 /**
@@ -291,6 +297,19 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
   const [keyword, setKeyword] = React.useState('')
   /** 「模型来源」的落盘记忆（打开时读一次；选中即写回并更新本状态） */
   const [savedSource, setSavedSource] = React.useState<Record<string, string>>(loadSavedSource)
+  const [, setSyncTick] = React.useState(0)
+
+  React.useEffect(() => {
+    if (custom) return
+    const known = new Set((shared().wbProviders?.all?.() || []).map(item => item?.id ?? '').filter(Boolean))
+    const missingFromSession = (shared().wbModelsPanel?.builtinProviders?.() || []).some(id => !known.has(id))
+    if (!missingFromSession && known.size > 0) return
+    let alive = true
+    void shared().wbApp?.refresh?.({ force: true })?.then?.(() => {
+      if (alive) setSyncTick(tick => tick + 1)
+    })
+    return () => { alive = false }
+  }, [custom])
 
   /** 内置家：本次范围里的家（与 scopeProviders 同源，也就是真正会进请求的名单） */
   const pending = custom ? [] : pendingProviders()

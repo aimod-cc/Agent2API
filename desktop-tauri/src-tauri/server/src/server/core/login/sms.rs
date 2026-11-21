@@ -86,6 +86,7 @@ pub(crate) async fn start(
     let _reservation = limits::start()?;
     let flow = format!("sms_{}", nonce()?);
     let provider = adapter.provider_id().to_string();
+    let label = adapter.label();
     let task = state.login().new_handle_for_adapter("", adapter, proxy);
     let cancel = tokio_util::sync::CancellationToken::new();
     let session = Session {
@@ -102,6 +103,7 @@ pub(crate) async fn start(
         snapshot.sms = true;
     });
     state.login().tasks().register(&flow, task.clone());
+    logging::log("[Login]", &format!("发起{label}短信验证码登录"));
     let cleanup = task.clone();
     crate::spawn_task(async move {
         tokio::select! {
@@ -241,7 +243,22 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
                         let until = logging::now_ms() + seconds.min(86_400) as i64 * 1000;
                         limits::extend(adapter.provider_id(), &country, &phone, until);
                         let _ = with_session(task, |session| { session.retry_at = session.retry_at.max(until); Ok(()) });
+                    } else if error.status_code != 429 {
+                        let ready = limits::challenge_ready(adapter.provider_id(), &country, &phone, retry_at)
+                            .unwrap_or(retry_at);
+                        let _ = with_session(task, |session| {
+                            session.retry_at = ready;
+                            if !session.sent {
+                                session.phone.clear();
+                            }
+                            Ok(())
+                        });
                     }
+                    logging::log_with_level(
+                        "[Login]",
+                        &format!("{}短信验证码发送失败: {}", adapter.label(), error.message),
+                        "warn",
+                    );
                     return Err(error);
                 }
             };
@@ -263,6 +280,7 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
                         session.expires_at = (now + expires_after_seconds.min(session.config.expires_after_seconds) as i64 * 1000)
                             .min(session.deadline);
                         limits::extend(adapter.provider_id(), &country, &phone, session.retry_at);
+                        logging::log("[Login]", &format!("{}短信验证码已发送", adapter.label()));
                     }
                     SendResult::Captcha { ticket, challenge } => {
                         check_ticket(&ticket)?;
@@ -272,6 +290,7 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
                         session.challenge = Some(challenge);
                         session.sent = false;
                         session.expires_at = 0;
+                        logging::log("[Login]", &format!("{}短信发送前需要完成人机验证", adapter.label()));
                     }
                 }
                 session.phone = phone;
@@ -302,7 +321,17 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
                 params["ticket"] = session.ticket.clone();
                 Ok(())
             })?;
-            let value = invoke(task, adapter.as_ref(), "login.sms.verify", &params).await?;
+            let value = match invoke(task, adapter.as_ref(), "login.sms.verify", &params).await {
+                Ok(value) => value,
+                Err(error) => {
+                    logging::log_with_level(
+                        "[Login]",
+                        &format!("{}短信验证码登录失败: {}", adapter.label(), error.message),
+                        "warn",
+                    );
+                    return Err(error);
+                }
+            };
             if task.snapshot().canceled || task.snapshot().done { return Err(unavailable()); }
             with_session(task, |_| Ok(()))?;
             let mut account: agent2api_provider_protocol::NormalizedAccount = serde_json::from_value(value)
@@ -314,6 +343,7 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
             let result = super::persist_plugin_login(task, adapter.as_ref(), &account);
             task.cancel_provider_flow_locked(task.snapshot().state.as_deref().unwrap_or("")).await;
             result?.ok_or_else(unavailable)?;
+            logging::log("[Login]", &format!("✅ {}短信验证码登录成功", adapter.label()));
         }
         _ => return Err(GatewayError::bad_request("未知的短信登录操作")),
     }

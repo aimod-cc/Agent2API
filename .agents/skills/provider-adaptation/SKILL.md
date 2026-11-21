@@ -1,11 +1,11 @@
 ---
 name: provider-adaptation
-description: Agent2API（workbuddy）提供商接入与完整度审核规范，以独立 WASM 插件为主流程：单提供商包、无 WASI 沙箱、宿主能力与权限声明、动态登录及三端界面、账号和模型隔离、六项能力的实现与真实验收状态、旧原生插件迁移。凡涉及新增反代 Agent / 网页客户端 provider、审核适配 PR、改 WASM 提供商或 supports_* 能力、签到与领取、支持矩阵和旧二进制插件迁移时，都先执行本 Skill，即使请求未出现「provider」「适配」等字眼。
+description: Agent2API（workbuddy）提供商接入与完整度审核规范，以独立 WASM 插件为主流程：单提供商包、无 WASI 沙箱、宿主能力与权限声明、大正文资源通道与内存保护、动态登录及三端界面、账号和模型隔离、六项能力的实现与真实验收状态、旧原生插件停用后的迁移与兼容。凡涉及新增反代 Agent / 网页客户端 provider、审核适配 PR、改 WASM 提供商或 supports_* 能力、签到与领取、支持矩阵和旧包迁移时，都先执行本 Skill，即使请求未出现「provider」「适配」等字眼。
 ---
 
 # Agent2API 提供商接入规范（WASM）
 
-覆盖新提供商接入、现有提供商维护、旧原生插件迁移，以及适配完整度审核。**新增提供商默认做独立 WASM 插件，不再把上游适配写进主程序，也不再新增分平台原生可执行插件。** 旧原生插件即将弃用，但当前仍有兼容代码；不能因此自行删除旧包、旧账号或迁移数据。
+覆盖新提供商接入、现有提供商维护、存量迁移，以及适配完整度审核。**所有新老提供商均以独立 WASM 插件为主流程；旧原生可执行插件（非 `.wasm`）已停止支持并由宿主拒绝加载，不再把上游适配写进主程序，也不再新增分平台原生插件。** 不得因此自行删除用户已有账号、旧凭据迁移或兼容保留逻辑。
 
 本规范以当前工作区的实际实现为准。遇到宿主契约与 README、旧模块注释不一致，先核对代码，不把历史说明当成新接口承诺。
 
@@ -22,21 +22,21 @@ description: Agent2API（workbuddy）提供商接入与完整度审核规范，�
 | `plugin/Agent2Providers/wasm/sdk/` | `agent2api-wasm-sdk`，提供当前 WASM ABI 与受控宿主调用 |
 | `plugin/Agent2Providers/crates/provider-protocol/src/` | 共用的提供商、账号、模型与错误数据类型；部分说明仍源自原生插件阶段 |
 | `desktop-tauri/src-tauri/server/src/server/` | 宿主后端；下文的 `core/...`、`api/...` 均相对这里 |
-| `desktop-tauri/ui-shared/` | 桌面、网页、手机共用的插件登录、权限、设置与任务界面 |
+| `desktop-tauri/ui-kit/`、`desktop-tauri/ui-shared/` | 私有组件库与桌面、网页、手机共用的插件登录、权限、设置与任务界面 |
 | `desktop-tauri/ui-islands/`、`desktop-tauri/mobile/` | 桌面 / 网页面板与手机端的声明式界面消费方 |
 
-**WASM SDK 与旧的 `crates/provider-sdk/` 不是一回事。** 后者的原生进程服务循环、标准输入输出、`reqwest` / `tokio` 直接联网方式，不是新插件模板。旧实现可以提供上游协议证据，不能原样当作 WASM 运行方式。
+**WASM SDK 与旧的 `crates/provider-sdk/` 不是一回事。** 后者的原生进程服务循环、标准输入输出、`reqwest` / `tokio` 直接联网方式，不是新插件模板。旧实现只作协议参考与迁移来源，不能原样当作 WASM 运行方式。
 
 ### 0.2 动手前必须读的契约
 
 按所需功能读对应文件，不必一次读完所有提供商：
 
-- 包与权限：`core/plugin_host/wasm/manifest.rs`。
-- 模块导入、ABI、每次调用的资源与取消：`core/plugin_host/wasm/runtime.rs`、`plugin/Agent2Providers/wasm/sdk/src/abi.rs`。
+- 包与权限：`core/plugin_host/wasm/manifest.rs`、`core/plugin_host/support.rs`（非 WASM 包一律拦截为 `LegacyUnsupported`）。
+- 模块导入、ABI、每次调用的资源与取消：`core/plugin_host/wasm/runtime.rs`、`core/plugin_host/wasm/resources.rs`、`plugin/Agent2Providers/wasm/sdk/src/{abi,http}.rs`。
 - 握手与动态登记：`core/plugin_host/wasm/host.rs`、`core/plugin_host/bootstrap.rs`、`core/plugin_host/registry.rs`。
-- 可调用的宿主服务：`core/plugin_host/wasm/services.rs` 与对应的 SDK 模块。
+- 可调用的宿主服务：`core/plugin_host/wasm/services.rs`、`core/upstream_versions.rs` 与对应的 SDK 模块。
 - 业务数据形状：`plugin/Agent2Providers/crates/provider-protocol/src/{provider,account,model,chat}.rs`；**再对照宿主实际消费代码和当前 WASM 示例**，旧注释可能落后于实现。
-- 在线宿主的能力摘要由受保护的 `GET /api/plugins` 返回：顶层 `wasm` 给出 ABI、能力与限制，顶层 `protocol` 给出包通信协议。不要把本机平台的 `target` 当成 WASM 构建目标。
+- 在线宿主的能力摘要由受保护的 `GET /api/plugins` 返回：顶层 `wasm` 给出 ABI、能力、内存与体积限制，顶层 `protocol` 给出包通信协议。不要把本机平台的 `target` 当成 WASM 构建目标。
 
 新增宿主能力时，先确定输入、输出、权限、账号范围、取消和错误契约，再同时对齐宿主与 SDK。**不能先在 `requires` 中编一个名字，再假定主程序能执行。** 改共用契约还要核对宿主 `Cargo.toml` 当前使用的 Git tag；修改本地副本不会自动改变宿主依赖，勿把私人路径写进正式依赖。
 
@@ -60,9 +60,9 @@ description: Agent2API（workbuddy）提供商接入与完整度审核规范，�
 - **未确认 / 未接入**：不能由能力位为 `false` 推导出「上游没有」。
 - **不支持 / 不适用**：有上游证据或账号形态依据，不能代替「还没做」。
 
-面板的能力说明已有 `supported`、`implemented_unverified`、`unsupported`、`not_applicable`、`undeclared` 五种状态。当前 WASM 的 `verified: false` 会把已开启的能力显示为「已实现，未验收」；**签名、编译成功、能安装都不是验收证明**。`verified` 是包级标记，不要为了一个能力通过就让所有能力看起来都已验证。
+- 面板的能力说明已有 `supported`、`implemented_unverified`、`unsupported`、`not_applicable`、`undeclared` 五种状态。当前 WASM 的 `verified: false` 会把已开启的能力显示为「已实现，未验收」；**签名、编译成功、能安装都不是验收证明**。`verified` 是包级标记，不要为了一个能力通过就让所有能力看起来都已验证。
 
-插件 README 中仍有原生能力表、分平台构建说明等过渡内容。审核时必须区分 **旧原生实现** 与 **当前 WASM 实现**，不能继承旧表的 ✓，也不要恢复「主程序内置 N 家」或写死提供商数量。
+插件仓库 README 中若仍留有原生能力表、五平台构建说明等过渡内容，审核与修改时必须以 `wasm/` 下独立 WASM 实现、`wasm.json`、`verified` 与真实实测记录为准，不能继承旧表的 ✓，也不恢复「主程序内置 N 家」或写死提供商数量。
 
 ## 1. 写代码前先摸清上游
 
@@ -105,10 +105,10 @@ CatPaw 目录参数实际在 POST body，AutoClaw 目录实际在另一层路径
 
 | 文件 / 声明 | 要求 |
 |---|---|
-| `<id>/Cargo.toml` | `agent2api-wasm-<id>`、`cdylib`、依赖 WASM SDK；按用户已确认的版本维护，不夹带发版 |
+| `<id>/Cargo.toml` | `agent2api-wasm-<id>`、`cdylib`、依赖 WASM SDK；各独立包维护自身版本号（如 `0.1.0-beta.x`），不夹带发版 |
 | `wasm/Cargo.toml` | 登记 workspace member；依赖变化时同步该 WASM 工作区的锁文件 |
-| `<id>/pack.json` | 唯一包 id、唯一 provider、唯一 `entry.wasm32-unknown-unknown`，入口是包内 `.wasm` |
-| `<id>/wasm.json` | 真实 ABI、`requires`、HTTPS 来源白名单、资源限制、验收状态与所需受控声明 |
+| `<id>/pack.json` | 唯一包 id、唯一 provider、唯一 `entry.wasm32-unknown-unknown`，入口是包内 `.wasm`，版本号与 `<id>/Cargo.toml` 一致 |
+| `<id>/wasm.json` | 真实 ABI、`requires`、HTTPS 来源白名单、内存/并发限制（当前官方包统一声明 `"memory_mib": 128`）、验收状态与所需受控声明 |
 | `<id>/src/lib.rs` | 通过 `sdk::export_provider!` 导出 ABI，并实现握手与业务分派 |
 | `<id>/assets/` | 声明图标目录后必须有可显示的图标；必要的第三方许可保留在 `licenses/` |
 
@@ -117,12 +117,12 @@ Web 提供商在 `pack.json` 中声明 `provider_category: "web"`，否则默认
 当前宿主检查：
 
 1. `providers` 与 `entry` 都只能有一项，目标固定为 `wasm32-unknown-unknown`，跨平台使用同一包。
-2. `wasm.json` 的 ABI 与宿主一致，所需能力全部存在，依赖声明齐全。
+2. `wasm.json` 的 ABI 与宿主一致，所需能力全部存在，依赖声明齐全；`memory_mib` 合法范围以 `manifest.rs` 为准（默认 `128`，宿主运行期会为普通调用保底 128 MiB、为对话调用兜底抬高至 256 MiB，避免大正文在实例内触发内存溢出）。
 3. `init` 返回**单元素提供商数组**，id 与包清单一致。
 4. 模块只允许导入 `agent2api.call` / `agent2api.read`，导出 `memory`、`a2a_abi_version`、`a2a_alloc`、`a2a_call`。
 5. 不能携带可执行网页；`pack.json.ui` 必须为空 / 缺省，**包内连 `ui/` 目录也不允许**。
 
-ABI、资源上限与能力清单以 `manifest.rs`、`runtime.rs` 和宿主摘要为准，不把当前数值复制成永久常量。不要使用 WASI、wasm-bindgen 浏览器导入、任意文件 / 进程 / 环境变量接口，也不直接把原生依赖树搬过来。
+ABI、资源上限与能力清单以 `manifest.rs`、`runtime.rs`、`resources.rs` 和宿主摘要为准，不把当前数值复制成永久常量。不要使用 WASI、wasm-bindgen 浏览器导入、任意文件 / 进程 / 环境变量接口，也不直接把原生依赖树搬过来。
 
 ### 2.2 两种声明要同时对齐
 
@@ -138,7 +138,7 @@ ABI、资源上限与能力清单以 `manifest.rs`、`runtime.rs` 和宿主摘�
 | `checkin` / `claims` | `checkin.claim` / `claim.status` / `claim`，以及实际存在的入口与签到元数据 |
 | `web_login` | 声明 `login.forms.v1`，实现相应登录流程与动态登录方式 |
 | `account_features` | 标识、有效期、积分明细、套餐、并发等字段与公开视图一致 |
-| `settings_schema` / `settings_group` | 如需要设置面板，在 `init` 元数据中声明并使用现有宿主设置契约 |
+| `settings_schema` / `settings_group` | 需要设置面板时在 `init` 元数据声明；若客户端版本需跟随上游官网发布，使用 `type: "upstream_version"` + `source_id` 消费宿主从官网 CDN 同步的版本号（`core/upstream_versions.rs`），不要写死过时硬编码版本 |
 
 新包显式填写相关能力，不依赖省略字段的默认值。当前共用协议的 `chat` 默认是 `true`，**不能再套用「所有能力默认 false」的旧说法**。默认值无论真假都不构成上游或实现证据。
 
@@ -147,12 +147,12 @@ ABI、资源上限与能力清单以 `manifest.rs`、`runtime.rs` 和宿主摘�
 ### 2.3 网络、系统能力与授权边界
 
 - 所有网络经 SDK / 宿主发出。`origins` 只接受明确的 HTTPS origin，不含路径、通配符、账号密码、query 或 fragment；普通请求不得靠重定向跳出授权来源。
-- HTTP、WebSocket、资源上传与下载分别核对对应权限。不要凭证跟随公共图片 URL，也不要用公共下载入口访问本机或内网地址。
+- HTTP、WebSocket、资源上传与下载分别核对对应权限。发送较大对话请求时应配合 `resources.v1` 与 SDK 大正文资源通道（超阈值自动走分片资源 / `open_json_resource`，以宿主的资源池与内存上限约束，不要整包复制为 base64 字符串或受限于单条 ABI 大小）。不要凭证跟随公共图片 URL，也不要用公共下载入口访问本机或内网地址。
 - 账号代理、可信请求上下文由宿主决定；插件不能用传入 JSON 自选另一个账号、代理、跟踪标识或可信调用来源。
 - 设置声明只放可公开的配置；令牌、密码、Cookie 放账号 `secret`，不能塞进全局设置或表单默认值。
-- 动态账号域名需要 `http.account-origin.v1` 与受控 `account_origin` 声明、明确授权，不能扩大为任意 URL。当前该入口不支持代理，不得声称支持。
+- 动态账号域名需要 `http.account-origin.v1` 与受控 `account_origin` 声明、明确授权，不能扩大为任意 URL；该入口已支持绑定账号代理与公网 IP 校验，代理不可用时应明确失败，不静默回退直连。
 - 本机凭据、托管登录、验证码、固定续期、MonkeyCode 任务等走现成受控能力；**声明不是用户授权**，敏感授权绑定具体包与来源，更新 / 切换后按宿主规则重新核对。
-- 某些能力只允许特定 provider 使用。不得把 CodeArts、Cline Free、CatPaw、豆包或 MonkeyCode 的固定入口复制给新 id；也不得用普通 HTTP 绕开固定入口。
+- 某些能力只允许特定 provider 使用（如 CodeArts 会话/登录/换证、Cline Free / Kiro / AutoClaw / Raccoon 本机续期、CatPaw 轮次、豆包对话与任务领奖、MonkeyCode 任务与计算验证、ChatGLM 本机导入、DeepSeek 网页入站图片资源等，见 `manifest.rs`）。不得把固定入口或遗留凭据导入白名单复制给新 id，也不得用普通 HTTP 绕开固定入口。
 - 能力确实不够时，明确缺口并先设计宿主契约，不引入任意原生执行来补洞。不要为了兼容新插件而放宽沙箱。
 
 ### 2.4 账号、凭证与状态
@@ -191,6 +191,7 @@ WASM 对话实现 `conversation`，通过 SDK 调用网络，然后输出标准 
 
 - 现有 Chat / Anthropic / Responses 请求与响应转换、Gemini 流转换可使用 `protocol.convert.v1`，转换器句柄只属于当前调用；自有信封在插件内解析，不默认给宿主新增响应枚举。
 - 保留完整工具声明、工具调用 id、工具结果、多轮历史、思考与 usage；不要靠删工具、截断结果或吞错误实现「能回复」。
+- **不要对对话 `messages` 数组增设固定条数上限（例如 512 / 4096 条）**；入站仅校验非空数组，超长会话保护交由请求体字节上限（流式计数如 `json_exceeds`）、JSON 节点与嵌套深度预算及 WASM 运行内存控制承担，避免打断多轮 Agent 长历史。
 - 网页模型若走主程序工具模拟，按现有 `toolEmulation` 契约声明，并保持原生 `supportsToolCall` 的真实含义。文案说明模拟可关闭，不能宣传为网页原生工具能力。
 - 图片输入与图片生成 / 编辑是不同能力。生成 / 编辑另核对 `images.v1`、`images.capabilities` 与对应标准入口；大图不能靠无限放宽普通 JSON 限制处理。
 - 原始客户端流式意图需要时用 `request.context.v1`；不能把插件内部为了向上游取流而修改的 `params.stream` 当成客户端原始选择。
@@ -211,7 +212,7 @@ HTTP 200 仍可能是业务失败、流内 error 或固定拒绝话术；需要�
 
 429 可能是额度耗尽、速率窗口、设备 / 账号限制，不只看状态码。区分分钟级与实际额度重置窗口，不能全写次日零点。`error.policy`、`retry.decision`、`retry_advice`、`cooldown_models` 等按宿主实际调用名称实现；未知操作返回明确 unsupported，不能返回空成功掩盖缺口。
 
-SDK 错误中的 `status`、`code`、`upstream_code`、`reset_at`、`credential_scope` 按需保留，防止本来可轮换 / 可续期的错误被折成 502。WASM 的会话出口同样要接通错误分类，不能沿用「会话错误一律 Fatal」的旧假设。
+SDK 错误中的 `status`、`code`、`upstream_code`、`reset_at`、`credential_scope` 按需保留，防止本来可轮换 / 可续期的错误被折成 502。对上游返回的业务报错详情（如非 200 JSON / 原文提示），做好敏感凭证脱敏后尽量透传真实原因与状态码，不要二次覆盖成笼统未知提示。WASM 的会话出口同样要接通错误分类，不能沿用「会话错误一律 Fatal」的旧假设。
 
 ### 2.7 签到、活动与插件任务
 
@@ -251,7 +252,7 @@ WASM 不能自带 HTML / JS 页面。普通新提供商优先使用主程序已�
 
 主程序中文仍是源语言，译文在 `desktop-tauri/i18n/i18n-src/{en,ja,ko,pt-BR,zh-Hant}/`。主程序新增文案时扫描、补译并生成产物；插件动态返回的说明和表单不会因为主程序扫描自动获得翻译，应按 `auth.methods` 收到的 locale 等现有契约自行提供六语文案。
 
-主程序前端变化涉及的构建入口：
+主程序前端变化涉及的构建入口（共享组件在 `desktop-tauri/ui-kit/`）：
 
 ```bash
 npm run ui:islands
@@ -260,7 +261,7 @@ npm --prefix desktop-tauri/i18n run scan
 npm --prefix desktop-tauri/i18n run build
 ```
 
-译文补齐后再生成词典；按实际改动重建相关产物，不是每次插件变化都重建全部主程序。岛产物在 `desktop-tauri/ui/islands/`，手机网页产物在 `desktop-tauri/ui/m/`，词典在 `desktop-tauri/ui/i18n/`。CI 的译文完整性检查是现有要求，但**本 Skill 不授权忽略用户「不运行测试 / 检查」的指示**。
+译文补齐后再生成词典；按实际改动重建相关产物，不是每次插件变化都重建全部主程序。岛产物在 `desktop-tauri/ui/islands/`，手机网页产物与缓存脚本在 `desktop-tauri/ui/m/` 与 `desktop-tauri/ui/sw.js`，词典在 `desktop-tauri/ui/i18n/`；仓库的 `.githooks/pre-commit` 与 CI 工作流 `.github/workflows/frontend-artifacts.yml` 会按字节核对生成产物一致性。CI 的译文与产物检查是现有要求，但**本 Skill 不授权忽略用户「不运行测试 / 检查」的指示**。
 
 ### 4.2 支持说明
 
@@ -282,7 +283,7 @@ node plugin/Agent2WebProviders/wasm/build.mjs <id>
 
 构建器按对应 WASM 工作区 `--locked` 构建 `wasm32-unknown-unknown`，打出 `<pack-id>-<version>-wasm32-unknown-unknown.zip` 与 `.sha256`。Web 构建复用相邻 Agent2Providers 仓库的 SDK 和工具，缺少副本时明确报缺，不切回原生构建。
 
-本地开发包可以未签名，但必须如实显示未签名与未验收，不冒用官方密钥。要改版本、签名配置、CI、插件索引、tag、Release 或推送，另按 `release-flow` 和用户确认执行；本 Skill 不授予这些操作权限。仅更新本规范时不构建、不安装、不更新索引。
+本地开发包可以未签名，但必须如实显示未签名与未验收，不冒用官方密钥。要改版本、签名配置、CI、官网 / CDN 发布与目录清单、tag、Release 或推送，另按 `release-flow` 和用户确认执行；本 Skill 不授予这些操作权限。仅更新本规范时不构建、不安装、不发布目录。
 
 ## 5. 按功能纵向闭环施工
 
@@ -336,7 +337,7 @@ node scripts/probe-provider.mjs \
   --model <模型名>
 ```
 
-**必须自行确认 Key 只允许目标 provider，并核对当前执行体是 WASM。** `--provider` 不是路由强制开关；当前脚本只查健康、模型存在及 `owned_by`，缺 Key 只警告，**不会检查 Key 的完整 provider 白名单，也不识别原生 / WASM 包归属**。不能再沿用旧规范「脚本会自动保证仅测试这家」的说法。
+**必须自行确认 Key 只允许目标 provider，并确认当前已加载目标 WASM 插件包。** `--provider` 不是路由强制开关；当前脚本只查健康、模型存在及 `owned_by`，缺 Key 只警告，**不会检查 Key 的完整 provider 白名单**（旧原生动态库已停止加载，运行中可排除回退旧原生）。不能再沿用旧规范「脚本会自动保证仅测试这家」的说法。
 
 | 用例 | 当前口径 |
 |---|---|
@@ -370,9 +371,9 @@ node scripts/probe-provider.mjs \
 
 ## 8. 旧原生插件迁移的边界与常见误区
 
-- **WASM 是主流程，但原生兼容尚未删除。** `plugin/Agent2Providers/crates/providers/`、`plugin/Agent2WebProviders/crates/providers/` 及旧包清单是协议参考 / 迁移来源，不是新增模板。
-- **保留 provider id、旧账号、设置与授权边界。** 换包不能重命名身份或默认重建所有账号；不自动迁移 / 删除用户数据，不给存量导入账号补敏感权限。
-- **加载失败不能偷偷回退旧原生。** 当前归属优先级、暂停名单和旧包特殊迁移以 `core/plugin_host/ownership.rs` 为准，不写一个通用回退来绕过它。
+- **旧非 WASM 原生插件已停止支持并拒绝加载。** `core/plugin_host/support.rs` 会将非 `.wasm` 旧包拦截为不受支持的旧格式（CI `.github/workflows/rust-tests.yml` 也已移除原生 `--plugins` 集成测试）；`plugin/Agent2Providers/crates/providers/`、`plugin/Agent2WebProviders/crates/providers/` 仅作协议与迁移参考，不是新增模板。
+- **保留 provider id、旧账号、设置与授权边界。** 换包不能重命名身份或默认重建所有账号；不自动迁移 / 删除用户数据，不给存量导入账号补敏感权限。退场映射以代码为准（例如 `cline-pass` 已转入内置直连模板，而 `cline-free` 保留独立 WASM 包与桌面凭据刷新）。
+- **加载失败不能回退旧原生，也不得绕过归属控制。** 当前归属优先级、支持门禁与旧包特殊迁移以 `core/plugin_host/ownership.rs`、`support.rs` 和 `providers/availability.rs` 为准。
 - **主程序旧 `ProviderKind` / `PROVIDERS` 是历史身份与少量真实内置执行体，不是插件登记入口。** 新插件走运行时注册表；只为宿主真正的新内置功能修改它时，先说明这是另外一种任务。
 - **无需给每个插件新建厂商前端表、账号存储分支、缓存 scope、签到版本。** 有遗留 fallback 不代表需要继续扩展。
 - **`verified`、签名与权限是三件事。** 已签名不等于真实验收，权限声明不等于用户批准，未声明能力不等于上游没有。

@@ -17,7 +17,7 @@ pub const CAPABILITIES: &[&str] = &[
     "http.account-origin.v1", "runtime.platform.v1", "verification.account.v1", "verification.claim.v1",
     "runtime.architecture.v1", "runtime.client-fingerprint.v1", "request.context.v1",
     "login.managed.v1", "login.loopback.v1", "login.captcha.aliyun.v1",
-    "resources.inbound-images.v1", "login.desktop.chatglm.v1", "credential.codearts-refresh.v1", "http.catpaw-turn.v1",
+    "resources.inbound-images.v1", "login.desktop.chatglm.v1", "http.catpaw-turn.v1",
     "claim.doubao-tasks.v1", "http.managed-task.v1",
     "http.codearts-session.v1", "login.codearts.v1", "desktop.credentials.v1", "http.doubao-turn.v1",
     "crypto.monkeycode-cap.v1", "desktop.launch.v1", "resources.cookie-file.v1", "credential.kiro-external-refresh.v1", "credentials.legacy-import.v1",
@@ -121,7 +121,6 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         ("login.desktop.chatglm.v1", &["login.forms.v1", "accounts.cas.v1"][..]),
         ("catalog.accounts.v1", &["catalog.v1", "accounts.cas.v1"][..]),
         ("accounts.identity.v1", &["accounts.cas.v1"][..]),
-        ("credential.codearts-refresh.v1", &["accounts.cas.v1", "accounts.identity.v1"][..]),
         ("claim.doubao-tasks.v1", &["accounts.cas.v1", "accounts.identity.v1", "http.v1", "http.timeout.v1"][..]),
         ("verification.account.v1", &["accounts.cas.v1", "state.v1"][..]),
         ("verification.claim.v1", &["verification.account.v1"][..]),
@@ -193,9 +192,6 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     }
     if requires("http.catpaw-turn.v1") && manifest.providers[0].id.as_str() != "catpaw" {
         return Err("CatPaw固定轮次能力不能跨提供商使用".into());
-    }
-    if requires("credential.codearts-refresh.v1") && manifest.providers[0].id.as_str() != "codearts" {
-        return Err("CodeArts固定换证能力不能跨提供商使用".into());
     }
     if requires("claim.doubao-tasks.v1") && manifest.providers[0].id.as_str() != "doubaowork" {
         return Err("豆包任务领奖能力不能跨提供商使用".into());

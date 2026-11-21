@@ -88,7 +88,7 @@ export function CheckinUmid(): React.ReactElement | null {
   return (
     <div className='flex flex-wrap items-center gap-2' aria-live='polite'>
       <span>{state?.authorized === false
-        ? t('请在 Qoder 国际版插件设置中授权设备验证组件')
+        ? (state.message || t('国际版签到需要 UMID 组件生成设备风控身份（本机未检测到）。'))
         : state ? t('国际版签到需要 UMID 组件生成设备风控身份（本机未检测到）。')
         : error ? t('网关设备组件') : t('正在读取 UMID 组件状态…')}</span>
       {state?.installSupported && state.authorized !== false ? (

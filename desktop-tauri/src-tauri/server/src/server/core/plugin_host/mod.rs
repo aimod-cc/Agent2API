@@ -51,7 +51,6 @@ pub(crate) mod process_guard;
 pub(crate) mod provider_settings;
 mod registry;
 mod rpc;
-mod rpc_refresh;
 pub(crate) mod rpc_cache;
 pub mod schedules;
 pub mod script;

@@ -104,7 +104,7 @@ export function applicablePluginItems(items: PluginBatchItem[], action: PluginBa
         : action === 'enable' ? item.installed && !item.enabled && item.enableable : item.installed && item.enabled))
 }
 
-export function missingPluginItems(payload: PluginsPayload | null, rows: PluginBatchItem[]): { required: PluginBatchItem[]; optional: PluginBatchItem[]; unresolved: HiddenAccountProvider[] } {
+export function missingPluginItems(payload: PluginsPayload | null, rows: PluginBatchItem[]): { required: PluginBatchItem[]; unresolved: HiddenAccountProvider[] } {
   const hidden = payload?.hiddenAccounts?.providers.filter(item => item.reason === 'not_installed' || item.reason === 'legacy_unsupported') || []
   const missing = rows.filter(item => !item.installed || item.pack?.entryPresent === false && item.pack.enabled && item.pack.supportState !== 'legacy_unsupported')
   const claimed = new Set<string>()
@@ -120,7 +120,5 @@ export function missingPluginItems(payload: PluginsPayload | null, rows: PluginB
       installable: repairFile ? Boolean(row.store?.version && asset && !row.store.error) : row.installable,
       reason: repairFile && !asset ? row.store?.reason ?? undefined : row.reason })
   }
-  return { required, optional: missing.filter(row => !row.installed && !required.some(item => item.key === row.key)
-      && !row.providers.some(id => claimed.has(id))),
-    unresolved: hidden.filter(item => !claimed.has(item.id)) }
+  return { required, unresolved: hidden.filter(item => !claimed.has(item.id)) }
 }

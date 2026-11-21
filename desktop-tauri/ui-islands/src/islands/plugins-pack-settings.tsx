@@ -1,9 +1,8 @@
 import * as React from 'react'
 import { Alert, Badge, Button, DialogSection, Input, Label, Switch } from '@ui'
-import { api, formatTime, pluginDescription, pluginName } from './plugins-shared'
+import { formatTime, pluginDescription, pluginName } from './plugins-shared'
 import type { PackProvider, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { PluginDetailsDialog, type PluginDetailsPane } from '../../../ui-shared/plugins-details'
-import { PluginHelpers } from '../../../ui-shared/plugin-helpers'
 import { requestPluginDiagnostics, usePluginLoadStatus } from '../../../ui-shared/plugin-startup-view'
 import { PluginDiagnosticsMenu, PluginStartupSummary } from '../../../ui-shared/plugins-startup-summary'
 import { pluginPhaseLabel } from '../../../ui-shared/plugin-startup'
@@ -28,8 +27,7 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
 }) {
   const startup = usePluginLoadStatus(pack.id, pack.startup)
   const [search, setSearch] = React.useState('')
-  const [helperBusy, setHelperBusy] = React.useState(false)
-  const locked = disabled || helperBusy
+  const locked = disabled
   const idPrefix = React.useId()
   const keyword = search.trim().toLocaleLowerCase()
   const providers = pack.providers.filter(provider => !keyword
@@ -88,7 +86,5 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
           {!providers.length ? <p className='m-0 py-3 text-center'>{t('没有匹配「{keyword}」的提供商', { keyword: search.trim() })}</p> : null}
         </div>
       </DialogSection>
-      <PluginHelpers key={`helpers:${pack.id}:${pack.version}`} packId={pack.id} providers={pack.providers} enabled={pack.enabled}
-        disabled={disabled} onBusyChange={setHelperBusy} request={api} t={t} />
     </>} />
 }

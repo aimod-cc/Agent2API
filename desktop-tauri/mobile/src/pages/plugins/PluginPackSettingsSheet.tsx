@@ -1,11 +1,8 @@
-import { useCallback, useId, useState } from 'react'
+import { useId } from 'react'
 import { Alert, Badge, DialogSection, Label, Switch } from '@ui'
 import type { PackSummary } from '../../api/plugins'
-import { apiCall } from '../../api/client'
-import { serverIdentity } from '../../lib/servers'
 import { t } from '../../i18n'
 import { PluginDetailsDialog, type PluginDetailsPane } from '../../../../ui-shared/plugins-details'
-import { PluginHelpers } from '../../../../ui-shared/plugin-helpers'
 import { requestPluginDiagnostics, usePluginLoadStatus } from '../../../../ui-shared/plugin-startup-view'
 import { PluginDiagnosticsMenu, PluginStartupSummary } from '../../../../ui-shared/plugins-startup-summary'
 import { pluginPhaseLabel } from '../../../../ui-shared/plugin-startup'
@@ -20,16 +17,8 @@ export function PluginPackSettingsSheet({ pack, disabled, initialPane, onClose, 
   onReload: () => Promise<unknown>
 }) {
   const startup = usePluginLoadStatus(pack.id, pack.startup)
-  const [helperBusy, setHelperBusy] = useState(false)
   const prefix = useId()
-  const locked = disabled || helperBusy
-  const identity = serverIdentity()
-  const requestPermissions = useCallback(async <T,>(method: 'GET' | 'PATCH', path: string, body?: unknown): Promise<T> => {
-    if (serverIdentity() !== identity) throw new DOMException(t('服务器已切换'), 'AbortError')
-    const value = await apiCall<T>(path, { method, body })
-    if (serverIdentity() !== identity) throw new DOMException(t('服务器已切换'), 'AbortError')
-    return value
-  }, [identity])
+  const locked = disabled
   const close = () => { if (!locked) onClose() }
   const diagnostics = () => { if (!locked) { onClose(); requestPluginDiagnostics(pack.id) } }
 
@@ -62,8 +51,5 @@ export function PluginPackSettingsSheet({ pack, disabled, initialPane, onClose, 
             onCheckedChange={enabled => onProvider(provider.id, enabled)} />
         </div>)}
       </DialogSection>
-      <PluginHelpers key={`helpers:${identity}:${pack.id}:${pack.version}`} packId={pack.id} providers={pack.providers}
-        enabled={pack.enabled} disabled={disabled} onBusyChange={setHelperBusy} t={t}
-        request={requestPermissions} />
     </>} />
 }

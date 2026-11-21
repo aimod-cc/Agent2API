@@ -14,6 +14,8 @@ pub struct Resources {
     pub cpu_percent: f32,
     pub cores: usize,
     pub connection_ceiling: usize,
+    /// macOS 内核内存压力等级（1 正常 / 2 警告 / 4 危险），其它平台或读取失败时为 `None`。
+    pub os_pressure_level: Option<u8>,
 }
 
 struct Monitor {
@@ -28,6 +30,7 @@ fn fallback() -> Resources {
         process_bytes: 0, container_bytes: None, cpu_percent: 0.0,
         cores: std::thread::available_parallelism().map(usize::from).unwrap_or(1),
         connection_ceiling: connection_ceiling(),
+        os_pressure_level: None,
     }
 }
 
@@ -52,7 +55,7 @@ pub fn sample() -> Resources {
     let process_bytes = process.map(|process| process.memory()).unwrap_or(0);
     let cpu_percent = process.map(|process| process.cpu_usage() / cores as f32).unwrap_or(0.0).clamp(0.0, 100.0);
     let mut total_bytes = monitor.system.total_memory();
-    let mut available_bytes = monitor.system.available_memory();
+    let mut available_bytes = platform_available_memory(&monitor.system, total_bytes);
     let mut container_bytes = None;
     if let Some(cgroup) = monitor.system.cgroup_limits().filter(|group| group.total_memory > 0 && group.total_memory < total_bytes) {
         total_bytes = cgroup.total_memory;
@@ -60,12 +63,82 @@ pub fn sample() -> Resources {
         container_bytes = Some(cgroup.rss);
     }
     let resources = Resources { total_bytes, available_bytes, process_bytes, container_bytes, cpu_percent, cores,
-        connection_ceiling: connection_ceiling() };
+        connection_ceiling: connection_ceiling(), os_pressure_level: os_pressure_level() };
     monitor.resources = if total_bytes == 0 { fallback() } else { resources };
     monitor.updated = Instant::now();
     *last.write().unwrap_or_else(|error| error.into_inner()) = monitor.resources;
     monitor.resources
 }
+
+#[cfg(target_os = "macos")]
+fn platform_available_memory(system: &System, total_bytes: u64) -> u64 {
+    macos_available_memory(total_bytes).unwrap_or_else(|| system.available_memory())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_available_memory(system: &System, _total_bytes: u64) -> u64 {
+    system.available_memory()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_host_port() -> libc::mach_port_t {
+    static PORT: OnceLock<libc::mach_port_t> = OnceLock::new();
+    *PORT.get_or_init(|| {
+        #[allow(deprecated)]
+        unsafe { libc::mach_host_self() }
+    })
+}
+
+/// `sysinfo` 0.37.2 在 macOS 上用 `free + inactive + purgeable - compressor` 推算可用内存，
+/// 压缩内存较大时读数会塌陷到 0；直接从 Mach `vm_statistics64` 取 `free + inactive`
+/// （XNU 的 `free_count` 已含 `speculative_count`），让可用读数与物理空闲+可回收缓存一致。
+#[cfg(target_os = "macos")]
+fn macos_available_memory(total_bytes: u64) -> Option<u64> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return None;
+    }
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: `vm_statistics64` 仅包含标量计数，零初始化有效。
+    let mut stat: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    // SAFETY: 传入静态持有的 `mach_host_self()` 端口、`HOST_VM_INFO64` 缓冲区与匹配的 `count`。
+    let status = unsafe {
+        libc::host_statistics64(
+            macos_host_port(),
+            libc::HOST_VM_INFO64,
+            (&mut stat as *mut libc::vm_statistics64).cast(),
+            &mut count,
+        )
+    };
+    if status != libc::KERN_SUCCESS {
+        return None;
+    }
+    let pages = u64::from(stat.free_count).saturating_add(u64::from(stat.inactive_count));
+    Some(pages.saturating_mul(page_size as u64).min(total_bytes))
+}
+
+/// 读取 macOS 内核内存压力等级；读取失败或非正值时返回 `None`，退回按可用内存比例判定。
+#[cfg(target_os = "macos")]
+fn os_pressure_level() -> Option<u8> {
+    let name = b"kern.memorystatus_vm_pressure_level\0";
+    let mut level: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: 栈上 `c_int` 与字节长度匹配，名称以 NUL 结尾；`sysctlbyname` 仅写入单个 `c_int`。
+    let status = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr().cast(),
+            (&mut level as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0 && size == std::mem::size_of::<libc::c_int>() && level > 0)
+        .then_some(u8::try_from(level).unwrap_or(u8::MAX))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn os_pressure_level() -> Option<u8> { None }
 
 #[cfg(unix)]
 fn connection_ceiling() -> usize {

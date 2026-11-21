@@ -72,7 +72,6 @@ enum InvocationContext {
     DoubaoImage(super::conversation::ConversationCall),
     DesktopImport(super::native::chatglm::DesktopCall),
     DesktopLaunch(super::desktop_launch::binding::Call),
-    CodeArtsRefresh(Arc<super::codearts_refresh::Call>),
     DoubaoRewards(Arc<super::doubao_rewards::Call>),
 }
 
@@ -193,13 +192,6 @@ impl Runtime {
         params: Value, timeout: Duration, kiro: Option<Arc<super::managed::kiro_execution::KiroExecution>>,
     ) -> Result<Value, proto::WireError> {
         self.invoke_inner(call.method(), params, timeout, None, InvocationContext::Managed { call, kiro }).await
-    }
-
-    pub(super) async fn invoke_codearts_refresh(&self, call: Arc<super::codearts_refresh::Call>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        self.invoke_inner(proto::methods::gateway::TOKEN_REFRESH, params, timeout, None,
-            InvocationContext::CodeArtsRefresh(call)).await
     }
 
     pub(super) async fn invoke_doubao_rewards(&self, call: Arc<super::doubao_rewards::Call>,
@@ -340,10 +332,6 @@ impl Runtime {
                             call.enter(self, method, &context.account)?;
                             context.doubao_rewards = Some(call);
                         }
-                        InvocationContext::CodeArtsRefresh(call) => {
-                            call.enter_once(self, method, &context.account)?;
-                            context.codearts_refresh = Some(call);
-                        }
                         InvocationContext::DesktopLaunch(call) => {
                             if !matches!(method, super::desktop_launch::declaration::CHECK | super::desktop_launch::declaration::PREPARE) {
                                 return Err(proto::WireError::with_code("本机启动上下文不能用于其他操作", "forbidden"));
@@ -399,7 +387,7 @@ impl Runtime {
                 context.permission("resources.cookie-file.v1")?;
                 context.supplied_cookie_file = Some(super::desktop_credentials::cookie_file::prepare(&params)?);
             }
-            if !context.account.is_empty() && context.codearts_refresh.is_none() && context.doubao_rewards.is_none() {
+            if !context.account.is_empty() && context.doubao_rewards.is_none() {
                 context.invoke("account.get", json!({})).await?;
             }
             if let Some(call) = &context.conversation { call.validate_context(&self.shared, &context.account)?; }

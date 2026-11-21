@@ -4,7 +4,7 @@ use rusqlite::{types::ValueRef, Connection, ErrorCode, Row};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-use super::{bounded, projection, Conflict, Error, StorageFailure, Version};
+use super::{bounded, Conflict, Error, StorageFailure, Version};
 use crate::server::core::account_store::{credential_version, state::StoredAccount};
 use crate::server::core::crypto;
 
@@ -25,10 +25,6 @@ pub(super) fn ensure_no_triggers(conn: &Connection) -> Result<(), Error> {
         return Err(Error::InvalidRecord);
     }
     Ok(())
-}
-
-pub(super) fn load(conn: &Connection, key: &[u8; 32], id: &str) -> Result<StoredAccount, Error> {
-    load_for(conn, key, projection::PROVIDER, id)
 }
 
 pub(super) fn load_for(
@@ -281,14 +277,6 @@ pub(super) fn set_version(record: &mut StoredAccount, version: &Version) {
     record.set(credential_version::PRIVATE_FIELD, json!({
         "schema": 1, "dbEpoch": version.epoch, "born": version.born, "revision": version.revision,
     }));
-}
-
-pub(super) fn update_existing(
-    conn: &Connection,
-    key: &[u8; 32],
-    record: &StoredAccount,
-) -> Result<(), Error> {
-    update_existing_for(conn, key, projection::PROVIDER, record)
 }
 
 pub(super) fn update_existing_for(

@@ -305,7 +305,6 @@ async fn call_with_retry_policy(
             let path = url.path();
             path.starts_with("/api/plugins/desktop-import/chatglm/")
                 || path.starts_with("/api/plugins/desktop-launch/")
-                || path.starts_with("/api/plugins/enrollment/codearts/")
                 || method.eq_ignore_ascii_case("PATCH") && path == "/api/plugins/permissions"
                 || method.eq_ignore_ascii_case("POST")
                     && (path == "/api/accounts"

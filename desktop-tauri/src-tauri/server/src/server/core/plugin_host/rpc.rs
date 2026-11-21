@@ -290,7 +290,7 @@ impl RpcAdapter {
                 .ok_or_else(|| GatewayError::with_status(503, "原账号存储尚未就绪"))?;
             let account = params["account"].as_str().unwrap_or("");
             if !account.is_empty() {
-                self.prepare_read_credentials(&store, account).await?;
+                self.ensure_access_token(&store, account).await?;
             }
         }
         super::account_egress::apply(&mut params)?;
@@ -802,7 +802,7 @@ impl ProviderAdapter for RpcAdapter {
 
     fn check_credentials_expiring<'a>(
         &'a self,
-        store: &'a AccountStore,
+        _store: &'a AccountStore,
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
@@ -811,9 +811,6 @@ impl ProviderAdapter for RpcAdapter {
                     .with_code("credential_refresh_check_unavailable"));
             }
             let execution = self.execution().await?;
-            if self.id == "codearts" && execution.host.options.wasm.is_some() {
-                super::rpc_refresh::readiness(store, self.id, account_id).await?;
-            }
             let value = execution.control(
                 proto::methods::gateway::TOKEN_EXPIRING,
                 execution.with_account(account_id),
@@ -1139,20 +1136,12 @@ impl ProviderAdapter for RpcAdapter {
 
     fn ensure_access_token<'a>(
         &'a self,
-        store: &'a AccountStore,
+        _store: &'a AccountStore,
         account_id: &'a str,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
-                && self.supports_refresh() && self.credentials_expiring_async(store, account_id).await {
-                // CodeArts 旧/手工材料没有登记时，尚未到期的访问仍可只读使用；不据临期补建续期资格。
-                // 已登记后的真实换证失败继续报错，不能沿用旧值冒充本次换证成功。
-                if super::rpc_refresh::readiness(store, self.id, account_id).await.is_ok() {
-                    return self.refresh_access_token(store, account_id).await;
-                }
-            }
             let value = self
                 .network(proto::methods::gateway::TOKEN_ENSURE, self.with_account(account_id))
                 .await?;
@@ -1171,15 +1160,9 @@ impl ProviderAdapter for RpcAdapter {
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let value = if self.id == "codearts" && self.metadata().host.options.wasm.is_some() {
-                let execution = self.execution().await?;
-                super::rpc_refresh::readiness(_store, self.id, account_id).await?;
-                let params = self.with_account(account_id);
-                let result = execution.host.call_wasm_codearts_refresh(params, NETWORK_TIMEOUT).await;
-                result.map_err(|error| rpc_error(self.id, error, proto::methods::gateway::TOKEN_REFRESH))?
-            } else {
-                self.network(proto::methods::gateway::TOKEN_REFRESH, self.with_account(account_id)).await?
-            };
+            let value = self
+                .network(proto::methods::gateway::TOKEN_REFRESH, self.with_account(account_id))
+                .await?;
             value
                 .as_str()
                 .map(str::to_string)
@@ -2107,17 +2090,6 @@ impl RpcAdapter {
                 "账号库尚未就绪，无法保存登录结果",
             ));
         };
-        if let Some(completed) = super::wasm::codearts_login::take(self.id, account) {
-            let origin = store.prepare_codearts_enrollment_origin().map_err(|_| GatewayError::with_status(503,"CodeArts 新登录的账号存储不可用"))?;
-            return match origin.commit_new_login(completed, proxy) {
-                crate::server::core::account_store::credential_version::EnrollmentCommitOutcome::Committed {receipt,..} => Ok(receipt.account().to_string()),
-                _ => Err(GatewayError::with_status(503,"CodeArts 登录已完成，但保存未确认；不会再次交换授权码")),
-            };
-        }
-        if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
-            && account.secret["refresh_token"].as_str().is_some_and(|token| !token.is_empty()) {
-            return Err(GatewayError::with_status(503, "CodeArts 新授权保存来源未确认，未改用普通导入或再次交换授权码"));
-        }
         let id = account.identity.clone();
         let name = account
             .public

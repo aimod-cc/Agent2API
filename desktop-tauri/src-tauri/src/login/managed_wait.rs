@@ -18,10 +18,16 @@ pub(super) async fn wait(
     generation: u64,
 ) -> Result<Value, String> {
     let result = wait_inner(app, provider, flow, started, instructions, generation).await;
-    if (result.is_err()
-        || result
-            .as_ref()
-            .is_ok_and(|value| value["payload"]["saved"].is_null()))
+    let is_unconfirmed = result.as_ref().is_ok_and(|value| {
+        value
+            .get("payload")
+            .and_then(|payload| payload.as_object())
+            .is_some_and(|payload| {
+                payload.get("phase").and_then(Value::as_str) == Some("unconfirmed")
+                    || payload.get("saved").is_some_and(Value::is_null)
+            })
+    });
+    if (result.is_err() || is_unconfirmed)
         && panel_session::revision() == generation
         && login_is_current(app, flow)
     {
@@ -62,7 +68,14 @@ async fn wait_inner(
         if panel_session::revision() != generation {
             return Err("管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。".into());
         }
-        if !login_is_current(app, flow) || Instant::now() >= deadline {
+        if !login_is_current(app, flow) {
+            return if read_only {
+                Err(UNKNOWN.into())
+            } else {
+                Ok(json!({ "ok": false, "canceled": true }))
+            };
+        }
+        if Instant::now() >= deadline {
             return Err(UNKNOWN.into());
         }
         let path = {
@@ -75,7 +88,11 @@ async fn wait_inner(
             return Err("管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。".into());
         }
         if !login_is_current(app, flow) {
-            return Err(UNKNOWN.into());
+            return if read_only {
+                Err(UNKNOWN.into())
+            } else {
+                Ok(json!({ "ok": false, "canceled": true }))
+            };
         }
         let value = reply.map_err(|_| UNKNOWN.to_string())?;
         match result::wait(&value, provider, flow, method_index)? {

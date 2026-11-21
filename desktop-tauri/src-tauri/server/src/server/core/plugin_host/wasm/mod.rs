@@ -12,8 +12,6 @@ pub(in crate::server) use catpaw_turn::output::{
 };
 pub(super) mod checkin_call;
 pub(in crate::server::core) use checkin_call::{OfficialDailyFact, ObservationView};
-pub(crate) mod codearts_enrollment;
-mod codearts_refresh;
 mod codearts_session;
 pub(crate) mod desktop_credentials;
 pub(crate) mod desktop_launch;

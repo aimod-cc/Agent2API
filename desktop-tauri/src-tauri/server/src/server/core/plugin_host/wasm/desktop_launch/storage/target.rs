@@ -11,15 +11,32 @@ use crate::server::core::agents::files;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Target {
-    JsonFile { path: PathBuf, fields: Vec<String>, create: bool },
+    JsonFile {
+        path: PathBuf,
+        fields: Vec<String>,
+        #[serde(default)]
+        prefixes: Vec<String>,
+        create: bool,
+    },
     Sqlite { path: PathBuf, table: String, key_column: String, value_column: String, keys: Vec<String> },
     Keyring { target: String, username: String },
+}
+
+fn json_managed(fields: &[String], prefixes: &[String], key: &str) -> bool {
+    super::super::declaration::json_field(key)
+        && (fields.iter().any(|field| field == key)
+            || prefixes.iter().any(|prefix| key.starts_with(prefix)))
 }
 
 impl Target {
     pub fn from_resource(resource: &Resource, executable: &Path) -> Result<Self, String> {
         Ok(match &resource.storage {
-            Storage::JsonFile { location, fields, create } => Self::JsonFile { path: paths::location(location, Some(executable))?, fields: fields.clone(), create: *create },
+            Storage::JsonFile { location, base_from, fields, prefixes, create } => Self::JsonFile {
+                path: paths::location_with_base(location, base_from.as_ref(), Some(executable))?,
+                fields: fields.clone(),
+                prefixes: prefixes.clone(),
+                create: *create,
+            },
             Storage::Sqlite { location, variants, table, key_column, value_column, keys } => {
                 let existing = std::iter::once(location).chain(variants).map(|location| paths::location(location, Some(executable)))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -99,7 +116,7 @@ impl Target {
 
     pub fn read(&self) -> Result<Value, String> {
         match self {
-            Self::JsonFile { path, fields, create } => {
+            Self::JsonFile { path, fields, prefixes, create } => {
                 paths::checked(path, *create)?;
                 let before = files::read_limited(path, 256 * 1024)?;
                 let mut result = Map::new();
@@ -107,6 +124,11 @@ impl Target {
                     let value = super::super::Secret(serde_json::from_slice(&Zeroizing::new(bytes)).map_err(|_| "客户端凭证文件格式不支持")?);
                     let source = value.as_object().ok_or("客户端凭证文件格式不支持")?;
                     for field in fields { result.insert(field.clone(), source.get(field).cloned().unwrap_or(Value::Null)); }
+                    for (key, item) in source {
+                        if prefixes.iter().any(|prefix| key.starts_with(prefix)) && super::super::declaration::json_field(key) {
+                            result.insert(key.clone(), item.clone());
+                        }
+                    }
                 } else if !create { return Err("客户端凭证文件不存在".into()); }
                 else { for field in fields { result.insert(field.clone(), Value::Null); } }
                 Ok(Value::Object(result))
@@ -128,7 +150,7 @@ impl Target {
     }
 
     pub fn snapshot(&self) -> Result<Value, String> {
-        let Self::JsonFile { path, fields, create } = self else { return self.read(); };
+        let Self::JsonFile { path, fields, prefixes, create } = self else { return self.read(); };
         paths::checked(path, *create)?;
         let bytes = files::read_limited(path, 256 * 1024)?.map(Zeroizing::new);
         let exists = bytes.is_some();
@@ -136,15 +158,33 @@ impl Target {
         let value = super::super::Secret(bytes.as_ref().map(|bytes| serde_json::from_slice(bytes)).transpose()
             .map_err(|_| "客户端凭证文件格式不支持")?.unwrap_or_else(|| Value::Object(Map::new())));
         let source = value.as_object().ok_or("客户端凭证文件格式不支持")?;
-        Ok(serde_json::json!({ "exists": exists, "fields": fields.iter().map(|field| (field.clone(), serde_json::json!({
+        let mut recorded = fields.iter().map(|field| (field.clone(), serde_json::json!({
             "present": source.contains_key(field), "value": source.get(field).cloned().unwrap_or(Value::Null),
-        }))).collect::<Map<_, _>>() }))
+        }))).collect::<Map<_, _>>();
+        for (key, item) in source {
+            if prefixes.iter().any(|prefix| key.starts_with(prefix)) && super::super::declaration::json_field(key) {
+                recorded.insert(key.clone(), serde_json::json!({ "present": true, "value": item.clone() }));
+            }
+        }
+        Ok(serde_json::json!({ "exists": exists, "fields": recorded }))
     }
 
     pub fn exposed(&self, snapshot: &Value) -> Value {
         match self {
-            Self::JsonFile { fields, .. } => Value::Object(fields.iter().map(|field|
-                (field.clone(), snapshot["fields"][field]["value"].clone())).collect()),
+            Self::JsonFile { fields, .. } => {
+                let mut map = Map::new();
+                for field in fields {
+                    map.insert(field.clone(), snapshot["fields"][field]["value"].clone());
+                }
+                if let Some(recorded) = snapshot["fields"].as_object() {
+                    for (key, item) in recorded {
+                        if !map.contains_key(key) && item["present"] == true {
+                            map.insert(key.clone(), item["value"].clone());
+                        }
+                    }
+                }
+                Value::Object(map)
+            }
             _ => snapshot.clone(),
         }
     }
@@ -152,12 +192,21 @@ impl Target {
     pub fn desired(&self, value: &Value) -> Result<Value, String> {
         if value.to_string().len() > 256 * 1024 { return Err("客户端凭证修改方案过大".into()); }
         match self {
-            Self::JsonFile { fields, .. } => {
+            Self::JsonFile { fields, prefixes, .. } => {
                 let values = value.as_object().ok_or("凭证修改必须是对象")?;
-                if values.len() != fields.len() || fields.iter().any(|field| !values.contains_key(field)) { return Err("插件试图修改未授权的凭证字段".into()); }
-                Ok(serde_json::json!({ "exists": true, "fields": fields.iter().map(|field| (field.clone(), serde_json::json!({
-                    "present": !value[field].is_null(), "value": value[field],
-                }))).collect::<Map<_, _>>() }))
+                if values.len() > 128 || fields.iter().any(|field| !values.contains_key(field))
+                    || values.keys().any(|key| !json_managed(fields, prefixes, key)) {
+                    return Err("插件试图修改未授权的凭证字段".into());
+                }
+                let mut recorded = fields.iter().map(|field| (field.clone(), serde_json::json!({
+                    "present": !values[field].is_null(), "value": values[field],
+                }))).collect::<Map<_, _>>();
+                for (key, item) in values {
+                    if prefixes.iter().any(|prefix| key.starts_with(prefix)) && !item.is_null() {
+                        recorded.insert(key.clone(), serde_json::json!({ "present": true, "value": item }));
+                    }
+                }
+                Ok(serde_json::json!({ "exists": true, "fields": recorded }))
             }
             Self::Sqlite { keys, .. } => {
                 let values = value.as_object().ok_or("数据库凭证修改必须是对象")?;
@@ -178,19 +227,34 @@ impl Target {
         let current = super::super::Secret(self.snapshot()?);
         if &current.0 != expect { return Err("客户端凭证已被其他程序修改，未覆盖".into()); }
         match self {
-            Self::JsonFile { path, fields, create } => {
+            Self::JsonFile { path, fields, prefixes, create } => {
                 let before = files::read_limited(path, 256 * 1024)?.map(Zeroizing::new);
                 let value: Value = before.as_ref().map(|bytes| serde_json::from_slice(bytes)).transpose().map_err(|_| "客户端凭证文件格式不支持")?.unwrap_or_else(|| Value::Object(Map::new()));
                 let mut value = super::super::Secret(value);
                 let source = value.as_object_mut().ok_or("客户端凭证文件格式不支持")?;
-                if expect["exists"] != Value::Bool(before.is_some()) || fields.iter().any(|field|
-                    expect["fields"][field]["present"] != Value::Bool(source.contains_key(field))
-                        || expect["fields"][field]["value"] != source.get(field).cloned().unwrap_or(Value::Null)) {
+                let expect_fields = expect["fields"].as_object().ok_or("客户端凭证文件已变化，未覆盖")?;
+                if expect["exists"] != Value::Bool(before.is_some())
+                    || fields.iter().any(|field|
+                        expect_fields.get(field).is_none_or(|item|
+                            item["present"] != Value::Bool(source.contains_key(field))
+                                || item["value"] != source.get(field).cloned().unwrap_or(Value::Null)))
+                    || source.iter().any(|(key, item)|
+                        prefixes.iter().any(|prefix| key.starts_with(prefix))
+                            && super::super::declaration::json_field(key)
+                            && expect_fields.get(key).is_none_or(|expected| expected["present"] != true || &expected["value"] != item))
+                    || expect_fields.iter().any(|(key, expected)|
+                        prefixes.iter().any(|prefix| key.starts_with(prefix))
+                            && expected["present"] == true
+                            && source.get(key) != Some(&expected["value"])) {
                     return Err("客户端凭证文件已变化，未覆盖".into());
                 }
-                for field in fields {
-                    let item = &desired["fields"][field];
-                    if item["present"] == true { source.insert(field.clone(), item["value"].clone()); } else { source.remove(field); }
+                source.retain(|key, _| !json_managed(fields, prefixes, key));
+                if let Some(desired_fields) = desired["fields"].as_object() {
+                    for (key, item) in desired_fields {
+                        if json_managed(fields, prefixes, key) && item["present"] == true {
+                            source.insert(key.clone(), item["value"].clone());
+                        }
+                    }
                 }
                 let latest = files::read_limited(path, 256 * 1024)?.map(Zeroizing::new);
                 if latest != before { return Err("客户端凭证文件已变化，未覆盖".into()); }
@@ -200,7 +264,10 @@ impl Target {
                     if !source.is_empty() { return Err("新建凭证文件已被其他程序添加内容，未删除".into()); }
                     if before.is_some() { std::fs::remove_file(path).map_err(|_| "新建凭证文件无法恢复为不存在")?; }
                 } else {
-                    let encoded = Zeroizing::new(serde_json::to_vec(&value.0).map_err(|_| "客户端凭证无法编码")?);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|_| "客户端凭证目录无法创建")?;
+                    }
+                    let encoded = Zeroizing::new(serde_json::to_vec_pretty(&value.0).map_err(|_| "客户端凭证无法编码")?);
                     files::write_atomic(path, &encoded)?;
                 }
             }

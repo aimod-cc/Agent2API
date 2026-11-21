@@ -357,18 +357,6 @@ pub fn is_reserved(key: &str) -> bool {
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
 pub const SCHEMA_VERSION: i64 = 30;
 
-/// CodeArts 未开放发送槽的封闭 DDL；只在其原连接耐久事务内按需建立空表。
-/// 尚未登记启动迁移或可信首次纳管，不改 user_version，也不因建表补任何 Ready 行。
-/// 账号、槽代次与状态均绑定在加密 payload 内；不存刷新令牌或 DPoP 私钥。
-pub(crate) const CODEARTS_REFRESH_SLOT_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS main.codearts_refresh_slots (
-  account_id TEXT NOT NULL PRIMARY KEY
-    CHECK (typeof(account_id) = 'text' AND octet_length(account_id) BETWEEN 1 AND 512),
-  payload TEXT NOT NULL
-    CHECK (typeof(payload) = 'text' AND octet_length(payload) BETWEEN 1 AND 8192)
-) WITHOUT ROWID;
-";
-
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
 /// 为什么把六张表写成一个 batch 而不是每张一个常量再拼：它们共同构成「版本 1

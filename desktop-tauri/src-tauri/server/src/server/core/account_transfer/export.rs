@@ -103,8 +103,9 @@ fn account_file(
         .cloned()
         .unwrap_or_default();
     content.retain(|key, _| !key.starts_with("pluginLedger."));
+    let plugin_secret = content.get("pluginSecret").cloned();
     // 插件凭证优先于顶层镜像；摊平后仍保留原始 secret，兼容凭证导入与备份回流。
-    if let Some(Value::Object(secret)) = record.get("pluginSecret") {
+    if let Some(Value::Object(secret)) = plugin_secret.as_ref() {
         // 旧记录的镜像可能已失效；插件 secret 是凭证的权威副本。
         for key in CREDENTIAL_KEYS {
             content.remove(*key);
@@ -171,19 +172,18 @@ fn account_file(
         "format".to_string(),
         Value::String(ACCOUNT_FILE_FORMAT.to_string()),
     );
-    if let Some(Value::Object(secret)) = record.get("pluginSecret") {
+    if let Some(Value::Object(secret)) = plugin_secret.as_ref() {
         let has_access = content
             .get("accessToken")
             .and_then(Value::as_str)
             .is_some_and(|token| !token.trim().is_empty());
         if !has_access {
-            if let Some(token) = ["token", "access_token", "session"].iter().find_map(|key| {
-                secret
-                    .get(*key)
-                    .and_then(Value::as_str)
-                    .filter(|token| !token.trim().is_empty())
-            }) {
-                content.insert("accessToken".to_string(), Value::String(token.to_string()));
+            let token = crate::server::core::account_store::raccoon_accounts::first_non_empty(
+                secret,
+                &["token", "access_token", "session"],
+            );
+            if !token.is_empty() {
+                content.insert("accessToken".to_string(), Value::String(token));
             }
         }
     }

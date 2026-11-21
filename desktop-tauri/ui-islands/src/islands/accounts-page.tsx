@@ -157,12 +157,17 @@ function AccountsPage() {
   }, [filterSignature, store.groupTotalFiltered])
   React.useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0 }, [paging.page, paging.size])
   const [groupOrderOpen, setGroupOrderOpen] = React.useState(false)
-  /** 整组允许仅按启用状态筛选；其他筛选或分页仍锁定，组内行不受筛选限制。 */
-  const groupFilterLocked = store.filter.provider !== 'all'
-    || store.filter.q.trim() !== ''
-    || store.filter.limit !== 'all'
-  const groupLocked = groupFilterLocked || paging.paged || remoteTotal > 50
-  const lockReason = groupFilterLocked ? t('清除筛选') : t('通过「调整提供商顺序」管理组顺位')
+  const groupLocked = allGroups.length < 2 || store.filter.provider !== 'all'
+  const groupUnavailableMessage = allGroups.length < 2
+    ? t('只有一个提供商，无需调整顺位')
+    : store.filter.provider !== 'all'
+      ? t('当前只筛选了单个提供商，请先切回「全部」或使用「调整提供商顺序」')
+      : filterActive()
+        ? t('当前筛选只显示了 1 个提供商，可清除筛选或使用「调整提供商顺序」')
+        : paging.paged
+          ? t('当前页只显示了 1 个提供商，可折叠分组、每页选「全部」或使用「调整提供商顺序」')
+          : t('当前视口只显示了 1 个提供商，可先折叠分组或使用「调整提供商顺序」')
+  const groupGripLocked = groupLocked || groups.length < 2
 
   // 代理列的选项（「网络代理」页的池条目）没就绪就补拉（节流 30 秒，失败不缓存）。
   // Clash 出口那一组已经不在这一页了 —— 出口统一由代理页的「同步 Clash Verge」
@@ -274,51 +279,37 @@ function AccountsPage() {
     + (store.filter.enabled !== 'all' ? 1 : 0)
     + (store.filter.limit !== 'all' ? 1 : 0)
   /**
-   * 拖拽的落点处理：把「谁挪到了第几位」翻成一条**完整队列**再交给后端。
+   * 拖拽的落点处理：把「谁挪到了哪个目标前后」翻成一条**完整队列**再交给后端。
    *
-   * 队列从分组的 `members`（全量，含折叠起来的组）拼，而不是从 DOM 现查：折叠的组
-   * 在 DOM 里没有行，而后端要求「全部账号的一个排列」（少一个都会 400）。
-   * 落点下标由拖拽模块给（按同级兄弟项的中点比出来），这里只做数组搬迁；
-   * 筛选 / 搜索 / 分页裁行裁组时按锚点换算回全量（见两处分支的说明）。
+   * 队列从分组的 `queueMembers`（全量，含折叠 / 被筛选 / 分页未渲染的账号）拼，
+   * 而后端要求「全部可见账号的一个排列」（少一个都会 400）。
+   * 拖拽模块直接回传目标 `targetProvider` / `targetAccountId` 与 `after`，
+   * 这里在全量列表里定位锚点并搬迁，因此分页、虚拟滚动、折叠或筛选下都不会错位。
    */
-  /** 拖拽要看两份分组：`all` 用来拼**完整**队列（被筛选挡住的组不渲染，但它家的账号
-   *  仍在队列里，少一条就会被后端按「队列不完整」400 拒掉）；`displayed` 用来把落点
-   *  下标（按渲染出来的组数出来的）换算成「插在哪个可见组之前」的锚点；`renderedRows`
-   *  给组内行做同一件事 —— 组内落点按**真画出来的行**（本页那一段）换算，见 onDrop。 */
-  const renderedRows = React.useRef(new Map<string, string[]>())
-  const dragRef = React.useRef({ displayed: groups, all: allGroups, renderedRows: renderedRows.current })
-  const setRenderedRows = React.useCallback((rows: Map<string, string[]>) => {
-    renderedRows.current = rows
-    dragRef.current.renderedRows = rows
-  }, [])
-  React.useEffect(() => { dragRef.current = { displayed: groups, all: allGroups, renderedRows: renderedRows.current } })
+  const dragRef = React.useRef({ all: allGroups })
+  React.useEffect(() => { dragRef.current = { all: allGroups } })
   /** 拖拽模块的处理器（绑定一次、读最新值，见下面的 effect） */
   const dragHandlers = React.useRef({
     locked: false,
-    lockReason: '',
+    unavailableMessage: '',
     onDrop: (_drop: QueueDrop) => {},
   })
   const onDrop = React.useCallback((drop: QueueDrop) => {
-    const { displayed, all: current } = dragRef.current
+    const { all: current } = dragRef.current
     if (drop.kind === 'group') {
       if (dragHandlers.current.locked) return
       const from = current.findIndex(group => group.provider === drop.provider)
-      const visibleFrom = displayed.findIndex(group => group.provider === drop.provider)
-      if (from < 0 || visibleFrom < 0) return
-      const visible = displayed.filter(group => group.provider !== drop.provider)
-      if (!visible.length || drop.index < 0 || drop.index > visible.length || drop.index === visibleFrom) return
+      if (from < 0) return
       const moved = current[from]
       const rest = current.filter((_, position) => position !== from)
-      // index 按移除被拖组后的可见列表计数；末尾落点只放在最后一个可见组之后。
-      const anchor = visible[drop.index] || visible[visible.length - 1]
-      const at = rest.findIndex(group => group.provider === anchor.provider)
+      const at = rest.findIndex(group => group.provider === drop.targetProvider)
       if (at < 0) return
-      const to = at + (drop.index === visible.length ? 1 : 0)
+      const to = at + (drop.after ? 1 : 0)
       if (to === from) return
       const next = [...rest.slice(0, to), moved, ...rest.slice(to)]
       // 整组移动不覆盖组内手动兜底；自动消耗规则仍由网关动态执行。
       const queue = next.flatMap(group => group.queueMembers.map(account => account.id))
-      void reorderQueue(queue, t('{name} 移到第 {rank} 顺位', { name: moved.label, rank: to + 1 }))
+      void reorderQueue(queue, t('{name} 移到第 {rank} 顺位', { name: t(moved.label), rank: to + 1 }))
       return
     }
     const orderRules = activeGroupSortRules(drop.provider, groupSortRules(drop.provider))
@@ -333,18 +324,9 @@ function AccountsPage() {
     if (from < 0) return
     const moved = group.queueMembers[from]
     const rest = group.queueMembers.filter((_, position) => position !== from)
-    // 落点下标来自**渲染出来的**那些行（筛选 / 搜索 / 分页会把组内的行裁掉一部分），
-    // 而重排要的是完整 members —— 按锚点换算：插到第 N 个渲染行之前 = 完整 members
-    // 里那行所在的下标之前；N 等于渲染行数 = 插到组尾（被裁掉的行留在原处）。
-    // 渲染行从 dragRef 取（而不是 group.accounts 的全量可见行）：分页把一组的行切成
-    // 两页时，DOM 里只有本页那一段，锚点必须按「真画出来的行」数，否则错一位。
-    // 与组顺位分支（displayed → all）同一个手法：可见与全量的映射是确定的，错不了位。
-    const visible = dragRef.current.renderedRows.get(drop.provider) || []
-    const others = visible.filter(id => id !== drop.accountId)
-    const anchor = others[drop.index] || null
-    const last = others.at(-1)
-    const at = anchor ? rest.findIndex(account => account.id === anchor) : last ? rest.findIndex(account => account.id === last) + 1 : from
-    const to = at < 0 ? from : at
+    const at = rest.findIndex(account => account.id === drop.targetAccountId)
+    if (at < 0) return
+    const to = at + (drop.after ? 1 : 0)
     if (to === from) return
     const nextMembers = [...rest.slice(0, to), moved, ...rest.slice(to)]
     const next = current.map(item => item.provider === drop.provider
@@ -359,14 +341,14 @@ function AccountsPage() {
   // 顺序拖拽（组顺位 / 组内顺位）：委托在滚动容器上，表格整表重画后监听仍然有效。
   // 绑定只做一次（与列宽拖拽同一手法）—— 处理器经 ref 读最新值：锁状态与分组
   // 每次渲染都会变，若把它们做进依赖数组，每变一次就往容器上再挂一份监听。
-  React.useEffect(() => { dragHandlers.current = { locked: groupLocked, lockReason, onDrop } })
+  React.useEffect(() => {
+    dragHandlers.current = { locked: groupLocked, unavailableMessage: groupUnavailableMessage, onDrop }
+  })
   React.useEffect(() => {
     bindQueueDrag(listRef.current, {
       isLocked: () => dragHandlers.current.locked,
-      onLockedAttempt: () => toast(
-        t('当前列表不能拖动整组，请使用「调整提供商顺序」'),
-        'err',
-      ),
+      onLockedAttempt: () => toast(dragHandlers.current.unavailableMessage, 'err'),
+      onGroupUnavailable: () => toast(dragHandlers.current.unavailableMessage, 'err'),
       isRowLocked: provider => activeGroupSortRules(provider, groupSortRules(provider)).length > 0,
       onRowLockedAttempt: provider => toast(
         manualOrderBlockedMessage(activeGroupSortRules(provider, groupSortRules(provider))),
@@ -526,12 +508,6 @@ function AccountsPage() {
               ? t('{groups} 家 · 显示 {rows} 行', { groups: groups.length, rows: visibleIds.length })
               : ''}
           </span>
-          {/* 锁定条只管**组顺位**（组内行按可见行换算落点，筛选下照常拖得动） */}
-          {groupLocked ? (
-            <span className='batch-hidden' title={lockReason}>
-              {t('组顺位已锁定')}
-            </span>
-          ) : null}
           {filterActive() ? (
             <Button id='btn-clear-filter' variant='ghost' size='xs'
               title={t('清空搜索与三个筛选档位，回到全部账号')}
@@ -605,7 +581,8 @@ function AccountsPage() {
                 disabled={!visibleIds.length} onToggleAll={next => setAllPicked(visibleIds, next)} />
               <AccountsListBody groups={groups} accounts={pageRows} collapsed={store.collapsed} columns={columns.length}
                 continuous={!paging.paged} total={accountList.data?.displayTotal ?? shown.length} scrollRef={listRef}
-                loadMore={accountList.loadMore} renderRow={renderRow} onRenderedRows={setRenderedRows} />
+                loadMore={accountList.loadMore} renderRow={renderRow}
+                groupLocked={groupGripLocked} groupLockTitle={groupUnavailableMessage} />
             </Table>
           )}
         </div>

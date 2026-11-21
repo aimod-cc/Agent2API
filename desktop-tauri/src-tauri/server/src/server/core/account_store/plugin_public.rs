@@ -25,7 +25,18 @@ pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String,
     } else {
         &["refreshToken", "refresh_token", "refresh"]
     };
-    let has_refresh = token_present(record, public, refresh_keys, "hasRefreshToken");
+    let is_raccoon = record.provider() == super::RACCOON_PROVIDER_ID && !record.is_desktop();
+    let has_refresh = if is_raccoon {
+        let fields = secret.unwrap_or(record.fields());
+        let access = super::raccoon_accounts::first_non_empty(
+            fields,
+            &["accessToken", "access_token", "token", "auth_token"],
+        );
+        let refresh = super::raccoon_accounts::first_non_empty(fields, refresh_keys);
+        super::raccoon_accounts::has_valid_refresh_token(&access, &refresh)
+    } else {
+        token_present(record, public, refresh_keys, "hasRefreshToken")
+    };
     let read_only = record.is_desktop()
         && secret.and_then(|fields| fields.get("desktopReadOnly")).and_then(Value::as_bool) == Some(true);
     // 有刷新材料不代表可消费：实际本机只读引用由官方客户端维护，不能合成续期许可。
@@ -37,6 +48,8 @@ pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String,
             [fields.get(*key), fields.get(alias)].into_iter().flatten().any(|value|
                 value.as_str().is_some_and(|value| !value.trim().is_empty()))
         })
+    } else if is_raccoon {
+        has_refresh
     } else {
         public.get("canRefresh").and_then(Value::as_bool).unwrap_or(false) || has_refresh
     };

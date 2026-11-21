@@ -151,7 +151,6 @@ pub mod plugin_login;
 pub mod plugin_helpers;
 pub mod plugin_desktop_import;
 pub mod plugin_desktop_launch;
-pub mod plugin_codearts_enrollment;
 pub mod plugin_permissions;
 pub mod plugin_icons;
 pub mod plugin_provider_settings;

@@ -507,7 +507,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       }
       if (method.type !== 'oauth' && method.type !== 'sms') throw new Error(t('请先选择有效的登录方式'))
       loginProxy.current = proxy
-      loginRemark.current = hasNamePrompt ? '' : name.trim()
+      loginRemark.current = method.type === 'sms' || hasNamePrompt ? '' : name.trim()
       const startedAt = performance.now()
       const initialBoot = originBoot()
       const managementGeneration = managedLoginSourceGeneration()
@@ -578,6 +578,14 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
         if (mounted.current && serverIdentity() === identity) setBusy(false)
       }
     }
+  }
+
+  async function startSmsFlow(): Promise<boolean> {
+    if (submitLocked || submitting.current || canceling || !method || methods.phase !== 'ready') {
+      throw new Error(t('正在处理本次登录，请勿重复提交。'))
+    }
+    await submit()
+    return Boolean(flowRef.current)
   }
 
   async function cancelPendingStart() {
@@ -688,14 +696,21 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
     method?.browserMode === 'plugin' && !method.embeddedOnly ? pluginBrowserInstructions(provider) : '', progress)
 
   return <div className='plugin-account-form' hidden={!active}>
-    {flow?.state && (!flow.managed || interactionCurrent(flow)) ? <PluginLoginInteraction key={flow.state} flow={flow.state} t={t} openExternal={openExternal}
-      managed={managedScope} request={interactionRequest} /> : null}
     {methods.phase === 'loading' ? <p><Spinner /> {t('正在读取插件登录方式…')}</p> : null}
     {methods.reason ? <Alert variant={methods.phase === 'error' ? 'destructive' : 'warning'}>
       <AlertDescription>{methods.reason}</AlertDescription></Alert> : null}
     {method ? <>
       <PluginLoginMethodPicker methods={methods.methods} value={method.id} disabled={locked}
         onChange={value => { setSelected(value); setValues({}); setUpload(undefined); setPassword(''); clearCallback(); setError('') }} />
+      {(flow?.state && (!flow.managed || interactionCurrent(flow)))
+        || (methods.phase === 'ready' && method.type === 'sms' && Boolean(method.sms) && !method.reason)
+        ? <PluginLoginInteraction
+          key={methods.phase === 'ready' && method.type === 'sms' ? `sms:${provider}:${method.id}` : flow?.state}
+          flow={flow?.state && (!flow.managed || interactionCurrent(flow)) ? flow.state : ''} t={t} openExternal={openExternal}
+          smsConfig={methods.phase === 'ready' && method.type === 'sms' && !method.reason ? method.sms : undefined}
+          onStartSms={startSmsFlow} startingSms={busy || Boolean(flow)}
+          smsStartDisabled={submitLocked || Boolean(method.reason)}
+          managed={managedScope} request={interactionRequest} /> : null}
       {method.reason ? <Alert variant='warning'><AlertDescription>{method.reason}</AlertDescription></Alert> : null}
       {instructions ? <p className='plugin-login-instructions'>{instructions}</p> : null}
       <PluginLoginBrowser method={method} provider={provider} desktop={false} value='external' onChange={() => undefined} disabled={locked} />
@@ -704,8 +719,8 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       <PluginLoginFields method={method} values={inputs} prompts={formPrompts} prefix={prefix} disabled={locked}
         upload={upload} onUpload={setUpload} onReading={setReadingFile}
         onChange={(key, value) => setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [key]: value } }))} />
-      <PluginLoginOptions disabled={locked} summary={`${accountName || t('默认账号名')} · ${proxyLabel}`}>
-        {optionalName || !hasNamePrompt ? <div className='plugin-login-field'>
+      <PluginLoginOptions disabled={locked} summary={method.type === 'sms' ? proxyLabel : `${accountName || t('默认账号名')} · ${proxyLabel}`}>
+        {method.type !== 'sms' && (optionalName || !hasNamePrompt) ? <div className='plugin-login-field'>
           <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>
           <Input id={`${prefix}-name`} value={accountName} maxLength={100} disabled={locked}
             onChange={event => {
@@ -749,7 +764,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       <p className='plugin-login-note'>{t('所选代理会保存到账号设置，后续请求继续使用。')}</p>
       </PluginLoginOptions>
       <PluginLoginActions host={footerHost} active={active}>
-        <Button disabled={submitLocked || Boolean(method.reason)} hidden={method.type === 'sms' && Boolean(flow)} onClick={() => void submit()}>
+        <Button disabled={submitLocked || Boolean(method.reason)} hidden={method.type === 'sms'} onClick={() => void submit()}>
           {busy || resolvedPrompts.pending ? <Spinner /> : null}
           {method.type === 'api' || method.type === 'desktop' ? t('添加账号') : method.type === 'sms' ? t('开始短信登录') : t('登录并添加')}
         </Button>

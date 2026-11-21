@@ -8,8 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::{Connection, ErrorCode};
 
-use super::{CredentialSource, Db};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CodeArtsStorageError {
     Unavailable,
@@ -40,47 +38,6 @@ pub(crate) enum CodeArtsTransaction<T, E> {
         value: T,
         storage_closed: bool,
     },
-}
-
-impl Db {
-    /// 调用方已持原 AccountStore 锁；来源只核对原 Db 对象及私有 Arc，不重新 prepare。
-    /// action 只能做同库、有界 SQL；不能出网、await、另起事务、重取外层锁或签发许可。
-    pub(crate) fn codearts_slot_transaction<T, E>(
-        &self,
-        source: &CredentialSource,
-        action: impl FnOnce(&Connection) -> Result<T, E>,
-    ) -> CodeArtsTransaction<T, E> {
-        let mut commit = None;
-        self.codearts_slot_transaction_with_fact(source, &mut commit, action)
-    }
-
-    /// 只为原固定存储路径外持COMMIT事实；不是新来源或可重复使用的提交许可。
-    /// commit须在调用方catch_unwind外持有，已非None时不进连接、不执行action、不改写事实。
-    pub(crate) fn codearts_slot_transaction_with_fact<T, E>(
-        &self,
-        source: &CredentialSource,
-        commit: &mut Option<bool>,
-        action: impl FnOnce(&Connection) -> Result<T, E>,
-    ) -> CodeArtsTransaction<T, E> {
-        if commit.is_some() {
-            return unavailable();
-        }
-        let state = match self.inner.conn.lock() {
-            Ok(state) => state,
-            Err(_) => return unavailable(),
-        };
-        if self.inner.task_guard_unusable.load(Ordering::Acquire) {
-            return unavailable();
-        }
-        if !source.matches(self, &state) {
-            return CodeArtsTransaction::NotEntered {
-                error: CodeArtsStorageError::SourceChanged,
-                storage_closed: state.is_autocommit(),
-            };
-        }
-        let conn: &Connection = &state;
-        full_transaction_with_fact(conn, &self.inner.task_guard_unusable, commit, action)
-    }
 }
 
 /// 只供原连接已受锁的宿主存储/恢复链复用；本入口不接账号、许可或外部状态。

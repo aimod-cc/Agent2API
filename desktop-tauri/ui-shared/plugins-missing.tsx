@@ -1,11 +1,10 @@
 import * as React from 'react'
-import { Alert, Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, Label, SegmentedControl } from '@ui'
+import { Alert, Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Label } from '@ui'
 import { PluginArtwork } from './plugin-artwork'
 import type { HiddenAccountProvider } from './plugins'
 import type { PluginBatchItem } from './plugins-batch-items'
 import type { PluginTranslate } from './plugins-store'
 
-type MissingPane = 'required' | 'optional'
 type MissingStep = 'pick' | 'confirm'
 
 export function PluginMissingBanner({ count, accounts, onOpen, t }: { count: number; accounts: number; onOpen(): void; t: PluginTranslate }) {
@@ -33,36 +32,36 @@ function PluginMissingRows({ items, selected, disabled, onToggle, t }: {
   </div>)}</div>
 }
 
-export function PluginMissingDialog({ required, optional, unresolved, disabled, onClose, onInstall, t }: {
-  required: PluginBatchItem[]; optional: PluginBatchItem[]; unresolved: HiddenAccountProvider[]; disabled: boolean
+export function PluginMissingDialog({ required, unresolved, disabled, onClose, onInstall, t }: {
+  required: PluginBatchItem[]; unresolved: HiddenAccountProvider[]; disabled: boolean
   onClose(): void; onInstall(items: PluginBatchItem[]): void; t: PluginTranslate
 }) {
   const [selected, setSelected] = React.useState(() => new Set(required.filter(item => item.installable && !item.active).map(item => item.key)))
-  const [pane, setPane] = React.useState<MissingPane>(() => required.length ? 'required' : 'optional')
+  const knownKeys = React.useRef(new Set(required.map(item => item.key)))
+  React.useEffect(() => {
+    const valid = new Set(required.map(item => item.key))
+    const newlyInstallable = required
+      .filter(item => !knownKeys.current.has(item.key) && item.installable && !item.active)
+      .map(item => item.key)
+    knownKeys.current = valid
+    setSelected(previous => {
+      const next = new Set([...previous].filter(key => valid.has(key)))
+      newlyInstallable.forEach(key => next.add(key))
+      return next.size === previous.size && [...next].every(key => previous.has(key)) ? previous : next
+    })
+  }, [required])
   const [step, setStep] = React.useState<MissingStep>('pick')
-  const [query, setQuery] = React.useState('')
   const [trusted, setTrusted] = React.useState(false)
   const [trustedSource, setTrustedSource] = React.useState('')
   const bodyRef = React.useRef<HTMLDivElement>(null)
-  const all = [...required, ...optional]
-  const picked = all.filter(item => selected.has(item.key) && item.installable && !item.active)
+  const picked = required.filter(item => selected.has(item.key) && item.installable && !item.active)
   const scriptPicked = picked.filter(item => item.kind === 'script')
-  const accounts = picked.filter(item => item.required).reduce((sum, item) => sum + item.accounts, 0)
+  const accounts = picked.reduce((sum, item) => sum + item.accounts, 0)
   const scripts = scriptPicked.length > 0
   const sourceKey = JSON.stringify(scriptPicked.map(item => [item.key, item.source, item.selector, item.version]))
   const sourcesTrusted = trusted && trustedSource === sourceKey
   const activeStep: MissingStep = step === 'confirm' && scripts ? 'confirm' : 'pick'
-  const showTabs = required.length > 0 && optional.length > 0
-  const activePane: MissingPane = showTabs ? pane : required.length > 0 || !optional.length ? 'required' : 'optional'
-  const keyword = query.trim().toLocaleLowerCase()
-  const optionalRows = optional.filter(item => !keyword || `${item.name} ${item.sourceLabel} ${item.source || ''}`.toLocaleLowerCase().includes(keyword))
-  const optionalKeys = optionalRows.filter(item => item.installable && !item.active).map(item => item.key)
   const toggle = (key: string, checked: boolean) => { setTrusted(false); setSelected(previous => { const next = new Set(previous); checked ? next.add(key) : next.delete(key); return next }) }
-  const toggleOptionalGroup = () => {
-    const checked = !optionalKeys.every(key => selected.has(key))
-    setTrusted(false)
-    setSelected(previous => { const next = new Set(previous); optionalKeys.forEach(key => checked ? next.add(key) : next.delete(key)); return next })
-  }
   const resetBodyScroll = () => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }
   const unresolvedAlert = unresolved.length
     ? <Alert variant='warning' className='shrink-0'><p>{t('以下提供商暂未找到对应的可安装插件：{names}', { names: unresolved.map(item => item.label).join(t('、')) })}</p></Alert>
@@ -76,34 +75,11 @@ export function PluginMissingDialog({ required, optional, unresolved, disabled, 
           ? t('本次包含 {count} 个脚本插件，请确认来源与运行说明后开始安装。', { count: scriptPicked.length })
           : t('安装并成功加载后，现有账号和原有计划会自动恢复。')}</p>
       </div></DialogHeader>
-      {activeStep === 'pick' && showTabs ? <div className='shrink-0 border-b border-hairline px-5 py-3'>
-        <SegmentedControl<MissingPane> value={activePane} aria-label={t('补全缺失的插件')} disabled={disabled}
-          className='max-w-full [&_[data-slot=segmented-item]]:h-7 [&_[data-slot=segmented-item]]:px-3 max-[767px]:[&_[data-slot=segmented-item]]:h-9'
-          options={[
-            { value: 'required', label: t('恢复现有账号'), count: required.length },
-            { value: 'optional', label: t('可选安装'), count: optional.length },
-          ]}
-          onValueChange={value => { setPane(value); resetBodyScroll() }} />
-      </div> : null}
-      <DialogBody ref={bodyRef} className={activeStep === 'pick' && activePane === 'optional' ? 'min-h-0 gap-3 overflow-hidden' : 'min-h-0 gap-4'}>
+      <DialogBody ref={bodyRef} className='min-h-0 gap-4'>
         {activeStep === 'pick' ? <>
-          {activePane === 'required' ? <>
-            {unresolvedAlert}
-            {required.length ? <PluginMissingRows items={required} selected={selected} disabled={disabled} onToggle={toggle} t={t} /> : null}
-            {!all.length && !unresolved.length ? <p className='text-sm text-muted-foreground'>{t('没有缺失的插件')}</p> : null}
-          </> : <>
-            {!required.length ? unresolvedAlert : null}
-            <div className='flex shrink-0 items-center gap-2'>
-              <Input type='search' value={query} className='min-w-0 flex-1' placeholder={t('搜索插件')} aria-label={t('搜索可选插件')}
-                onChange={event => setQuery(event.currentTarget.value)} />
-              <Button variant='outline' size='sm' className='shrink-0' disabled={disabled || !optionalKeys.length} onClick={toggleOptionalGroup}>{t('全选本组')}</Button>
-            </div>
-            <div className='min-h-0 overflow-y-auto'>
-              {optionalRows.length
-                ? <PluginMissingRows items={optionalRows} selected={selected} disabled={disabled} onToggle={toggle} t={t} />
-                : <p className='m-0 py-8 text-center text-xs text-muted-foreground'>{t('没有符合筛选条件的插件')}</p>}
-            </div>
-          </>}
+          {unresolvedAlert}
+          {required.length ? <PluginMissingRows items={required} selected={selected} disabled={disabled} onToggle={toggle} t={t} /> : null}
+          {!required.length && !unresolved.length ? <p className='text-sm text-muted-foreground'>{t('没有缺失的插件')}</p> : null}
         </> : <>
           <ul className='plugins-confirm-list min-h-0 max-h-[min(220px,30vh)] overflow-y-auto'>{scriptPicked.map(item => <li key={item.key}>
             <PluginArtwork src={item.icon} />

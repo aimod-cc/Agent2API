@@ -18,14 +18,15 @@ export type AccountsBodyProps = {
   scrollRef: React.RefObject<HTMLDivElement | null>
   loadMore: () => Promise<void>
   renderRow: (account: AccountRecord, rank: number, index?: number, measure?: (element: HTMLTableRowElement | null) => void) => React.ReactNode
-  onRenderedRows: (rows: Map<string, string[]>) => void
+  groupLocked?: boolean
+  groupLockTitle?: string
 }
 
 type Item = { key: string; group: AccountGroup; account?: AccountRecord; rank?: number }
 type VisibleItem = { key: string | number | bigint; index: number; start: number; end: number; size: number }
 
 export function AccountsListBody(props: AccountsBodyProps) {
-  const { groups, accounts, collapsed, columns, continuous, total, scrollRef, loadMore, renderRow, onRenderedRows } = props
+  const { groups, accounts, collapsed, columns, continuous, total, scrollRef, loadMore, renderRow, groupLocked, groupLockTitle } = props
   const byProvider = React.useMemo(() => {
     const map = new Map<string, AccountRecord[]>()
     for (const account of accounts) {
@@ -76,17 +77,30 @@ export function AccountsListBody(props: AccountsBodyProps) {
     const host = scrollRef.current
     if (!host) return
     const start = (event: PointerEvent) => {
+      if (event.button !== 0) return
       const target = event.target as Element | null
-      if (target?.closest('.order-grip')) setDraggedKey(target.closest<HTMLElement>('tr[data-id]')?.dataset.id || null)
+      if (target?.closest('.order-grip')) {
+        setDraggedKey(target.closest<HTMLElement>('tr[data-id]')?.dataset.id || null)
+      } else if (target?.closest('.queue-grip')) {
+        const provider = target.closest<HTMLElement>('.acct-group, tr[data-provider]')?.dataset.provider
+        setDraggedKey(provider ? `group:${provider}` : null)
+      }
     }
     const finish = () => setDraggedKey(null)
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDraggedKey(null)
+    }
     host.addEventListener('pointerdown', start)
     window.addEventListener('pointerup', finish)
     window.addEventListener('pointercancel', finish)
+    window.addEventListener('blur', finish)
+    window.addEventListener('keydown', onKeyDown)
     return () => {
       host.removeEventListener('pointerdown', start)
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', finish)
+      window.removeEventListener('blur', finish)
+      window.removeEventListener('keydown', onKeyDown)
     }
   }, [scrollRef])
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLTableRowElement>({
@@ -119,22 +133,17 @@ export function AccountsListBody(props: AccountsBodyProps) {
     if (continuous && accounts.length < total && (!virtual || !last || last.index >= items.length - 12)) void loadMore()
   }, [continuous, accounts.length, total, virtual, last?.index, items.length, loadMore])
   React.useLayoutEffect(() => {
-    const map = new Map<string, string[]>()
+    const ids: string[] = []
     for (const item of visible) {
       const row = items[item.index]
-      if (!row?.account) continue
-      const ids = map.get(row.group.provider) || []
-      ids.push(row.account.id)
-      map.set(row.group.provider, ids)
+      if (row?.account) ids.push(row.account.id)
     }
-    onRenderedRows(map)
-    const ids = [...map.values()].flat()
     if (JSON.stringify(ids) !== JSON.stringify(getStore().visibleUsageIds)) {
       patch({ visibleUsageIds: ids })
       const timer = window.setTimeout(() => { void syncBalancesSnapshot() }, 150)
       return () => window.clearTimeout(timer)
     }
-  }, [visible.map(item => item.key).join('|'), onRenderedRows])
+  }, [visible.map(item => item.key).join('|')])
   const top = virtual ? Math.max(0, (visible[0]?.start || headerHeight) - headerHeight) : 0
   const bottom = virtual ? Math.max(0, virtualizer.getTotalSize() + headerHeight - (last?.end || headerHeight)) : 0
   const sections: Array<{ group: AccountGroup; rows: typeof visible; gap: number }> = []
@@ -151,7 +160,7 @@ export function AccountsListBody(props: AccountsBodyProps) {
     {sections.map(({ group, rows, gap }) => <React.Fragment key={group.provider}>
       {gap > 0 ? <Spacer height={gap} columns={columns} /> : null}
       <TableBody className='acct-group' data-provider={group.provider}>
-      {!items[rows[0].index]?.account ? null : <GroupBandRow group={group} collapsed={false} colSpan={columns} stickyTop={headerHeight} />}
+      {!items[rows[0].index]?.account ? null : <GroupBandRow group={group} collapsed={false} colSpan={columns} stickyTop={headerHeight} groupLocked={groupLocked} groupLockTitle={groupLockTitle} />}
       {rows.map((row, index) => {
         const item = items[row.index]
         const gap = virtual && index > 0 ? Math.max(0, row.start - rows[index - 1].end) : 0
@@ -162,7 +171,8 @@ export function AccountsListBody(props: AccountsBodyProps) {
             : <GroupBandRow group={group} collapsed={collapsed.has(group.provider)} colSpan={columns}
               pageCount={continuous ? undefined : byProvider.get(group.provider)?.length || 0}
               stickyTop={virtual && headings.get(group.provider) === row.index ? headerHeight : undefined}
-              virtualIndex={virtual ? row.index : undefined} measure={virtual ? virtualizer.measureElement : undefined} />}
+              virtualIndex={virtual ? row.index : undefined} measure={virtual ? virtualizer.measureElement : undefined}
+              groupLocked={groupLocked} groupLockTitle={groupLockTitle} />}
         </React.Fragment>
       })}
     </TableBody></React.Fragment>)}

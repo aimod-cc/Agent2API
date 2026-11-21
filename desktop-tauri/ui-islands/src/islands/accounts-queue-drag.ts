@@ -2,48 +2,33 @@
  * 分组模式下的**顺序拖拽**（组顺位 / 组内顺位）—— 指针事件实现，不引拖拽库。
  *
  * ── 为什么是指针事件，不是 HTML5 拖放 ─────────────────────────
- * 与列宽拖拽、列设置面板的排序同一取舍：拖拽过程中列表每 2 秒会被连接数轮询重绘
- * 一次，而 HTML5 拖放的会话绑在**那个节点**上，一重绘就断；指针事件的状态只在
- * JS 变量里，节点被 React 换掉也不影响会话（本模块每帧从 DOM 现查一次落点）。
+ * 与列宽拖拽、列设置面板的排序同一取舍：拖拽过程中列表会被连接数轮询或虚拟滚动
+ * 重绘，而 HTML5 拖放的会话绑在**那个节点**上，一重绘就断；指针事件的状态只在
+ * JS 变量里，每帧从当前 DOM 现查同级节点与落点，并在靠近滚动容器边缘时自动滚动。
  *
- * ── 落点提示为什么不插节点 ──────────────────────────────────
- * tbody 归 React 管，往里塞一个自造的 `<tr>` 会在下一次 diff 时被清掉。这里改成
- * 在**目标行上加一个类**（`.drop-before` / `.drop-after`），插入线由 CSS 的
- * inset box-shadow 画 —— 不动布局、不产生高度跳变，也不用与 React 抢节点。
- * 类能留在 DOM 上，靠的是那些行的 className 由 React 计算且拖动期间不变
- * （React 只在 prop 值变化时才写 DOM）。
- *
- * ── 本模块只报「把谁放到了第几位」────────────────────────────
- * 目标顺序由调用方（页面）从分组数据算：折叠起来的组在 DOM 里没有行，光看 DOM
- * 拼不出完整队列，而重排接口要求「全部账号的一个排列」（见 store_order.rs）。
- *
- * ── 什么时候不给拖（分粒度）──────────────────────────────────
- * **组顺位**（拖分组带）：未筛选或仅筛“启用 / 禁用”时允许拖动；落点按移除被拖组后的
- * 可见组计数，由页面换算回完整分组队列。其他筛选、搜索、分页下锁定并提示。
- * **组内顺位**（拖行把手）：筛选裁的是**组内的行**，落点仍按「渲染出来的行」中点
- * 比出（= 插到哪个可见行之前），再由调用方按锚点换算回完整 members —— 可见与全量
- * 的映射是确定的，拖动不会错位，因此**不锁**。
+ * ── 落点以目标 ID 回传，而不是纯下标 ─────────────────────────
+ * 虚拟滚动与分页下，DOM 里只挂着当前视口 / 当前页那一段节点；直接回传
+ * `targetProvider` / `targetAccountId` + `after`，页面只需在全量分组里定位该锚点，
+ * 无论列表是否分页、折叠、筛选或边拖边滚，都不会算错顺位。
  */
 
-/** 拖完的落点：`index` 是目标位置（0 起，已在被拖项之外的那一串里数） */
+/** 拖完的落点：由目标节点与相对前后决定插入位置 */
 export type QueueDrop =
-  | { kind: 'group'; provider: string; index: number }
-  | { kind: 'row'; provider: string; accountId: string; index: number }
+  | { kind: 'group'; provider: string; targetProvider: string; after: boolean }
+  | { kind: 'row'; provider: string; accountId: string; targetAccountId: string; after: boolean }
 
 export type QueueDragHandlers = {
-  /** 整组拖动的锁定状态由页面按筛选与分页判断；组内行不受它限制。 */
-  isLocked(): boolean
-  /** 组顺位锁着的时候用户还是按下了把手：给一次提示（由页面决定怎么说） */
-  onLockedAttempt(): void
-  /**
-   * 这一组是否开着排序规则（组内顺位被规则接管）。**只有组内把手会问它**：
-   * 规则生效时拖出来的顺序松手就会被排回去，所以先拦住并给一次说明。
-   * 缺省（不实现）= 永不因排序规则锁定，与引入这条判据之前的行为一致。
-   */
+  /** 整组拖动是否被当前视角锁定（例如只筛选了单个提供商） */
+  isLocked?(): boolean
+  /** 组顺位锁着时按下把手 */
+  onLockedAttempt?(): void
+  /** 当前页面可见的组不足 2 个，无法直接拖动调整顺序 */
+  onGroupUnavailable?(): void
+  /** 这一组是否开着排序规则（组内顺位被规则接管） */
   isRowLocked?(provider: string): boolean
   /** 组内把手被排序规则拦下：给一次提示 */
   onRowLockedAttempt?(provider: string): void
-  /** 拖完了：把新位置交回去，顺序怎么写由调用方决定 */
+  /** 拖完了：把目标锚点交回去，顺序怎么写由调用方决定 */
   onDrop(drop: QueueDrop): void
 }
 
@@ -51,19 +36,28 @@ type DragState = {
   kind: 'group' | 'row'
   provider: string
   accountId: string
-  item: HTMLElement
   container: HTMLElement
-  items: HTMLElement[]
-  /** 当前落点（在被拖项之外的那一串里的下标） */
-  index: number
+  startX: number
+  startY: number
+  lastX: number
+  lastY: number
+  pointerId: number
+  /** 跨过阈值后才算真正开始拖动，避免轻点把手时误触发或闪动 */
+  active: boolean
+  targetId: string
+  after: boolean
+  frame: number
 }
 
+/** 启动拖动的最小移动距离（px） */
+const DRAG_THRESHOLD = 4
 /** 拖动中的行 / 组压淡（与列设置面板排序时同一手法） */
 const DRAGGING_CLASS = 'dragging'
 /** 落点提示的两个类：插在这一项之前 / 之后 */
-const DROP_CLASSES = ['drop-before', 'drop-after']
+const DROP_CLASSES = ['drop-before', 'drop-after'] as const
 
 let drag: DragState | null = null
+let handlersRef: QueueDragHandlers | null = null
 
 function clearDropMarks(container: ParentNode): void {
   container.querySelectorAll(`.${DROP_CLASSES[0]}, .${DROP_CLASSES[1]}`).forEach(element => {
@@ -71,23 +65,28 @@ function clearDropMarks(container: ParentNode): void {
   })
 }
 
-/** 一组「候选落点」：同级别的兄弟项（组 = 各 tbody，行 = 同一组内的各 tr） */
-function siblingsOf(item: HTMLElement, kind: 'group' | 'row'): HTMLElement[] {
+function clearDraggingMarks(container: ParentNode): void {
+  container.querySelectorAll(`.${DRAGGING_CLASS}`).forEach(element => {
+    element.classList.remove(DRAGGING_CLASS)
+  })
+}
+
+/** 现查当前 DOM 里的同级别兄弟项（组 = 各 tbody.acct-group，行 = 同组内的 tr.acct-row） */
+function liveSiblings(container: HTMLElement, kind: 'group' | 'row', provider: string): HTMLElement[] {
+  const table = container.querySelector<HTMLElement>('table.acct-table') || container
   if (kind === 'group') {
-    const list = item.parentElement
-    return list ? ([...list.children].filter(element =>
-      element.classList.contains('acct-group')) as HTMLElement[]) : []
+    return [...table.children].filter(element =>
+      element.classList.contains('acct-group')) as HTMLElement[]
   }
-  const table = item.closest('table')
-  const provider = item.dataset.provider || item.closest<HTMLElement>('tbody.acct-group')?.dataset.provider
-  return table ? [...table.querySelectorAll<HTMLElement>('tr.acct-row')].filter(row => row.dataset.provider === provider) : []
+  return [...table.querySelectorAll<HTMLElement>('tr.acct-row')].filter(row => row.dataset.provider === provider)
+}
+
+function itemIdOf(element: HTMLElement, kind: 'group' | 'row'): string {
+  return kind === 'group' ? (element.dataset.provider || '') : (element.dataset.id || '')
 }
 
 /**
- * 指针落在哪一段：拿每一项的中线比，返回**在其余项里的插入下标**。
- *
- * 与「拖到哪一行」的直觉对齐：越过某项的中线就算排到它前面 / 后面，
- * 与列设置的拖动排序同一口径。
+ * 指针落在哪一段：拿每一项的中线比，返回在其余项里的插入下标。
  */
 function insertionIndex(others: HTMLElement[], clientY: number): number {
   for (let index = 0; index < others.length; index += 1) {
@@ -97,53 +96,121 @@ function insertionIndex(others: HTMLElement[], clientY: number): number {
   return others.length
 }
 
-function paintDropMark(state: DragState): void {
-  const others = state.items.filter(item => item !== state.item)
-  clearDropMarks(state.container)
+/** 根据当前 DOM 与指针位置刷新拖动态样式和目标落点 */
+function updateTarget(state: DragState, paint = true): void {
+  const selfId = state.kind === 'group' ? state.provider : state.accountId
+  const items = liveSiblings(state.container, state.kind, state.provider)
+  const dragged = items.find(item => itemIdOf(item, state.kind) === selfId) || null
+  const others = items.filter(item => itemIdOf(item, state.kind) !== selfId)
+
+  if (paint) {
+    clearDraggingMarks(state.container)
+    if (dragged) dragged.classList.add(DRAGGING_CLASS)
+    clearDropMarks(state.container)
+  }
   if (!others.length) return
-  if (state.index >= others.length) others[others.length - 1].classList.add(DROP_CLASSES[1])
-  else others[state.index].classList.add(DROP_CLASSES[0])
+
+  const index = insertionIndex(others, state.lastY)
+  const after = index >= others.length
+  const target = after ? others[others.length - 1] : others[index]
+  const targetId = itemIdOf(target, state.kind)
+  if (!targetId) return
+
+  state.targetId = targetId
+  state.after = after
+  if (paint) target.classList.add(after ? DROP_CLASSES[1] : DROP_CLASSES[0])
+}
+
+/** 靠近滚动容器上下缘时平滑自动滚动，便于跨越长列表调整顺位 */
+function stepAutoScroll(): void {
+  if (!drag || !drag.active) return
+  const host = drag.container
+  const rect = host.getBoundingClientRect()
+  const headHeight = host.querySelector('thead')?.getBoundingClientRect().height || 0
+  const topEdge = rect.top + headHeight + 36
+  const bottomEdge = rect.bottom - 40
+  let delta = 0
+  if (drag.lastY < topEdge && host.scrollTop > 0) {
+    const overshoot = Math.min(80, topEdge - drag.lastY)
+    delta = -Math.max(4, Math.round(overshoot / 4))
+  } else if (drag.lastY > bottomEdge && host.scrollTop + host.clientHeight < host.scrollHeight) {
+    const overshoot = Math.min(80, drag.lastY - bottomEdge)
+    delta = Math.max(4, Math.round(overshoot / 4))
+  }
+  if (delta !== 0) {
+    host.scrollTop += delta
+    updateTarget(drag)
+  }
+  drag.frame = requestAnimationFrame(stepAutoScroll)
 }
 
 function onPointerMove(event: PointerEvent): void {
-  if (!drag) return
+  if (!drag || event.pointerId !== drag.pointerId) return
   if (event.buttons === 0) { finish(false); return }
-  const others = drag.items.filter(item => item !== drag!.item)
-  const next = insertionIndex(others, event.clientY)
-  if (next === drag.index) return
-  drag.index = next
-  paintDropMark(drag)
+  drag.lastX = event.clientX
+  drag.lastY = event.clientY
+  if (!drag.active) {
+    if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD) return
+    drag.active = true
+    document.body.classList.add('queue-dragging')
+    drag.frame = requestAnimationFrame(stepAutoScroll)
+  }
+  event.preventDefault()
+  updateTarget(drag)
 }
 
 function finish(drop: boolean): void {
   const state = drag
   if (!state) return
   drag = null
+  cancelAnimationFrame(state.frame)
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
   window.removeEventListener('pointercancel', onPointerCancel)
+  window.removeEventListener('blur', onWindowBlur)
   window.removeEventListener('keydown', onKeyDown)
   document.body.classList.remove('queue-dragging')
-  state.item.classList.remove(DRAGGING_CLASS)
+  clearDraggingMarks(state.container)
   clearDropMarks(state.container)
-  if (!drop) return
+  if (!drop || !state.active) return
+
+  updateTarget(state, false)
+  if (!state.targetId) return
   if (state.kind === 'group') {
-    handlersRef?.onDrop({ kind: 'group', provider: state.provider, index: state.index })
+    handlersRef?.onDrop({
+      kind: 'group',
+      provider: state.provider,
+      targetProvider: state.targetId,
+      after: state.after,
+    })
   } else {
-    handlersRef?.onDrop({ kind: 'row', provider: state.provider, accountId: state.accountId, index: state.index })
+    handlersRef?.onDrop({
+      kind: 'row',
+      provider: state.provider,
+      accountId: state.accountId,
+      targetAccountId: state.targetId,
+      after: state.after,
+    })
   }
 }
 
-function onPointerUp(): void { finish(true) }
+function onPointerUp(event: PointerEvent): void {
+  if (!drag || event.pointerId !== drag.pointerId) return
+  drag.lastX = event.clientX
+  drag.lastY = event.clientY
+  finish(true)
+}
+
 function onPointerCancel(): void { finish(false) }
+function onWindowBlur(): void { finish(false) }
 
 /** Esc = 放弃这次拖动（与列设置面板的排序同一手感） */
 function onKeyDown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') finish(false)
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    finish(false)
+  }
 }
-
-/** 最近一次 bind 的处理器（finish 在监听回调里跑，拿不到闭包变量） */
-let handlersRef: QueueDragHandlers | null = null
 
 /**
  * 绑定到滚动容器上（**委托**，一次即可）：拖拽结束后 React 会把 tbody 重画一遍，
@@ -152,8 +219,6 @@ let handlersRef: QueueDragHandlers | null = null
 export function bindQueueDrag(host: HTMLElement | null, handlers: QueueDragHandlers): void {
   handlersRef = handlers
   if (!host) return
-  // 同一个宿主只绑一次：调用方（页面）的 effect 可能在别处重跑，重复 addEventListener
-  // 会积下多份监听 —— 起拖有 drag 守卫不会真的拖两次，但那是隐患不是设计
   if (host.dataset.queueDragBound === '1') return
   host.dataset.queueDragBound = '1'
   host.addEventListener('pointerdown', event => {
@@ -163,9 +228,9 @@ export function bindQueueDrag(host: HTMLElement | null, handlers: QueueDragHandl
     const rowGrip = target?.closest?.('.order-grip')
     if (!groupGrip && !rowGrip) return
     event.preventDefault()
-    // 锁只管**组顺位**（groupGrip）：组内行落点可按可见行换算，筛选下也拖得动
-    if (groupGrip && handlers.isLocked()) {
-      handlers.onLockedAttempt()
+
+    if (groupGrip && handlersRef?.isLocked?.()) {
+      handlersRef.onLockedAttempt?.()
       return
     }
     const item = (groupGrip ?? rowGrip)!.closest<HTMLElement>('tbody.acct-group, tr.acct-row')
@@ -174,30 +239,39 @@ export function bindQueueDrag(host: HTMLElement | null, handlers: QueueDragHandl
     const provider = item.dataset.provider
       || item.closest<HTMLElement>('tbody.acct-group')?.dataset.provider
       || ''
-    // 组内排序规则生效时，组内把手被规则接管（拖了也会被排回去）：拦在起拖这一刻，
-    // 而不是让用户白拖一次再发现顺序没变
-    if (kind === 'row' && provider && handlers.isRowLocked?.(provider)) {
-      handlers.onRowLockedAttempt?.(provider)
+
+    if (kind === 'row' && provider && handlersRef?.isRowLocked?.(provider)) {
+      handlersRef.onRowLockedAttempt?.(provider)
       return
     }
     const accountId = item.dataset.id || ''
     if (kind === 'row' && !accountId) return
-    const items = siblingsOf(item, kind)
-    if (items.length < 2) return
-    // 落点下标一律按「**除被拖项之外**那一串」的数法（与 `insertionIndex` 同尺度，
-    // 否则初始值与后续计算会差一位 —— 被拖项自己也在 items 里）
-    const others = items.filter(candidate => candidate !== item)
-    drag = {
-      kind, provider, accountId, item,
-      container: item.closest<HTMLElement>('table') || item.parentElement || host,
-      items,
-      index: insertionIndex(others, event.clientY),
+
+    const items = liveSiblings(host, kind, provider)
+    if (items.length < 2) {
+      if (kind === 'group') handlersRef?.onGroupUnavailable?.()
+      return
     }
-    item.classList.add(DRAGGING_CLASS)
-    document.body.classList.add('queue-dragging')
-    window.addEventListener('pointermove', onPointerMove)
+
+    drag = {
+      kind,
+      provider,
+      accountId,
+      container: host,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      pointerId: event.pointerId,
+      active: false,
+      targetId: '',
+      after: false,
+      frame: 0,
+    }
+    window.addEventListener('pointermove', onPointerMove, { passive: false })
     window.addEventListener('pointerup', onPointerUp)
     window.addEventListener('pointercancel', onPointerCancel)
+    window.addEventListener('blur', onWindowBlur)
     window.addEventListener('keydown', onKeyDown)
   })
 }

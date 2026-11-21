@@ -70,7 +70,8 @@ export function readManagedLoginWait(raw: unknown, owner?: ManagedLoginWaitOwner
   const envelope = record(raw) ? raw : undefined
   const data = envelope && record(envelope.data) ? envelope.data : undefined
   const payload = envelope && record(envelope.payload) ? envelope.payload : data && record(data.payload) ? data.payload : undefined
-  if ([envelope, data, payload].some(item => item && (item.ok === false || item.success === false))) {
+  const savedOutcome = value?.phase === 'saved' || value?.saved === true
+  if ([envelope, data, payload].some(item => item && (item.success === false || savedOutcome && item.ok === false))) {
     throw new Error('conflicting_managed_login_envelope')
   }
   if (!value || !managedId(value.provider, 128) || !managedId(value.flow)
@@ -368,7 +369,7 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
     if (!callbackUrl.trim()) return
     try {
       const url = new URL(callbackUrl)
-      if (callbackUrl.length > 8192 || /[\u0000-\u0020\u007f\\]/.test(callbackUrl)
+      if (callbackUrl.length > 32768 || /[\u0000-\u0020\u007f]/.test(callbackUrl)
         || !['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error()
     } catch { setError(t('请粘贴本次授权完成后的完整回调地址，不要修改其中的参数。')); return }
     const abort = new AbortController()
@@ -436,7 +437,7 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
         <p className='text-xs text-muted-foreground'>{t('授权完成后如未自动返回，请粘贴本次完整回调地址。打开浏览器不代表登录成功。')}</p>
         <Label>{t('完整回调地址（原样提交）')}
           <Input ref={input} type='password' autoComplete='off' autoCapitalize='none' spellCheck={false}
-            disabled={disabled || callbackSent} maxLength={8192} onChange={event => { setHasCallback(Boolean(event.currentTarget.value)); setError(''); setNotice('') }} />
+            disabled={disabled || callbackSent} maxLength={32768} onChange={event => { setHasCallback(Boolean(event.currentTarget.value)); setError(''); setNotice('') }} />
         </Label>
         <Button variant='outline' disabled={disabled || callbackSent || !hasCallback} onClick={() => void submitCallback()}>
           {busy ? <Spinner /> : null}{t('提交授权回调')}

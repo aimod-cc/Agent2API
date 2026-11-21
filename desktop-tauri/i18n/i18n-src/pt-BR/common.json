@@ -527,6 +527,8 @@
   "插件仓库还没有发布任何版本。可以点「刷新」重试，或用「从文件安装…」选中本地 zip。": "",
   "插件任务": "Tarefas de plugins",
   "插件包、代码或权限声明一旦改变，必须重新确认。": "Confirme novamente sempre que o pacote, o código ou a declaração de permissões mudar.",
+  "插件包「{name}」已安装": "Pacote de plugin \"{name}\" instalado",
+  "插件包「{name}」已安装到 v{version}": "Pacote de plugin \"{name}\" instalado: v{version}",
   "插件包与主程序分开安装、分开升级。卸载插件后账号数据仍然保留，重新装回即可继续使用；仅该包提供的转发与添加账号需要插件，本体订阅不受影响。": "Pacotes de plugin são instalados e atualizados separadamente do aplicativo. Desinstalar preserva os dados das contas; reinstale para continuar. Só o encaminhamento e a adição de contas fornecidos pelo pacote exigem o plugin. Assinaturas nativas não são afetadas.",
   "插件包与主程序分开安装、分开升级。卸载插件后账号数据仍然保留，重新装回即可继续使用；但转发与添加账号需要插件在位。": "Os pacotes de plugin são instalados e atualizados separadamente do app. Desinstalar mantém os dados das contas - reinstale para continuar. Encaminhamento e adição de contas exigem o pacote presente.",
   "插件包会逐个安装，单个失败不会中断后续文件。": "",

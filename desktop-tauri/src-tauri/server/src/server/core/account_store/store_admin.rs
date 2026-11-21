@@ -803,6 +803,7 @@ impl AccountStore {
         }
 
         let codearts_limiters = super::codearts_accounts::migrate_limiters(&mut state.accounts);
+        let raccoon_cleaned = super::raccoon_accounts::clean_dirty_refresh_tokens(&mut state.accounts);
 
         if provider_added == 0
             && assignments.is_empty()
@@ -812,6 +813,7 @@ impl AccountStore {
             && qoder_moved == 0
             && chatglm_healed == 0
             && codearts_limiters == 0
+            && raccoon_cleaned == 0
         {
             return json!({
                 "providerAdded": 0,
@@ -834,6 +836,9 @@ impl AccountStore {
         }
         if codearts_limiters > 0 {
             logging::log("[Accounts]", &format!("已移除 {codearts_limiters} 个 CodeArts 账号的过期活动 Token 限制；无其他规则时改用总积分保护"));
+        }
+        if raccoon_cleaned > 0 {
+            logging::log("[Accounts]", &format!("🧹 已清理 {raccoon_cleaned} 个小浣熊账号的无效或重复 refreshToken 脏数据"));
         }
         if cline_renamed > 0 {
             logging::log(

@@ -158,27 +158,6 @@ impl Host {
         self.call_wasm_inner(method, params, timeout, None).await
     }
 
-    pub(in crate::server::core::plugin_host) async fn call_wasm_codearts_refresh(self: &Arc<Self>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        let method = proto::methods::gateway::TOKEN_REFRESH;
-        let account = params["account"].as_str().ok_or_else(|| super::error("CodeArts原换证调用缺少目标账号"))?;
-        if params["provider"].as_str() != Some("codearts") || !self.ready() {
-            return Err(super::error("CodeArts原换证运行来源不可用"));
-        }
-        let (_telemetry, egress) = match super::super::account_egress::capture_request("codearts", account) {
-            Ok((telemetry, egress)) => (Some(telemetry), Some(egress)),
-            Err(super::super::account_egress::EgressError::MissingScope
-                | super::super::account_egress::EgressError::NoRequest) => (None, None),
-            Err(_) => return Err(super::error("CodeArts原请求账号出口未确认，未重新选号或回退直连")),
-        };
-        let runtime = self.embedded.runtime.try_read().map_err(|_| super::error("CodeArts原运行实例正忙"))?
-            .clone().ok_or_else(|| super::error("CodeArts原运行实例不可用"))?;
-        let call = super::codearts_refresh::Call::capture(self, &runtime, method, account,
-            tokio::time::Instant::now() + timeout, egress)?;
-        unwrap_reply(runtime.invoke_codearts_refresh(call, params, timeout).await?)
-    }
-
     pub(in crate::server::core::plugin_host) async fn call_wasm_doubao_rewards(self: &Arc<Self>,
         params: Value, timeout: Duration,
     ) -> Result<Value, proto::WireError> {
@@ -276,10 +255,6 @@ impl Host {
         }
         let _lease = self.activity.acquire().ok_or_else(|| super::error("插件正在切换或已关闭"))?;
         let runtime = self.embedded.runtime.read().await.clone().ok_or_else(|| super::error("Wasm 插件尚未加载"))?;
-        if runtime.shared.options.provider.as_str() == "codearts"
-            && method == proto::methods::gateway::TOKEN_REFRESH {
-            return Err(proto::WireError::with_code("换证必须来自原账号的固定宿主调用", "forbidden"));
-        }
         if runtime.shared.options.provider == "doubaowork" && matches!(method, proto::methods::gateway::CLAIM | proto::methods::gateway::CLAIM_STATUS) {
             return Err(proto::WireError::with_code("豆包任务领奖必须由原账号固定宿主入口执行", "forbidden"));
         }
@@ -433,7 +408,6 @@ impl Host {
                 if result["account"].is_object() {
                     validate_identity(&runtime.shared.options, &result["account"])?;
                     super::public_view::validate(&result["account"]["public"], &result["account"]["secret"])?;
-                    if runtime.shared.options.provider == "codearts" { super::codearts_login::accept(&runtime.shared, &flow, &result)?; }
                 }
             }
             _ => {}

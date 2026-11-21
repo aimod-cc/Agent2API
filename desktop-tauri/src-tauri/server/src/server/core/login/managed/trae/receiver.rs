@@ -68,7 +68,7 @@ async fn request(stream: &mut TcpStream, port: u16) -> Result<callback::Input, G
         if count == 0 {
             return Err(invalid());
         }
-        if bytes.len().saturating_add(count) > 40 * 1024 {
+        if bytes.len().saturating_add(count) > 64 * 1024 {
             return Err(invalid());
         }
         bytes.extend_from_slice(&chunk[..count]);
@@ -88,10 +88,9 @@ async fn request(stream: &mut TcpStream, port: u16) -> Result<callback::Input, G
     let request: Vec<_> = lines.next().ok_or_else(invalid)?.split(' ').collect();
     if request.len() != 3
         || request[0] != "GET"
-        || request[2] != "HTTP/1.1"
+        || !matches!(request[2], "HTTP/1.1" | "HTTP/1.0")
         || request[1].len() > 32 * 1024
         || request[1].contains('#')
-        || request[1].contains('\\')
     {
         return Err(invalid());
     }
@@ -100,9 +99,11 @@ async fn request(stream: &mut TcpStream, port: u16) -> Result<callback::Input, G
         return Err(invalid());
     }
     let mut host = None;
-    let mut names = HashSet::new();
+    let mut header_count = 0usize;
+    let mut singleton_headers = HashSet::new();
     for line in lines {
-        if names.len() >= 48 || line.starts_with([' ', '\t']) {
+        header_count += 1;
+        if header_count > 64 || line.starts_with([' ', '\t']) {
             return Err(invalid());
         }
         let (name, value) = line.split_once(':').ok_or_else(invalid)?;
@@ -114,7 +115,11 @@ async fn request(stream: &mut TcpStream, port: u16) -> Result<callback::Input, G
             return Err(invalid());
         }
         let name = name.to_ascii_lowercase();
-        if !names.insert(name.clone()) {
+        if matches!(
+            name.as_str(),
+            "host" | "content-length" | "transfer-encoding" | "expect" | "upgrade"
+        ) && !singleton_headers.insert(name.clone())
+        {
             return Err(invalid());
         }
         let value = value.trim();

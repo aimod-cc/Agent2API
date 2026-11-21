@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value};
 
-use super::{bounded, projection, Error};
+use super::{bounded, Error};
 use crate::server::core::account_store::{
     credential_version::{self, RowProvider},
     state::StoredAccount,
@@ -89,7 +89,7 @@ impl Projection {
         let plugin = match fields.get("pluginSecret").filter(|value| !value.is_null()) {
             Some(value) if value.is_object() => {
                 bounded::check(value, bounded::MAX_SECRET_BYTES)?;
-                projection::reject_reserved(value)?;
+                reject_reserved(value)?;
                 Some(value.clone())
             }
             Some(_) => return Err(Error::InvalidRecord),
@@ -107,7 +107,7 @@ impl Projection {
                 .collect(),
         );
         bounded::check(&native, bounded::MAX_SECRET_BYTES)?;
-        projection::reject_reserved(&native)?;
+        reject_reserved(&native)?;
         let public_identity = match fields.get("pluginPublic").filter(|value| !value.is_null()) {
             Some(Value::Object(public)) => {
                 let mut selected = select(public, PUBLIC_IDENTITY_KEYS);
@@ -116,7 +116,7 @@ impl Projection {
                 }
                 let value = Value::Object(selected);
                 bounded::check(&value, bounded::MAX_PUBLIC_BYTES)?;
-                projection::reject_reserved(&value)?;
+                reject_reserved(&value)?;
                 value
             }
             Some(_) => return Err(Error::InvalidRecord),
@@ -325,4 +325,24 @@ fn select(fields: &Map<String, Value>, names: &[&str]) -> Map<String, Value> {
 
 fn text(value: &str, limit: usize) -> bool {
     !value.trim().is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
+}
+
+fn reject_reserved(value: &Value) -> Result<(), Error> {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if credential_version::private_field(key) {
+                    return Err(Error::InvalidInput);
+                }
+                reject_reserved(value)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                reject_reserved(item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

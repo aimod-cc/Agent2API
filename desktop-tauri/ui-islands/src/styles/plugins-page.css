@@ -17,7 +17,6 @@
 .plugins-toolbar-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 .plugins-search { width: 200px; }
 .plugins-scroll-list { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; gap: 24px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; overflow-anchor: none; padding: 0 0 20px; scrollbar-gutter: stable; }
-.plugins-update-summary { display: flex; align-items: center; justify-content: flex-end; gap: 12px; font-size: 12px; color: var(--text-3); }
 @media (max-width: 1500px) {
   .plugins-search { width: 160px; }
   .plugins-toolbar { gap: 12px; }

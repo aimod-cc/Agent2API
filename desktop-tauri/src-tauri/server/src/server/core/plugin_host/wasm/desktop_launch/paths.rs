@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use super::declaration::{Client, Identity, Location, Root};
+use super::declaration::{BaseLocation, Client, Identity, Location, Root};
 use crate::server::core::agents::files;
 
 fn local_path(path: &Path) -> Result<PathBuf, String> {
@@ -72,6 +72,23 @@ pub fn location(location: &Location, executable: Option<&Path>) -> Result<PathBu
     checked(&path, true)
 }
 
+pub fn location_with_base(target: &Location, base_from: Option<&BaseLocation>, executable: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(base) = base_from {
+        let setting_path = location(&base.location, executable)?;
+        if setting_path.is_file() {
+            if let Some(bytes) = files::read_limited(&setting_path, 256 * 1024)? {
+                let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "客户端设置文件格式不支持")?;
+                if let Some(dir) = value.get(&base.field).and_then(serde_json::Value::as_str).map(str::trim).filter(|dir| !dir.is_empty()) {
+                    let mut path = checked(Path::new(dir), true)?;
+                    for part in target.path.split('/') { path.push(part); }
+                    return checked(&path, true);
+                }
+            }
+        }
+    }
+    location(target, executable)
+}
+
 pub fn identity(client: &Client, executable: &Path) -> Result<(), String> {
     let checked = checked(executable, false)?;
     if !checked.is_file() || !executable.file_name().and_then(|name| name.to_str()).is_some_and(|name|
@@ -113,6 +130,22 @@ pub fn detect(client: &Client, override_path: &str) -> Result<Option<PathBuf>, S
     for candidate in &client.locations {
         let Ok(path) = location(candidate, None) else { continue; };
         if path.exists() && identity(client, &path).is_ok() { return checked(&path, false).map(Some); }
+    }
+    if cfg!(windows) {
+        for drive in b'C'..=b'Z' {
+            let root = PathBuf::from(format!("{}:\\", drive as char));
+            if !root.exists() { continue; }
+            for candidate in &client.locations {
+                let Some(dir) = (match candidate.root {
+                    Root::ProgramFiles => Some("Program Files"),
+                    Root::ProgramFilesX86 => Some("Program Files (x86)"),
+                    _ => None,
+                }) else { continue; };
+                let mut path = root.join(dir);
+                for part in candidate.path.split('/') { path.push(part); }
+                if path.exists() && identity(client, &path).is_ok() { return checked(&path, false).map(Some); }
+            }
+        }
     }
     Ok(None)
 }

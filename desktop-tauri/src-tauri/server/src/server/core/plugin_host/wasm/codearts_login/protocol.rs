@@ -5,7 +5,7 @@ use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use hmac::{Hmac,Mac};
 use zeroize::Zeroizing;
-use crate::server::core::{egress::managed::FrozenHttpClient,account_store::credential_version::EnrollmentInput};
+use crate::server::core::egress::managed::FrozenHttpClient;
 use super::invalid;
 
 const TOKEN: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
@@ -19,7 +19,6 @@ pub(super) struct Login {
     ticket: String,
 }
 pub(super) struct Material {
-    pub(super) input: Option<EnrollmentInput>,
     secret: Value,
     identity: String,
     public: Value,
@@ -87,11 +86,12 @@ impl Login {
         secret["user_id"] = json!(required(&identity,"principal_id")?);
         let name = identity["principal_urn"].as_str().unwrap_or("CodeArts").rsplit(['/',':']).next().unwrap_or("CodeArts");
         secret["user_name"] = json!(name);
-        let input = EnrollmentInput::parse(secret.to_string().as_bytes()).map_err(|_| invalid())?;
-        let public = input.public().clone();
-        let secret = input.secret().clone();
-        let identity = input.identity().to_string();
-        Ok(Material {input:Some(input),public,secret,identity})
+        let expires = chrono::DateTime::parse_from_rfc3339(required(&secret,"expires_at")?).map_err(|_| invalid())?.timestamp_millis();
+        let refresh_expires = secret["refresh_token"].as_str().and_then(jwt_exp);
+        let identity = format!("codearts-{}-{}",required(&secret,"domain_id")?,required(&secret,"user_id")?);
+        let public = json!({"name":secret["user_name"],"userId":secret["user_id"],"domainId":secret["domain_id"],"expiresAt":expires,
+            "accessTokenExpiresAt":expires,"refreshTokenExpiresAt":refresh_expires,"hasAccessToken":true,"hasRefreshToken":true,"canRefresh":true,"refreshStatus":"ready"});
+        Ok(Material {public,secret,identity})
     }
     pub(super) async fn ticket(&self,client: &FrozenHttpClient,secret: &str) -> Result<Option<Material>,proto::WireError> {
         let url = format!("{BASE}/snap-manager/v1/login/ticket?ticket_id={}&secret={}",encode(&self.ticket),encode(secret));
@@ -106,7 +106,7 @@ impl Login {
         let expires = chrono::DateTime::parse_from_rfc3339(required(&secret,"expires_at")?).map_err(|_| invalid())?.timestamp_millis();
         let public = json!({"name":secret["user_name"],"userId":secret["user_id"],"domainId":secret["domain_id"],"expiresAt":expires,
             "hasAccessToken":true,"hasRefreshToken":false,"canRefresh":false,"importWarning":"本次使用临时登录兜底，约一小时到期后需要重新登录"});
-        Ok(Some(Material {input:None,public,secret,identity}))
+        Ok(Some(Material {public,secret,identity}))
     }
 }
 
@@ -141,3 +141,13 @@ async fn send_allow_pending(client: &FrozenHttpClient,request: reqwest::Request)
 }
 fn required<'a>(value: &'a Value,key: &str) -> Result<&'a str,proto::WireError> { value[key].as_str().filter(|value| !value.is_empty() && value.len()<=8192 && !value.chars().any(char::is_control)).ok_or_else(invalid) }
 fn encode(value: &str) -> String { url::form_urlencoded::byte_serialize(value.as_bytes()).collect() }
+fn jwt_exp(token: &str) -> Option<i64> {
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    let sig = parts.next()?;
+    if payload.is_empty() || sig.is_empty() || parts.next().is_some() || token.len() > 8192 { return None; }
+    let bytes = URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    claims["exp"].as_i64()?.checked_mul(1000).filter(|at| *at > 0)
+}

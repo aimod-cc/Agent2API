@@ -462,7 +462,8 @@ impl AccountStore {
                     }
                 }
             }
-            // 镜像（只对顶层已存在的键）：卸载插件后内置实现仍拿得到新令牌
+            // 镜像（只对顶层已存在的键）：卸载插件后内置实现仍拿得到新令牌；
+            // 若新 secret 已主动清掉刷新令牌（如小浣熊迁为 IAM），同步清掉顶层旧镜像。
             for key in MIRROR_KEYS {
                 let existed = record.get(key).is_some();
                 if !existed {
@@ -470,6 +471,18 @@ impl AccountStore {
                 }
                 if let Some(value) = secret.get(key) {
                     record.set(key, value.clone());
+                } else if key == "refreshToken"
+                    && secret.is_object()
+                    && !["refreshToken", "refresh_token", "refresh"]
+                        .iter()
+                        .any(|alias| {
+                            secret
+                                .get(*alias)
+                                .and_then(Value::as_str)
+                                .is_some_and(|text| !text.trim().is_empty())
+                        })
+                {
+                    record.remove(key);
                 }
             }
             if let Some(mut public) = record.get(PUBLIC_KEY).and_then(Value::as_object).cloned() {

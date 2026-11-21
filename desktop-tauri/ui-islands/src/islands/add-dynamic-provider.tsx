@@ -18,7 +18,6 @@ import { UserAgentInput, useUserAgentPresets, userAgentEditable, applyUserAgentA
 import { openExternal } from './update-shared'
 import { PluginLoginInteraction, type LoginRequest } from '../../../ui-shared/plugin-login-interaction'
 import { PluginDesktopImport } from '../../../ui-shared/plugin-desktop-import'
-import { PluginCodeArtsEnrollment } from '../../../ui-shared/plugin-codearts-enrollment'
 import { getPluginStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import { managedLoginSourceGeneration, MANAGEMENT_SESSION_CHANGE, type ManagedLoginScope } from '../../../ui-shared/plugin-login-managed'
 import { PluginLoginBrowser, PluginLoginFields, PluginLoginMethodPicker, PluginLoginSecurity } from '../../../ui-shared/plugin-login-form'
@@ -97,8 +96,7 @@ export function DynamicProviderBlock({
   const loadedAvailability = React.useRef('')
   const localActionsAvailable = shared().workbuddyDesktop?.platform === 'windows'
     && Boolean(shared().__TAURI_INTERNALS__?.invoke) && accountProviderAvailable(provider)
-  const localAction = localActionsAvailable && methodsState.phase === 'ready' && provider === 'chatglm' ? 'local:chatglm-import'
-    : localActionsAvailable && methodsState.phase === 'ready' && provider === 'codearts' ? 'local:enrollment' : ''
+  const localAction = localActionsAvailable && methodsState.phase === 'ready' && provider === 'chatglm' ? 'local:chatglm-import' : ''
   const localActionSelected = Boolean(localAction && selected === localAction)
   const declaredMethod = localActionSelected ? undefined
     : methodsState.methods.find(item => item.id === selected) || methodsState.methods.find(item => !item.reason) || methodsState.methods[0]
@@ -127,7 +125,8 @@ export function DynamicProviderBlock({
   const sameServer = (scope: NonNullable<typeof loginScope.current>) => scope.bridge === shared().workbuddyDesktop
     && scope.origin === window.location.origin && scope.bootId === bootId() && scope.managementGeneration === managedLoginSourceGeneration()
     && (!shared().wbApp?.getState?.()?.pluginStartup?.bootId || scope.bootId === shared().wbApp?.getState?.()?.pluginStartup?.bootId)
-  const savingUnconfirmed = (value: LoginProgress) => value.phase === 'saving' || value.phase === 'unconfirmed' || value.saved === null
+  const savingUnconfirmed = (value: LoginProgress) => value.managedLogin === true
+    && (value.phase === 'saving' || value.phase === 'unconfirmed' || value.saved === null)
   const resultCurrent = (scope: NonNullable<typeof loginScope.current>) => alive.current && loginScope.current === scope
     && !scope.cancelled && sameServer(scope) && accountProviderAvailable(provider)
   const scopeCurrent = (scope: NonNullable<typeof loginScope.current>) => resultCurrent(scope)
@@ -263,7 +262,8 @@ export function DynamicProviderBlock({
           const inputs = readInputs(current.method, current.inputs)
           const requestId = nextLoginRequestId()
           loginScope.current = { origin: window.location.origin, bridge: shared().workbuddyDesktop, bootId: bootId(), managementGeneration: managedLoginSourceGeneration(),
-            state: '', requestId, methodIndex: current.method.methodIndex, remark: current.method.prompts.some(prompt => prompt.key === 'name') ? '' : remarkRef.current.trim(),
+            state: '', requestId, methodIndex: current.method.methodIndex,
+            remark: current.method.type === 'sms' || current.method.prompts.some(prompt => prompt.key === 'name') ? '' : remarkRef.current.trim(),
             managed: false, cancelled: false, deadline: Infinity }
           const owner = loginScope.current
           // 插件申报 embeddedOnly 时一律走内嵌窗口（不信任残留的 mode 状态）。
@@ -502,6 +502,20 @@ export function DynamicProviderBlock({
     } catch (failure) { setError(describeError(failure), failure) }
   }
 
+  async function startSmsFlow(): Promise<boolean> {
+    if (submitLocked || !method || requestingRef.current || methodsState.phase === 'loading') {
+      throw new Error(loginView.hint || t('正在处理本次登录，请勿重复提交。'))
+    }
+    if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
+    readInputs(method, inputs)
+    readProxyDraft(proxyDraft)
+    if (!controllerRef.current) throw new Error(t('共享登录桥不可用，请重新打开面板'))
+    if (shared().wbWebLogin?.isActive?.()) throw new Error(loginView.hint || t('此提供商已有登录任务，请先完成或取消。'))
+    setError('')
+    await (controllerRef.current.start() as unknown as Promise<unknown>)
+    return false
+  }
+
   function cancelFlow(): void {
     clearCallback()
     setValues({})
@@ -583,7 +597,7 @@ export function DynamicProviderBlock({
     {methodsState.phase !== 'loading' && (method || localAction) ? <PluginLoginMethodPicker
       label={t('{label} 账号的添加方式', { label })} disabled={locked || loginView.waiting}
       value={localActionSelected ? localAction : method?.id || ''} methods={methodsState.methods} onChange={selectMethod}
-      extra={localAction ? [{ value: localAction, label: localAction === 'local:enrollment' ? t('续期登记') : t('本机导入') }] : []}
+      extra={localAction ? [{ value: localAction, label: t('本机导入') }] : []}
     /> : null}
 
     {localActionsAvailable && provider === 'chatglm' ? <PluginDesktopImport
@@ -591,26 +605,29 @@ export function DynamicProviderBlock({
       scopeIdentity={JSON.stringify([window.location.origin, bootId(), availability])} footerHost={footerHost} preserveOnHide
       current={() => shared().workbuddyDesktop?.platform === 'windows' && Boolean(shared().__TAURI_INTERNALS__?.invoke) && accountProviderAvailable('chatglm')}
       request={desktopImportRequest} onSaved={async () => { await afterAdd('', label) }} t={t} /> : null}
-    {localActionsAvailable && provider === 'codearts' ? <PluginCodeArtsEnrollment
-      active={active && localActionSelected} disabled={locked || loginView.waiting} footerHost={footerHost}
-      current={() => accountProviderAvailable('codearts')} onSaved={async () => { await shared().wbApp?.refresh?.() }} t={t} /> : null}
-    {progress.active && progress.state ? <PluginLoginInteraction key={progress.state} flow={progress.state} t={t}
-      openExternal={managed ? async url => {
-        if (!managed.current()) throw new DOMException('请求已取消', 'AbortError')
-        if (owned?.bridge?.platform === 'web') {
-          const popup = window.open('about:blank', '_blank')
-          if (!popup) throw new Error('popup_blocked')
-          popup.opener = null
-          popup.location.replace(url)
-          return
-        }
-        if (!owned?.bridge?.openReleasePage) throw new Error('external_browser_unavailable')
-        await owned.bridge.openReleasePage(url)
-      } : openExternal}
-      managed={managed} openEmbedded={async (flow, interaction) => {
-        if (!managed?.current() || !owned?.bridge?.openManagedLogin) throw new DOMException('请求已取消', 'AbortError')
-        await owned.bridge.openManagedLogin(flow, interaction)
-      }} request={interactionRequest} /> : null}
+    {(progress.active && progress.state) || (methodAvailable && method.type === 'sms' && Boolean(method.sms) && !method.reason)
+      ? <PluginLoginInteraction
+        key={methodAvailable && method.type === 'sms' ? `sms:${provider}:${method.id}` : progress.state}
+        flow={progress.active && progress.state ? progress.state : ''} t={t}
+        smsConfig={methodAvailable && method.type === 'sms' && !method.reason ? method.sms : undefined}
+        onStartSms={startSmsFlow} startingSms={loginView.waiting}
+        smsStartDisabled={submitLocked || requestingRef.current || methodsState.phase === 'loading' || Boolean(method?.reason)}
+        openExternal={managed ? async url => {
+          if (!managed.current()) throw new DOMException('请求已取消', 'AbortError')
+          if (owned?.bridge?.platform === 'web') {
+            const popup = window.open('about:blank', '_blank')
+            if (!popup) throw new Error('popup_blocked')
+            popup.opener = null
+            popup.location.replace(url)
+            return
+          }
+          if (!owned?.bridge?.openReleasePage) throw new Error('external_browser_unavailable')
+          await owned.bridge.openReleasePage(url)
+        } : openExternal}
+        managed={managed} openEmbedded={async (flow, interaction) => {
+          if (!managed?.current() || !owned?.bridge?.openManagedLogin) throw new DOMException('请求已取消', 'AbortError')
+          await owned.bridge.openManagedLogin(flow, interaction)
+        }} request={interactionRequest} /> : null}
     {method && methodsState.phase !== 'loading' && instructions ? <p className='plugin-login-instructions'>{instructions}</p> : null}
     {progress.userCode ? <p className='plugin-login-local-scope'>{t('设备授权码：{code}', { code: progress.userCode })}</p> : null}
 
@@ -631,7 +648,7 @@ export function DynamicProviderBlock({
         onChange={(key, value) => setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [key]: value } }))} />
       {method.type === 'oauth' || method.type === 'sms' ? <AddFoot host={footerHost} active={active}>
         <Button id={`${prefix}-start`} disabled={submitLocked || Boolean(method.reason)} onClick={startFlow}
-          hidden={method.type === 'sms' && loginView.waiting}>
+          hidden={method.type === 'sms'}>
           {loginView.waiting ? <Spinner /> : null}{method.type === 'sms' ? t('开始短信登录') : loginView.label}
         </Button>
         <Button id={`${prefix}-cancel`} variant='outline' hidden={!loginView.waiting}
@@ -672,8 +689,9 @@ export function DynamicProviderBlock({
     </Alert> : null}
     {methodAvailable ? <AccountProxySection draft={proxyDraft} onChange={setProxyDraft}
       idPrefix={`${prefix}-proxy`} disabled={locked || loginView.waiting} onSystemImportBusy={setReadingSystemProxy}
-      label={t('备注与代理')} summary={`${accountName || t('默认账号名')} · ${accountProxySummary(proxyDraft)}`}>
-      {optionalName || !method.prompts.some(prompt => prompt.key === 'name') ? <div className='plugin-login-field'>
+      label={method.type === 'sms' ? t('账号 / 登录出网代理') : t('备注与代理')}
+      summary={method.type === 'sms' ? accountProxySummary(proxyDraft) : `${accountName || t('默认账号名')} · ${accountProxySummary(proxyDraft)}`}>
+      {method.type !== 'sms' && (optionalName || !method.prompts.some(prompt => prompt.key === 'name')) ? <div className='plugin-login-field'>
         <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>
         <Input id={`${prefix}-name`} maxLength={MAX_NAME_LENGTH} placeholder={t('可选，留空使用账号昵称')}
           value={accountName} disabled={locked || loginView.waiting} onChange={event => {

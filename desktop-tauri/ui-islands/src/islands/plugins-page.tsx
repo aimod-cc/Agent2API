@@ -10,7 +10,8 @@ import { PluginNotesDialog, type PluginNotes } from './plugins-notes'
 import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
 import { api, bridge, errorMessage, pluginDescription, pluginName, toast } from './plugins-shared'
-import { clampMaxPackBytes, LEGACY_MAX_PACK_BYTES, PluginFileInstallDialog, usePluginFileInstall } from './plugins-file-install'
+import { clampMaxPackBytes, LEGACY_MAX_PACK_BYTES, PluginFileInstallDialog, PluginFileInstallProgress, usePluginFileInstall } from './plugins-file-install'
+import { pluginOperationNotice } from '../../../ui-shared/plugins'
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
 import { ScriptPluginsPanel } from '../../../ui-shared/plugins-scripts'
@@ -103,10 +104,8 @@ function PluginsPage(): React.ReactElement {
           if (seenOperations.current.has(key)) continue
           seenOperations.current.add(key)
           if (Date.now() - operation.updatedAt > 30_000) continue
-          if (operation.error) toast(operation.error, 'err')
-          else if (operation.hostError) toast(operation.hostError, 'err')
-          else if (operation.result?.installNotice) toast(t(operation.result.installNotice), 'ok')
-          else if (operation.done) toast(t('插件包已安装到 v{version}', { version: operation.version }), 'ok')
+          const notice = pluginOperationNotice(next, operation, t)
+          if (notice) toast(notice.message, notice.kind)
         }
       } catch (cause) {
         if (mounted.current) setError(errorMessage(cause))
@@ -329,7 +328,7 @@ function PluginsPage(): React.ReactElement {
           onExit={() => { setSelecting(false); setSelected(new Set()) }} t={t} /> : null}
         {batch.task ? <PluginBatchProgress task={batch.task} t={t} onClose={batch.clear}
           onRetry={items => confirmBatch(batch.task!.action, items)} /> : null}
-        {!fileInstall.open && fileInstall.results.length ? <div className='plugins-update-summary'><span>{fileInstall.running ? t('正在安装本地插件包…') : t('本地安装结果')}</span><Button variant='link' size='xs' onClick={() => fileInstall.setOpen(true)}>{t('查看详情')}</Button></div> : null}
+        {fileInstall.backgroundVisible ? <PluginFileInstallProgress model={fileInstall} t={t} /> : null}
       </div>
       <div ref={listRef} className='plugins-scroll-list'>
       {showNative && (installedRows.length > 0 || storeRows.length > 0) ? <section className='@container/plugin-gallery min-w-0 shrink-0' aria-label={t('Agent2API 社区')}>
@@ -377,7 +376,7 @@ function PluginsPage(): React.ReactElement {
     {batchConfirm ? <PluginBatchConfirm key={`${batchConfirm.action}:${batchConfirm.items.map(item => item.key).join('|')}`}
       action={batchConfirm.action} items={batchConfirm.items} disabled={locked} t={t} onClose={() => setBatchConfirm(null)}
       onConfirm={() => { const { action, items } = batchConfirm; setBatchConfirm(null); void batch.execute(action, items) }} /> : null}
-    {missingOpen ? <PluginMissingDialog required={missing.required} optional={missing.optional} unresolved={missing.unresolved}
+    {missingOpen ? <PluginMissingDialog required={missing.required} unresolved={missing.unresolved}
       disabled={locked} t={t} onClose={() => setMissingOpen(false)} onInstall={items => { setMissingOpen(false); void batch.execute('install', items) }} /> : null}
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
     <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />

@@ -1,5 +1,6 @@
 import { t } from '../i18n'
 import { updateErrorMessage } from '../../../ui-shared/updates'
+import { pluginPackName } from '../../../ui-shared/plugins'
 import type { PluginMutation } from './plugins-types'
 
 export type PluginBridge = {
@@ -77,9 +78,7 @@ export function readBase64(file: File): Promise<string> {
 }
 
 export function pluginName(id: string, name?: string | null): string {
-  if (id === 'agent2api-providers') return t('提供商增强')
-  if (id === 'agent2api-web-providers') return t('网页提供商')
-  return name || id
+  return pluginPackName(id, name, t)
 }
 
 export function pluginDescription(id: string, description?: string | null): string {

@@ -22,12 +22,158 @@
 //! 本文件只读已有记录、**没有任何网络请求**（持锁不做网络）。
 //! 绝不 unwrap/expect（release 是 panic=abort）。
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{Map, Value};
 
 use crate::server::core::account_store::state::StoredAccount;
 use crate::server::core::account_store::store::live_desktop_credentials;
 use crate::server::core::account_store::store::AccountStore;
 use crate::server::core::account_store::store_util::token_tail_of;
+
+const ACCESS_KEYS: &[&str] = &["accessToken", "access_token", "token", "auth_token"];
+const REFRESH_KEYS: &[&str] = &["refreshToken", "refresh_token", "refresh"];
+
+pub(crate) fn strip_bearer(raw: &str) -> String {
+    let mut value = raw.trim();
+    loop {
+        let Some(prefix) = value.get(..6) else {
+            return value.to_string();
+        };
+        if !prefix.eq_ignore_ascii_case("bearer") {
+            return value.to_string();
+        }
+        let rest = &value[6..];
+        if rest.is_empty() {
+            return String::new();
+        }
+        if rest.trim_start().len() == rest.len() {
+            return value.to_string();
+        }
+        value = rest.trim_start();
+    }
+}
+
+pub(crate) fn is_iam_token(token: &str) -> bool {
+    let token = strip_bearer(token);
+    let Some(payload) = token.split('.').nth(1) else {
+        return false;
+    };
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')) else {
+        return false;
+    };
+    let Ok(Value::Object(claims)) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    claims
+        .get("iss")
+        .and_then(Value::as_str)
+        .is_some_and(|issuer| issuer.ends_with("/iam"))
+}
+
+pub(crate) fn has_valid_refresh_token(access: &str, refresh: &str) -> bool {
+    let refresh = strip_bearer(refresh);
+    if refresh.is_empty() || is_iam_token(access) {
+        return false;
+    }
+    let access = strip_bearer(access);
+    access.is_empty() || refresh != access
+}
+
+pub(crate) fn first_non_empty(map: &Map<String, Value>, keys: &[&str]) -> String {
+    fn text<'a>(source: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {
+        source?
+            .get(key)?
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+    let auth = map.get("auth").and_then(Value::as_object);
+    keys.iter()
+        .find_map(|key| text(Some(map), key).or_else(|| text(auth, key)))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn remove_keys(map: &mut Map<String, Value>, keys: &[&str]) -> bool {
+    let mut changed = false;
+    for key in keys {
+        changed |= map.remove(*key).is_some();
+    }
+    changed
+}
+
+fn clear_refresh_flags(record: &mut StoredAccount) -> bool {
+    let Some(mut public) = record
+        .get("pluginPublic")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for flag in ["hasRefreshToken", "canRefresh"] {
+        if public.get(flag).and_then(Value::as_bool) == Some(true) {
+            public.insert(flag.to_string(), Value::Bool(false));
+            changed = true;
+        }
+    }
+    if changed {
+        record.set("pluginPublic", Value::Object(public));
+    }
+    changed
+}
+
+/// 清理小浣熊账号中不可用的 refreshToken（IAM 凭据、RT==AT 脏值或插件迁移后的顶层残留）。
+pub(crate) fn sanitize_record(record: &mut StoredAccount) -> bool {
+    if record.provider() != super::RACCOON_PROVIDER_ID {
+        return false;
+    }
+    let is_desktop = record.is_desktop();
+    let mut changed = false;
+    if let Some(mut secret) = record
+        .get("pluginSecret")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        let access = first_non_empty(&secret, ACCESS_KEYS);
+        let refresh = first_non_empty(&secret, REFRESH_KEYS);
+        let valid = !refresh.is_empty() && has_valid_refresh_token(&access, &refresh);
+        if !valid {
+            let mut secret_changed = remove_keys(&mut secret, REFRESH_KEYS);
+            if let Some(Value::Object(auth)) = secret.get_mut("auth") {
+                secret_changed |= remove_keys(auth, REFRESH_KEYS);
+            }
+            if secret_changed {
+                record.set("pluginSecret", Value::Object(secret));
+                changed = true;
+            }
+            changed |= remove_keys(record.fields_mut(), REFRESH_KEYS);
+            if !is_desktop || !access.is_empty() {
+                changed |= clear_refresh_flags(record);
+            }
+        }
+    } else {
+        let access = first_non_empty(record.fields(), ACCESS_KEYS);
+        let refresh = first_non_empty(record.fields(), REFRESH_KEYS);
+        if !refresh.is_empty() && !has_valid_refresh_token(&access, &refresh) {
+            changed |= remove_keys(record.fields_mut(), REFRESH_KEYS);
+            if !is_desktop || !access.is_empty() {
+                changed |= clear_refresh_flags(record);
+            }
+        }
+    }
+    changed
+}
+
+pub(crate) fn clean_dirty_refresh_tokens(accounts: &mut [StoredAccount]) -> usize {
+    let mut cleaned = 0;
+    for record in accounts {
+        if sanitize_record(record) {
+            cleaned += 1;
+        }
+    }
+    cleaned
+}
 
 impl AccountStore {
     /// 存量小浣熊记录的公开形态（`AccountStore::public_account` 的一支）。
@@ -58,12 +204,12 @@ impl AccountStore {
                     token_tail_of(&token)
                 },
                 if expires_at > 0.0 { Some(expires_at) } else { stored_expires },
-                !refresh_token.is_empty(),
+                has_valid_refresh_token(&token, &refresh_token),
             ),
             None => (
                 stored_tail,
                 stored_expires,
-                !record.refresh_token().is_empty(),
+                has_valid_refresh_token(&record.access_token(), &record.refresh_token()),
             ),
         };
         let mut public = Map::new();

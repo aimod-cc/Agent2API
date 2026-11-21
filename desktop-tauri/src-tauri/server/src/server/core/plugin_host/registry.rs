@@ -175,6 +175,7 @@ impl SwitchGuard {
 impl Drop for SwitchGuard {
     fn drop(&mut self) {
         let mut table = table().lock().unwrap_or_else(|error| error.into_inner());
+        let mut removed = Vec::new();
         for id in &self.providers {
             if let Some(adapter) = table.staged.remove(id).filter(|adapter| adapter.host().ready()) {
                 table.adapters.insert(id.clone(), adapter);
@@ -182,11 +183,17 @@ impl Drop for SwitchGuard {
             table.switching.remove(id);
             if table.adapters.get(id).is_some_and(|adapter| adapter.host().activity.retired()) {
                 table.adapters.remove(id);
+                removed.push(id.clone());
             }
         }
         self.pauses.clear();
         crate::server::core::providers::catalog::invalidate();
         drop(table);
+        for id in removed {
+            super::rpc_cache::forget(&id);
+            super::schedules::forget(&id);
+            super::wasm::forget(&id);
+        }
         changed().notify_waiters();
     }
 }

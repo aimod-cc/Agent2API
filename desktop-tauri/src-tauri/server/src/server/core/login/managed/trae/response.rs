@@ -86,7 +86,7 @@ fn business(value: &Value, kind: Kind) -> Result<(), GatewayError> {
     let root = value.as_object().ok_or_else(|| kind.error())?;
     let mut code = None;
     for field in ["Code", "code"] {
-        if let Some(value) = root.get(field) {
+        if let Some(value) = root.get(field).filter(|value| !value.is_null()) {
             let next = integer(value).ok_or_else(|| kind.error())?;
             if next != 0 || code.is_some_and(|old| old != next) {
                 return Err(kind.error());
@@ -94,12 +94,18 @@ fn business(value: &Value, kind: Kind) -> Result<(), GatewayError> {
             code = Some(next);
         }
     }
-    if code != Some(0) {
+    if code.is_some_and(|code| code != 0)
+        || (code.is_none()
+            && !root.contains_key("Result")
+            && !root.contains_key("result")
+            && !root.contains_key("ResponseMetadata"))
+    {
         return Err(kind.error());
     }
     for field in ["success", "Success"] {
         if root
             .get(field)
+            .filter(|value| !value.is_null())
             .is_some_and(|value| value != &Value::Bool(true))
         {
             return Err(kind.error());
@@ -129,7 +135,7 @@ fn result<'a>(
     let root = root.as_object().ok_or_else(|| kind.error())?;
     let mut found: Option<&Value> = None;
     for field in ["Result", "result"] {
-        if let Some(value) = root.get(field) {
+        if let Some(value) = root.get(field).filter(|value| !value.is_null()) {
             if !value.is_object() || found.is_some_and(|old| old != value) {
                 return Err(kind.error());
             }
@@ -142,6 +148,7 @@ fn result<'a>(
             for field in ["Code", "code"] {
                 if fields
                     .get(field)
+                    .filter(|value| !value.is_null())
                     .is_some_and(|value| integer(value) != Some(0))
                 {
                     return Err(kind.error());
@@ -150,6 +157,7 @@ fn result<'a>(
             for field in ["success", "Success"] {
                 if fields
                     .get(field)
+                    .filter(|value| !value.is_null())
                     .is_some_and(|value| value != &Value::Bool(true))
                 {
                     return Err(kind.error());
@@ -167,6 +175,10 @@ fn result<'a>(
         None if !required => Ok(root),
         None => Err(kind.error()),
     }
+}
+
+fn valid_cn_client_id(client: &str, expected: &str) -> bool {
+    client == expected || matches!(client, "ono9krqynydwx5" | "en1oxy7wnw8j9n")
 }
 
 pub(super) fn tokens(root: &Value, variant: Variant) -> Result<Tokens, GatewayError> {
@@ -198,7 +210,7 @@ pub(super) fn tokens(root: &Value, variant: Variant) -> Result<Tokens, GatewayEr
             true,
             kind,
         )?
-        .is_some_and(|client| client != expected)
+        .is_some_and(|client| !valid_cn_client_id(&client, expected))
         {
             return Err(kind.error());
         }
@@ -212,10 +224,10 @@ pub(super) fn tokens(root: &Value, variant: Variant) -> Result<Tokens, GatewayEr
     }
     let mut expires_at = None;
     for field in ["TokenExpireAt", "tokenExpireAt", "ExpiresAt", "expiresAt"] {
-        if let Some(value) = fields.get(field) {
-            let mut next = integer(value)
-                .filter(|value| *value > 0)
-                .ok_or_else(|| kind.error())?;
+        if let Some(value) = fields.get(field).filter(|value| !value.is_null()) {
+            let Some(mut next) = integer(value).filter(|value| *value > 0) else {
+                continue;
+            };
             if next < 100_000_000_000 {
                 next = next.checked_mul(1000).ok_or_else(|| kind.error())?;
             }
@@ -228,6 +240,30 @@ pub(super) fn tokens(root: &Value, variant: Variant) -> Result<Tokens, GatewayEr
             expires_at = Some(next);
         }
     }
+    if expires_at.is_none() {
+        for field in [
+            "TokenExpireDuration",
+            "tokenExpireDuration",
+            "ExpiresIn",
+            "expiresIn",
+        ] {
+            if let Some(value) = fields.get(field).filter(|value| !value.is_null()) {
+                let Some(duration) = integer(value).filter(|value| *value > 0) else {
+                    continue;
+                };
+                let delta_ms = if duration > 1_000_000_000 {
+                    duration
+                } else {
+                    duration.saturating_mul(1000)
+                };
+                let next = chrono::Utc::now().timestamp_millis().saturating_add(delta_ms);
+                if next < (1_i64 << 53) && chrono::DateTime::from_timestamp_millis(next).is_some() {
+                    expires_at = Some(next);
+                    break;
+                }
+            }
+        }
+    }
     // 根层同名材料不能绕过Result提供另一个token/期限；非空冲突一律拒绝。
     for names in [
         &["Token", "token", "AccessToken", "accessToken"][..],
@@ -235,7 +271,7 @@ pub(super) fn tokens(root: &Value, variant: Variant) -> Result<Tokens, GatewayEr
         &["TokenExpireAt", "tokenExpireAt", "ExpiresAt", "expiresAt"][..],
     ] {
         for name in names {
-            if root.get(*name).is_some() {
+            if root.get(*name).is_some_and(|value| !value.is_null()) {
                 return Err(kind.error());
             }
         }
@@ -270,7 +306,7 @@ pub(super) fn profile(
             true,
             kind,
         )?
-        .is_some_and(|client| client != variant.client_id())
+        .is_some_and(|client| !valid_cn_client_id(&client, variant.client_id()))
         {
             return Err(kind.error());
         }
@@ -330,17 +366,23 @@ fn uid_field(fields: &Map<String, Value>, kind: Kind) -> Result<Option<String>, 
     let mut found = None;
     for field in UID_FIELDS {
         if let Some(value) = fields.get(*field) {
+            if value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()) {
+                continue;
+            }
             let next = match value {
-                Value::String(text) if !text.is_empty() => text.clone(),
-                Value::Number(number) => number
-                    .as_u64()
-                    .filter(|value| *value > 0)
-                    .map(|value| value.to_string())
-                    .ok_or_else(|| kind.error())?,
+                Value::String(text) => text.trim().to_string(),
+                Value::Number(number) => {
+                    let Some(value) = number.as_u64() else {
+                        return Err(kind.error());
+                    };
+                    if value == 0 {
+                        continue;
+                    }
+                    value.to_string()
+                }
                 _ => return Err(kind.error()),
             };
             if next.len() > 480
-                || next.trim() != next
                 || next.chars().any(|ch| ch.is_control() || ch.is_whitespace())
                 || matches!(
                     next.to_ascii_lowercase().as_str(),
@@ -366,6 +408,9 @@ fn text(
     let mut found = None;
     for name in names {
         if let Some(value) = fields.get(*name) {
+            if value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()) {
+                continue;
+            }
             let next = value
                 .as_str()
                 .filter(|text| {
@@ -393,11 +438,9 @@ fn text_optional_token(
     kind: Kind,
 ) -> Result<Option<String>, GatewayError> {
     let mut found = None;
-    let mut absent = false;
     for name in names {
         if let Some(value) = fields.get(*name) {
-            if value.is_null() || value.as_str() == Some("") {
-                absent = true;
+            if value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()) {
                 continue;
             }
             let token = value
@@ -410,9 +453,6 @@ fn text_optional_token(
             found = Some(token.to_string());
         }
     }
-    if absent && found.is_some() {
-        return Err(kind.error());
-    }
     Ok(found)
 }
 
@@ -421,42 +461,46 @@ fn display_text(
     fields: &Map<String, Value>,
     names: &[&str],
     limit: usize,
-    kind: Kind,
+    _kind: Kind,
 ) -> Result<Option<String>, GatewayError> {
-    let mut found = None;
     for name in names {
-        if let Some(value) = fields
-            .get(*name)
-            .filter(|value| !value.is_null() && value.as_str() != Some(""))
-        {
+        if let Some(value) = fields.get(*name) {
             let next = match value {
-                Value::String(text)
-                    if text.len() <= limit
-                        && text.trim() == text
-                        && !text.chars().any(char::is_control) =>
-                {
-                    text.clone()
+                Value::String(text) => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty()
+                        || trimmed == "0"
+                        || trimmed.len() > limit
+                        || trimmed.chars().any(char::is_control)
+                    {
+                        continue;
+                    }
+                    trimmed.to_string()
                 }
-                Value::Number(number) => number
-                    .as_u64()
-                    .filter(|value| *value > 0)
-                    .map(|value| value.to_string())
-                    .ok_or_else(|| kind.error())?,
-                _ => return Err(kind.error()),
+                Value::Number(number) => {
+                    let Some(value) = number.as_u64().filter(|value| *value > 0) else {
+                        continue;
+                    };
+                    value.to_string()
+                }
+                _ => continue,
             };
-            if found.as_ref().is_some_and(|old| old != &next) {
-                return Err(kind.error());
-            }
-            found = Some(next);
+            return Ok(Some(next));
         }
     }
-    Ok(found)
+    Ok(None)
 }
 
 fn integer(value: &Value) -> Option<i64> {
     match value {
-        Value::Number(number) => number.as_i64(),
-        Value::String(text) if !text.is_empty() && text.trim() == text => text.parse().ok(),
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|n| i64::try_from(n).ok()))
+            .or_else(|| number.as_f64().map(|n| n as i64)),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.parse().ok()).flatten()
+        }
         _ => None,
     }
 }

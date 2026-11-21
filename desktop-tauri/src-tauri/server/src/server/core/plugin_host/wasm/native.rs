@@ -41,7 +41,7 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
                 let available = super::super::host_for_provider(provider).is_some_and(|host| host.ready())
                     && super::super::serves_provider(provider);
                 for id in &options.manifest.helpers {
-                    if super::desktop_credentials::helper(provider) == Some(id.as_str()) { continue; }
+                    if super::desktop_credentials::candidate(provider, id).is_some() { continue; }
                     requested.push(json!({ "pack": pack.id, "provider": provider, "id": id,
                         "available": available, "callerDigest": pack.sha256 }));
                 }
@@ -51,7 +51,7 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
             for (provider, helpers) in providers {
                 let Some(helpers) = helpers.as_object() else { continue };
                 for (id, grant) in helpers {
-                    if super::desktop_credentials::helper(provider) == Some(id.as_str()) { continue; }
+                    if super::desktop_credentials::candidate(provider, id).is_some() { continue; }
                     if grant["callerPack"].as_str() != Some(pack.id.as_str()) { continue; }
                     scoped_grants.entry(provider.clone()).or_insert_with(|| json!({}))[id] = grant.clone();
                     if !requested.iter().any(|item| item["provider"] == *provider && item["id"] == *id) {
@@ -141,29 +141,31 @@ pub(crate) async fn grant(provider: &str, helper: &str, selected: &Value, pack_i
     Ok(config::update_raw_field("pluginNativeHelpers", all))
 }
 
+/// 内置辅助能力仅执行主程序固定的受控操作；只要当前提供该商家的插件已就绪并申报对应能力即可直接使用。
 pub(super) fn authorized_builtin(provider: &str, helper: &str) -> Result<(), proto::WireError> {
-    if helper == super::desktop_credentials::HELPER_CATPAW {
-        let store = crate::server::core::account_store::plugin_accounts::shared().ok_or_else(super::desktop_credentials::invalid)?;
-        if store.plugin_account("desktop-auth").is_some_and(|record| record["provider"] == provider && record["desktop"] == true) { return Ok(()); }
+    if super::desktop_credentials::candidate(provider, helper).is_none() {
+        return Err(proto::WireError::with_code("当前插件未声明可用的本机辅助能力", "forbidden"));
     }
-    let grant = grants()[provider][helper].clone();
-    let pack = super::super::provider_pack(provider).ok_or_else(|| super::error("插件归属不可用"))?;
-    let digest = super::super::PackRegistry::load().packs.into_iter().find(|entry|entry.id==pack).map(|entry|entry.sha256);
-    if super::desktop_credentials::candidate(provider,helper).is_none_or(|candidate|
-        ["pack","version","provider","id","operations","digest"].iter().any(|key| grant[*key] != candidate[*key]))
-        || grant["callerPack"] != pack || grant["callerDigest"].as_str()!=digest.as_deref() {
-        let message = if helper == super::desktop_credentials::HELPER_RACCOON_REFRESH {
-            "请在小浣熊插件设置里明确授权本机续期与安全写回"
-        } else if super::desktop_credentials::refresh::helper(provider) == Some(helper) {
-            "请在当前插件设置里明确授权本机续期与安全写回"
-        } else if helper == super::qoder_umid::HELPER {
-            "请在当前插件设置里明确授权官方设备验证组件"
-        } else if helper.starts_with("desktop.device.") {
-            "请在当前插件设置里明确授权读取这家客户端的设备标识"
-        } else {
-            "请在当前插件设置里明确授权主程序读取这家客户端的登录态"
-        };
-        return Err(proto::WireError::with_code(message, "native_helper_not_authorized"));
+    if !super::super::serves_provider(provider) || super::super::registry::is_switching(provider) {
+        return Err(proto::WireError::with_code("当前插件尚未就绪或已停用", "native_helper_unavailable"));
+    }
+    let host = super::super::host_for_provider(provider)
+        .filter(|host| host.ready())
+        .ok_or_else(|| proto::WireError::with_code("当前插件尚未就绪或已停用", "native_helper_unavailable"))?;
+    let Some(options) = host.options.wasm.as_ref() else {
+        return Err(proto::WireError::with_code("只有 Wasm 插件支持该本机辅助能力", "forbidden"));
+    };
+    if options.provider != provider
+        || !options.allows("native.helpers.v1")
+        || !options.manifest.helpers.iter().any(|id| id == helper)
+    {
+        return Err(proto::WireError::with_code("当前插件未声明所需本机辅助能力", "forbidden"));
+    }
+    let needs_credentials = helper == super::desktop_credentials::HELPER_RACCOON_REFRESH
+        || super::desktop_credentials::refresh::helper(provider) == Some(helper)
+        || super::desktop_credentials::helper(provider) == Some(helper);
+    if needs_credentials && !options.allows("desktop.credentials.v1") {
+        return Err(proto::WireError::with_code("当前插件未声明本机凭据读取能力", "forbidden"));
     }
     Ok(())
 }

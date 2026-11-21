@@ -555,6 +555,16 @@ export function customRailItems(): Map<string, { label: string; n: number }> {
 function builtinProviders(): string[] {
   return [...builtinRailCounts().keys()]
 }
+
+/** 当前 manage 视图里内置提供商的 `{id, label}` 摘要；用于在会话状态尚未刷新时补齐弹窗展示。 */
+function builtinProviderMetas(): Array<{ id: string; label: string }> {
+  return (snapshot.data?.providers || [])
+    .filter(provider => Boolean(provider?.provider))
+    .map(provider => ({
+      id: provider.provider,
+      label: provider.providerLabel || provider.provider,
+    }))
+}
 /**
  * 某家清单的最近拉取时刻（毫秒；0 = 未知 / 从未成功过）。
  * 给「获取模型」弹窗的「更新日期」列用（那个弹窗打开时不自动拉取，第一屏只能靠这个值说明
@@ -1085,7 +1095,7 @@ export function refreshModels(): void {
  */
 window.wbModelsPanel = {
   render, load, refreshAll, refreshModels, visibleColumns, selectProvider, builtinProviders,
-  providerRefreshedAt,
+  builtinProviderMetas, providerRefreshedAt,
 }
 
 declare global {
@@ -1099,6 +1109,7 @@ declare global {
       visibleColumns(): ColumnView[]
       selectProvider(id: string): void
       builtinProviders(): string[]
+      builtinProviderMetas(): Array<{ id: string; label: string }>
       providerRefreshedAt(providerId: string): number
     }
   }

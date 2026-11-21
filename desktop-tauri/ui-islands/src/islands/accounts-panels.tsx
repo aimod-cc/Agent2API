@@ -190,7 +190,7 @@ function GroupMenu({ group, ids, collapsed }: { group: AccountGroup; ids: string
  * 样式刻意保持中性（surface 底 + 一条 hairline）：一家一色会让整页像调色板，
  * 而「哪一段是哪一家」由家名与图标已经说清楚了。
  */
-export function GroupBandRow({ group, collapsed, colSpan, pageCount, virtualIndex, measure, stickyTop }: {
+export function GroupBandRow({ group, collapsed, colSpan, pageCount, virtualIndex, measure, stickyTop, groupLocked, groupLockTitle }: {
   group: AccountGroup
   collapsed: boolean
   colSpan: number
@@ -198,6 +198,8 @@ export function GroupBandRow({ group, collapsed, colSpan, pageCount, virtualInde
   virtualIndex?: number
   measure?: (element: HTMLTableRowElement | null) => void
   stickyTop?: number
+  groupLocked?: boolean
+  groupLockTitle?: string
 }) {
   const now = useDisplayClock()
   const { src: icon, onError: onIconError } = useProviderIcon(group.provider)
@@ -235,8 +237,10 @@ export function GroupBandRow({ group, collapsed, colSpan, pageCount, virtualInde
       <TableCell colSpan={colSpan} onClick={onBandClick}
         style={stickyTop === undefined ? undefined : { position: 'sticky', top: stickyTop, zIndex: 1, background: 'var(--surface)' }}>
         <div className='grp-band-inner'>
-          <span className='queue-grip' role='button' tabIndex={-1} aria-label={t('拖动调整整组顺序')}
-            title={t('按住拖动，调整这一家的组顺位（整组一起动）')}
+          <span className={`queue-grip${groupLocked ? ' locked' : ''}`} role='button' tabIndex={-1}
+            aria-label={t('拖动调整整组顺序')}
+            aria-disabled={groupLocked || undefined}
+            title={groupLocked ? (groupLockTitle || t('当前列表不能拖动整组')) : t('按住拖动，调整这一家的组顺位（整组一起动）')}
             dangerouslySetInnerHTML={{ __html: iconHtml('gripVertical', 14) }} />
           <span className='grp-rank' title={t('组顺位：越小越先用（拖动分组带调整）')}>
             {t('第 {rank} 顺位', { rank: group.rank })}

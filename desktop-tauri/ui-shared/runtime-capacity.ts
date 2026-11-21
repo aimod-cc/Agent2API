@@ -39,6 +39,7 @@ export type CapacitySnapshot = {
     cpuPercent: number
     cores: number
     connectionCeiling: number
+    osPressureLevel?: number | null
   }
   usage: {
     conversations: number

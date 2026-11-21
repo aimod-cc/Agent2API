@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use zeroize::Zeroizing;
 
 use super::{
-    bounded, maintained_provider, projection, row_projection, storage, Conflict, Error,
+    bounded, maintained_provider, row_projection, storage, Conflict, Error,
     StorageFailure, Version,
 };
 use crate::server::core::account_store::{
@@ -225,7 +225,6 @@ fn maintain(
 
 #[derive(PartialEq)]
 enum Authorization {
-    CodeArts(projection::Projection),
     ReadOnly(row_projection::Projection),
 }
 
@@ -238,12 +237,8 @@ fn authorization(record: &StoredAccount) -> Result<Option<Authorization>, Error>
             bounded::MAX_PLAIN_BYTES,
         )?));
         let provider = record.provider();
-        if provider == projection::PROVIDER {
-            projection::Projection::read(record).map(Authorization::CodeArts)
-        } else {
-            let provider = RowProvider::parse(&provider).ok_or(Error::UnsupportedProvider)?;
-            row_projection::Projection::read(record, provider).map(Authorization::ReadOnly)
-        }
+        let provider = RowProvider::parse(&provider).ok_or(Error::UnsupportedProvider)?;
+        row_projection::Projection::read(record, provider).map(Authorization::ReadOnly)
     })();
     match checked {
         Ok(projection) => Ok(Some(projection)),

@@ -30,7 +30,7 @@ pub(super) fn status() -> Result<Value, proto::WireError> {
     Ok(json!({ "available": found.is_some() && authorized, "componentAvailable": found.is_some(),
         "source": found.as_ref().map(|item| item.source), "installSupported": component::supported(),
         "installing": INSTALLING.load(Ordering::Acquire), "authorized": authorized,
-        "message": if authorized { "" } else { "请在 Qoder 国际版插件设置中授权设备验证组件" },
+        "message": if authorized { "" } else { "Qoder 国际版插件未就绪或未声明设备验证组件" },
         "dailyCampaignsReady": found.is_some() && authorized }))
 }
 

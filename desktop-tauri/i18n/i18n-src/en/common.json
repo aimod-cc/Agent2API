@@ -537,6 +537,8 @@
   "插件仓库还没有发布任何版本。可以点「刷新」重试，或用「从文件安装…」选中本地 zip。": "",
   "插件任务": "Plugin tasks",
   "插件包、代码或权限声明一旦改变，必须重新确认。": "Confirm again whenever the plugin package, code or permission declaration changes.",
+  "插件包「{name}」已安装": "Plugin pack \"{name}\" installed",
+  "插件包「{name}」已安装到 v{version}": "Plugin pack \"{name}\" installed: v{version}",
   "插件包与主程序分开安装、分开升级。卸载插件后账号数据仍然保留，重新装回即可继续使用；仅该包提供的转发与添加账号需要插件，本体订阅不受影响。": "Plugin packs install and upgrade independently of the application. Uninstalling keeps account data; reinstall to continue. Only forwarding and adding accounts supplied by that pack require it. Native subscriptions are unaffected.",
   "插件包与主程序分开安装、分开升级。卸载插件后账号数据仍然保留，重新装回即可继续使用；但转发与添加账号需要插件在位。": "Plugin packs install and upgrade independently of the app. Uninstalling a pack keeps your account data - reinstall it to continue. Forwarding and adding accounts need the pack present.",
   "插件包会逐个安装，单个失败不会中断后续文件。": "",

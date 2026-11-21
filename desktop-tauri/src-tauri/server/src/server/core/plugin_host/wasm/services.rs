@@ -92,15 +92,6 @@ impl Context {
         if method == "claim.doubao.tasks" {
             return Err(proto::WireError::with_code("当前调用没有豆包原任务领奖来源", "forbidden"));
         }
-        if let Some(call) = &self.codearts_refresh {
-            if method != "credential.codearts.refresh" || params.as_object().is_none_or(|fields| !fields.is_empty()) {
-                return Err(proto::WireError::with_code("CodeArts换证只接受原调用的固定宿主入口", "forbidden"));
-            }
-            return super::codearts_refresh::exchange(call.clone()).await;
-        }
-        if method == "credential.codearts.refresh" {
-            return Err(proto::WireError::with_code("当前调用没有CodeArts原换证来源", "forbidden"));
-        }
         if let Some(result) = self.verification_guard(method, &params).await? { return Ok(result); }
         if let Some(call) = &self.managed { call.validate(&self.shared.options.provider).map_err(super::managed::wire)?; }
         let provider = self.shared.options.provider.clone();
@@ -208,7 +199,7 @@ impl Context {
                     .ok_or_else(|| super::error("账号记录缺少标识"))?.to_string();
                 self.account()?;
                 self.identity = record["identity"].as_str().unwrap_or(&self.account).to_string();
-                if self.desktop_launch.is_none() && self.codearts_refresh.is_none()
+                if self.desktop_launch.is_none()
                     && self.doubao_rewards.is_none() {
                     super::legacy_secret::expose(self, &mut record);
                 }
