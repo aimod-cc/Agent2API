@@ -234,8 +234,16 @@ pub fn console_line(tag: &str, text: &str) {
 pub fn stage(text: impl AsRef<str>) {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let enabled = *ENABLED.get_or_init(|| {
-        std::env::var("AGENT2API_TRACE_STAGES").ok()
-            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
+        // **debug 构建默认打开**：栈溢出是「进程说死就死」，逼着人先设环境变量
+        // 再复现一次，等于多一轮 8 分钟编译。排障期宁可吵一点。
+        // release 构建仍默认关闭（正式分发不带这些行）。
+        // 显式 `AGENT2API_TRACE_STAGES=0` 可在 debug 下静音。
+        let raw = std::env::var("AGENT2API_TRACE_STAGES").ok();
+        match raw.as_deref().map(str::trim) {
+            Some("0" | "false" | "FALSE" | "no") => false,
+            Some("1" | "true" | "TRUE" | "yes") => true,
+            _ => cfg!(debug_assertions),
+        }
     });
     if enabled {
         console_line("[Stage]", text.as_ref());
