@@ -360,23 +360,28 @@ fn select_target_account_sync(
             .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
             .count();
         if !balance_blocked_ids.is_empty() && enabled_total > 0 {
+            logging::log_with_level("[Upstream]", &format!(
+                "⚠️ 路由内没有可转发账号：{} 个启用账号全部被限制器拦下（余额不足 / Token 周期额度到顶）",
+                balance_blocked_ids.len()), "warn");
             return Err(GatewayError::with_status(
                 503,
                 format!(
                     "所有启用中的账号都被限制器拦下（已跳过 {} 个账号），无账号可转发：请检查余额读数与 Token 周期用量，或到账号设置的「限制器」里调整规则",
                     balance_blocked_ids.len()
                 ),
-            ));
+            ).with_route_snapshot(decision.clone()));
         }
+        logging::log_with_level("[Upstream]",
+            "⚠️ 路由内没有可转发账号：候选账号全部被禁用", "warn");
         return Err(GatewayError::with_status(
             503,
             "所有账号均已禁用，无账号可转发：请在账号页启用至少一个账号",
-        ));
+        ).with_route_snapshot(decision.clone()));
     }
 
     if super::account_admission::all_busy(&candidates, &counts, tried_ids) {
         return Err(GatewayError::with_status(503, "当前路由内的账号均已达到并发上限")
-            .with_code("account_busy"));
+            .with_code("account_busy").with_route_snapshot(decision.clone()));
     }
 
     if request_routing.strict_vision {
@@ -436,6 +441,7 @@ fn select_target_account_sync(
             best_effort = Some(account.clone());
         }
     }
+    let mut no_session: Vec<String> = Vec::new();
     if let Some(account) = best_effort {
         if let Some(id) = routing::account_id(&account).map(str::to_string) {
             if let Some(entry) = service.store.get_session_by_id(&id) {
@@ -447,22 +453,61 @@ fn select_target_account_sync(
                     Some(decision),
                 ));
             }
+            // 账号在库里但取不到会话 = 凭证缺失。以前这里静默跳过，最后让
+            // 上层报一句「都没有可用凭证」，看不出是哪个账号、为什么。
+            no_session.push(account_display(&account));
         }
     }
     if request_routing.requires_account() {
         return Err(GatewayError::with_status(503,
             "当前生图账号均无可用凭证；未使用默认登录态或其他账号")
-            .with_code("image_account_unavailable"));
+            .with_code("image_account_unavailable").with_route_snapshot(decision.clone()));
     }
     if pinned.is_some() {
         return Err(GatewayError::with_status(401,
             "指定账号没有可用凭证；未回退到队首或默认登录态")
-            .with_code("account_scope_mismatch"));
+            .with_code("account_scope_mismatch").with_route_snapshot(decision.clone()));
     }
+    // ── 收尾之前先排除「只是忙」这一种可能 ─────────────────────
+    // `all_busy` 会跳过本轮已被排除（`tried`）的账号，于是「所有有凭证的账号
+    // 都只是被并发上限挤掉」时它会返回 false，请求一路掉到下面的收尾分支，
+    // 报出「没有可用凭证」这种与事实相反的话。这里按**不看 tried** 的口径再判
+    // 一次：还有凭证的账号全在并发上限上就返回排队超时，让准入循环继续等。
+    if super::account_admission::all_busy(&enabled, &counts, &[]) {
+        return Err(GatewayError::with_status(503, "当前路由内的账号均达到并发上限，正在排队等待槽位")
+            .with_code("account_busy").with_reason("account_busy").with_retry_after_seconds(1)
+            .with_route_snapshot(decision.clone()));
+    }
+    // ── 收尾：这一轮一个都发不出去 ─────────────────────────────
+    // 以前这里固定写「当前模型路由中的账号都没有可用凭证」。触发它的原因其实
+    // 有六种：模型权限不含该模型、账号没凭证、全在冷却 / 熔断、并发全满、
+    // 本轮已全部试过、候选被限制器拦下。文案必须按 `plan.blocked` 的真实原因
+    // 拼出来，否则用户只能看到一句与事实不符的「没有凭证」。
+    let reasons = summarize_blocked(&plan);
+    let reason_text = if reasons.is_empty() {
+        "候选账号都被本轮尝试排除或并发占满".to_string()
+    } else {
+        reasons.join("；")
+    };
+    let tried_note = if tried_ids.is_empty() {
+        String::new()
+    } else {
+        format!("，本轮已试 {} 个", tried_ids.len())
+    };
+    let session_note = if no_session.is_empty() {
+        String::new()
+    } else {
+        format!("；{} 取不到可用会话（凭证缺失）", no_session.join("、"))
+    };
+    logging::log_with_level("[Upstream]", &format!(
+        "⚠️ 路由内没有可转发的账号：候选 {} 个{}，原因：{}{}",
+        enabled.len(), tried_note, reason_text, session_note), "warn");
+    let message = format!(
+        "当前路由内没有可转发的账号：{}{}（候选 {} 个{}）。请在路由页检查账号的模型权限、凭证与冷却状态",
+        reason_text, session_note, enabled.len(), tried_note);
     if request_routing.profile.is_some() {
-        return Err(GatewayError::with_status(
-            503, "当前模型路由中的账号都没有可用凭证，请在路由页检查账号状态",
-        ));
+        return Err(GatewayError::with_status(503, message)
+            .with_code("route_empty").with_route_snapshot(decision.clone()));
     }
     decision["picked"] = Value::String(String::new());
     Ok(RouteTarget {
@@ -474,6 +519,24 @@ fn select_target_account_sync(
         proxy_notice: None,
         decision: Some(decision),
     })
+}
+
+/// 把 `plan.blocked`（以及排在队尾等槽位的「并发已满」）聚成一句可读文本。
+///
+/// 只用于收尾时的用户文案与日志：**每个状态取第一条原因的原话**，计数按状态。
+/// 这样「全在冷却」「全没有该模型」「并发全满」在提示里能直接区分开，不必再让
+/// 人翻库猜。
+fn summarize_blocked(plan: &routing::RoutePlan) -> Vec<String> {
+    let mut counts: std::collections::BTreeMap<&'static str, (usize, String)> = Default::default();
+    let queued = plan.ordered.iter().filter(|entry| entry.state != "usable");
+    for entry in plan.blocked.iter().chain(queued) {
+        let slot = counts.entry(entry.state).or_insert_with(|| (0, entry.reason.clone()));
+        slot.0 += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(state, (count, reason))| format!("{}（{} 个，state={}）", reason, count, state))
+        .collect()
 }
 
 /// 账号记录上的 provider id（缺失按默认 provider）。

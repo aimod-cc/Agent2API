@@ -445,9 +445,20 @@ pub(super) async fn forward_with_providers(
 ) -> Result<ForwardOutcome, GatewayError> {
     let model = model_of(ctx.body);
     if ctx.routing.group.is_some() {
+        // 路由组请求的初始占位快照：真正选到账号后会被 `target.decision` 覆盖，
+        // 但「一个都没选中就失败」时留下的就是这一份 —— 所以这里必须把成员级
+        // blocked 全量（不是前 12 条）和按原因聚合一起带上，否则事后只能看到
+        // 「都没有可用」却不知道是熔断、并发还是模型权限。
+        let blocked: Vec<_> = ctx.routing.group_projection.blocked.iter().cloned().collect();
+        let mut by_reason = serde_json::Map::new();
+        for entry in &ctx.routing.group_projection.blocked {
+            let Some(state) = entry.get("state").and_then(Value::as_str) else { continue; };
+            let count = by_reason.get(state).and_then(Value::as_u64).unwrap_or(0) + 1;
+            by_reason.insert(state.to_string(), Value::from(count));
+        }
         ctx.telemetry.set_route_decision(json!({ "scope": ctx.routing.scope, "configSnapshot": ctx.routing.json(),
             "strategy": ctx.routing.settings.strategy.as_str(), "sticky": ctx.routing.settings.sticky.as_str(),
-            "ordered": [], "blocked": ctx.routing.group_projection.blocked.iter().take(12).collect::<Vec<_>>(),
+            "ordered": [], "blocked": blocked, "blockedByReason": by_reason,
             "orderedTotal": ctx.routing.group_projection.accounts.len(), "blockedTotal": ctx.routing.group_projection.blocked.len() }));
     }
     // 候选家来自 `route_for_forward`（目录里没有这个模型名时会回落成默认
@@ -735,10 +746,20 @@ async fn attempt_queue(
         if ctx.telemetry.is_cancelled() {
             return Err(cancellation::cancelled_error());
         }
-        let mut target = super::account_admission::select(
+        let mut target = match super::account_admission::select(
             service, provider_ids, &cooldown_keys, &tried_ids, ctx.pinned_account,
             &conv_key, &ctx.routing, connections, ctx.telemetry,
-        ).await?;
+        ).await {
+            Ok(target) => target,
+            Err(error) => {
+                // 选路阶段就收尾时，把决策快照交给 telemetry：请求日志的 route
+                // 才不会只剩一份占位快照（「谁可试 / 谁被什么挡住」全在这里）。
+                if let Some(snapshot) = error.route_snapshot() {
+                    ctx.telemetry.set_route_decision(snapshot.clone());
+                }
+                return Err(error);
+            }
+        };
         if let Some(override_proxy) = ctx.proxy_override {
             target.proxy = override_proxy.clone();
             target.proxy_notice = None;

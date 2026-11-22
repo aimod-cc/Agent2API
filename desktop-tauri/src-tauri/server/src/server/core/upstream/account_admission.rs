@@ -16,6 +16,10 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
     let wait_started = Instant::now();
     let deadline = wait_started + Duration::from_secs(wait_seconds);
     let mut excluded = tried.to_vec();
+    // 最后一轮选路拿到的决策快照：排队超时也要把「当时谁可试、谁被什么挡住」
+    // 带回转发层落库，否则请求日志里只剩一句「账号均忙」，看不出是并发满还是
+    // 冷却/熔断/模型权限把它挡掉的。
+    let mut last_snapshot: Option<Value> = None;
     let notify = service.connections().changed_notify();
     loop {
         let wake = notify.notified();
@@ -26,6 +30,7 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
         match selected {
             Ok(target) if target.account_id.is_none() && excluded.len() > tried.len() => {},
             Ok(target) => {
+                if let Some(decision) = &target.decision { last_snapshot = Some(decision.clone()); }
                 let limit = target.account.as_ref().map(crate::server::core::routing::max_concurrent_of).unwrap_or(0);
                 if connection.try_rebind(target.account_id.clone(), limit) { return Ok(target); }
                 if pinned.is_none() {
@@ -33,13 +38,20 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
                     if excluded.len().saturating_sub(tried.len()) < 32 { continue; }
                 }
             }
-            Err(error) if error.code.as_deref() == Some("account_busy") || excluded.len() > tried.len() => {},
-            Err(error) => return Err(error),
+            Err(error) => {
+                if let Some(snapshot) = error.route_snapshot() { last_snapshot = Some(snapshot.clone()); }
+                if !(error.code.as_deref() == Some("account_busy") || excluded.len() > tried.len()) {
+                    return Err(error);
+                }
+            }
         }
         connection.rebind(None);
-        if Instant::now() >= deadline {
-            return Err(busy_timeout(providers, tried.len(), wait_started.elapsed(), wait_seconds));
-        }
+        let timed_out = || {
+            let mut error = busy_timeout(providers, tried.len(), wait_started.elapsed(), wait_seconds);
+            if let Some(snapshot) = &last_snapshot { error = error.with_route_snapshot(snapshot.clone()); }
+            error
+        };
+        if Instant::now() >= deadline { return Err(timed_out()); }
         let token = telemetry.cancel_token();
         tokio::select! {
             biased;
@@ -47,7 +59,7 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
                 return Err(cancellation::cancelled_error());
             }
             _ = tokio::time::sleep_until(deadline) => {
-                return Err(busy_timeout(providers, tried.len(), wait_started.elapsed(), wait_seconds));
+                return Err(timed_out());
             }
             _ = &mut wake => {},
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},

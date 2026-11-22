@@ -55,6 +55,11 @@ pub struct GatewayError {
     pub(crate) native_response: Option<(crate::server::core::protocol::native::WireProtocol, Value, axum::http::HeaderMap)>,
     /// 只随受保护的登录任务返回，不进入模型 API 的错误响应。
     pub(crate) login_diagnostic: Option<crate::server::core::login::LoginDiagnostic>,
+    /// 选路阶段的决策快照（`ordered` / `queued` / `blocked` / `blockedByReason`）。
+    /// 「一个账号都没试就失败」的错误由这里带上现场：请求日志里的 route
+    /// 原本只有选路成功时才写，提前收尾时只剩一份占位快照，看不到到底
+    /// 是「全在冷却」「全没凭证」还是「都被并发占满」。
+    pub(crate) route_snapshot: Option<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +85,7 @@ impl GatewayError {
             routing_error: None,
             native_response: None,
             login_diagnostic: None,
+            route_snapshot: None,
         }
     }
 
@@ -97,6 +103,7 @@ impl GatewayError {
             routing_error: None,
             native_response: None,
             login_diagnostic: None,
+            route_snapshot: None,
         }
     }
 
@@ -109,6 +116,18 @@ impl GatewayError {
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
         self
+    }
+
+    /// 挂上选路阶段的决策快照（`ordered` / `queued` / `blocked` / `blockedByReason`）。
+    /// 让「一个账号都没试就收尾」的失败也能在请求日志里留下完整现场。
+    pub fn with_route_snapshot(mut self, snapshot: Value) -> Self {
+        self.route_snapshot = Some(snapshot);
+        self
+    }
+
+    /// 取出挂着的决策快照（转发层据此写进请求日志的 `route`）。
+    pub fn route_snapshot(&self) -> Option<&Value> {
+        self.route_snapshot.as_ref()
     }
 
     /// 挂上可区分的拒绝原因（目前仅容量/并发拒绝等路径使用）
