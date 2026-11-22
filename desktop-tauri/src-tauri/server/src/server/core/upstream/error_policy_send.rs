@@ -46,7 +46,12 @@ pub(super) async fn send_with_retry(
                 if telemetry.replay_guard().blocked() || telemetry.is_cancelled() {
                     return Err(stopped(if telemetry.is_cancelled() { super::cancellation::cancelled_error() } else { gateway }));
                 }
-                let decision = error_policy::for_error_with(&budget.policy, adapter.provider_id(), &budget.model, &gateway, !error.safe_to_retry);
+                let mut decision = error_policy::for_error_with(&budget.policy, adapter.provider_id(), &budget.model, &gateway, !error.safe_to_retry);
+                // 传输层失败（连不上 / 写不出去 / 读不回来）换成别的账号也一样：
+                // 这类问题出在本机链路或出口上，换号只会把整个队列白打一遍。
+                // 保持「原地处理 + 原样收尾」，与 #644 的口径不冲突 —— 那条规则的
+                // 主语是「上游返回的错误」。
+                if error.network_failure { decision.action = crate::server::config::error_policy::ErrorAction::ReturnError; }
                 error_policy::attach(&mut gateway, &decision);
                 error_policy::note(telemetry, &decision, None);
                 if decision.hard_stop {
@@ -112,9 +117,29 @@ pub(super) async fn send_with_retry(
         let uncertain = images.is_some() && matches!(class, UpstreamErrorClass::Fatal { .. })
             && (status >= 500 || matches!(status, 408 | 409 | 425));
         let vision = telemetry.vision_enabled() && super::vision_compat::rejection_message(&detail.message);
-        let stop = error_policy::plugin_stops(adapter.provider_id(), &policy, &class, status, &body) || uncertain || vision;
+        // ── 插件声明的「停止」不再等于「整条请求到此为止」（2026-11-21 修正）──
+        // 实测一条 `pro` 组请求（21:34）：WorkBuddy 回 400「Illegal API invocation
+        // from an unapproved channel」，插件给了 `stop_switching`，旧代码据此把
+        // `hard_stop` 打开 —— 于是这条请求在 4 次尝试后**断在 WorkBuddy 上**，
+        // 明细里这一轮的 `errorPolicy` 是 null（统一规则压根没跑）。可同一时刻
+        // 队列里 autoclaw / codearts / quwork 都还能答（下一条请求就是 quwork 200
+        // 的），下游却拿到 400。用户的口径是「不管什么原因都要换下一个」。
+        //
+        // 现在的口径：`stop` 只表示「这一家别再原样发」，转成 **跳过提供商**
+        // （`SwitchProvider`）继续往下走；真正算硬终止的只剩两类 ——
+        // 结果**可能已经执行过**的（图片 `uncertain` / 视觉兼容 `vision`）与
+        // [`error_policy::plugin_stops`] 里 `evidence::hard_stop` 的证据类判据
+        // （重复执行 / 重复计费 / 已取消）。后者由 `decide_with` 自己按证据打开，
+        // 不受这里的 `explicit_stop` 影响。
+        let plugin_stop = error_policy::plugin_stops(adapter.provider_id(), &policy, &class, status, &body);
         let mut decision = error_policy::decide_with(&budget.policy, adapter.provider_id(), &budget.model,
-            &class, status, &body, false, stop);
+            &class, status, &body, false, uncertain || vision);
+        if plugin_stop && !decision.hard_stop {
+            decision.action = crate::server::config::error_policy::ErrorAction::SwitchProvider;
+            if decision.scope == crate::server::config::error_policy::CooldownScope::Auto {
+                decision.scope = crate::server::config::error_policy::CooldownScope::Model;
+            }
+        }
         if let Some(reset) = header_reset { decision.reset_at = Some(decision.reset_at.unwrap_or(reset).max(reset)); }
         let mut error = error_policy::classified_error(&class, &body);
         error_policy::attach(&mut error, &decision);

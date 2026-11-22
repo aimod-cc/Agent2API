@@ -109,6 +109,21 @@ impl StickySessions {
         })).collect()
     }
 
+    /// 某个候选失败后解除该会话的绑定（仅当绑定的正是这个候选）。
+    ///
+    /// 粘性只在成功时建立；失败不解除的后果是「同一会话的下一条请求仍然先撞
+    /// 同一个失败账号」—— 429 时表现为「这个会话每次先吃一个 429」。
+    /// `generation` 与 `bind` 同款守卫：期间有人手动清空过，就不动新状态。
+    pub(super) fn forget(&self, key: &str, model: &str, candidate: &str, generation: u64) {
+        if key.is_empty() || candidate.is_empty() { return; }
+        let Ok(mut table) = self.table.lock() else { return };
+        if table.generation != generation { return; }
+        let id = entry_id(key, model);
+        if table.entries.get(&id).is_some_and(|entry| entry.account_id == candidate) {
+            table.entries.remove(&id);
+        }
+    }
+
     pub(super) fn clear(&self, id: Option<&str>, model: Option<&str>) -> usize {
         let Ok(mut table) = self.table.lock() else { return 0 };
         let before = table.entries.len();

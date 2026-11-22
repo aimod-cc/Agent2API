@@ -445,9 +445,20 @@ pub(super) async fn forward_with_providers(
 ) -> Result<ForwardOutcome, GatewayError> {
     let model = model_of(ctx.body);
     if ctx.routing.group.is_some() {
+        // 路由组请求的初始占位快照：真正选到账号后会被 `target.decision` 覆盖，
+        // 但「一个都没选中就失败」时留下的就是这一份 —— 所以这里必须把成员级
+        // blocked 全量（不是前 12 条）和按原因聚合一起带上，否则事后只能看到
+        // 「都没有可用」却不知道是熔断、并发还是模型权限。
+        let blocked: Vec<_> = ctx.routing.group_projection.blocked.iter().cloned().collect();
+        let mut by_reason = serde_json::Map::new();
+        for entry in &ctx.routing.group_projection.blocked {
+            let Some(state) = entry.get("state").and_then(Value::as_str) else { continue; };
+            let count = by_reason.get(state).and_then(Value::as_u64).unwrap_or(0) + 1;
+            by_reason.insert(state.to_string(), Value::from(count));
+        }
         ctx.telemetry.set_route_decision(json!({ "scope": ctx.routing.scope, "configSnapshot": ctx.routing.json(),
             "strategy": ctx.routing.settings.strategy.as_str(), "sticky": ctx.routing.settings.sticky.as_str(),
-            "ordered": [], "blocked": ctx.routing.group_projection.blocked.iter().take(12).collect::<Vec<_>>(),
+            "ordered": [], "blocked": blocked, "blockedByReason": by_reason,
             "orderedTotal": ctx.routing.group_projection.accounts.len(), "blockedTotal": ctx.routing.group_projection.blocked.len() }));
     }
     // 候选家来自 `route_for_forward`（目录里没有这个模型名时会回落成默认
@@ -674,7 +685,20 @@ async fn attempt_queue(
     // 结果是「能换几个账号」根本没人管 —— 某家囤了 9 个账号时一次请求会一路
     // 试到第 10 个，而用户填的那个数字要等跨家才生效。
     let mut budget = RetryBudget::from_snapshot(ctx.error_policy.clone());
-    let switch_total = ctx.error_policy.settings.switches as usize;
+    // ── 换号预算的**下限**是整条候选队列 ─────────────────────────
+    // 用户填的 `switches` 表达「最多换几次」，但它不能比候选队列还短：
+    // 队列里有 N 个没试过的候选时提前收尾，就是把「换一个本来能答上来的
+    // 账号/提供商」变成「直接 400 给下游」。生产上的形状就是 21 个候选、
+    // 默认 10 次预算 —— 试到第 10 个（全是同一家的工具预算 400）就收尾，
+    // 而排在第 12 位、不做工具模拟的那家其实一条就 200。
+    //
+    // 所以取 `max(用户值, 队列规模)`，再受转发层的 `MAX_ROUTE_ATTEMPTS`
+    // 约束（那才是防死循环的硬闸）。
+    let queue_cap = rotate::scoped_account_cap(service, provider_ids, cooldown_keys.request_model(),
+        ctx.pinned_account, Some(&ctx.routing));
+    // 配成 0 是显式的「不换号」，尊重它；其余情况一律按队列规模兜底。
+    let configured = ctx.error_policy.settings.switches as usize;
+    let switch_total = if configured == 0 { 0 } else { configured.max(queue_cap).min(MAX_ROUTE_ATTEMPTS) };
     let mut switches_left = switch_total;
     let mut decision = ctx.telemetry.route_decision().unwrap_or_else(|| json!({}));
     decision["errorPolicyConfig"] = json!({ "revision": config::error_policy::revision(&ctx.error_policy),
@@ -722,10 +746,20 @@ async fn attempt_queue(
         if ctx.telemetry.is_cancelled() {
             return Err(cancellation::cancelled_error());
         }
-        let mut target = super::account_admission::select(
+        let mut target = match super::account_admission::select(
             service, provider_ids, &cooldown_keys, &tried_ids, ctx.pinned_account,
             &conv_key, &ctx.routing, connections, ctx.telemetry,
-        ).await?;
+        ).await {
+            Ok(target) => target,
+            Err(error) => {
+                // 选路阶段就收尾时，把决策快照交给 telemetry：请求日志的 route
+                // 才不会只剩一份占位快照（「谁可试 / 谁被什么挡住」全在这里）。
+                if let Some(snapshot) = error.route_snapshot() {
+                    ctx.telemetry.set_route_decision(snapshot.clone());
+                }
+                return Err(error);
+            }
+        };
         if let Some(override_proxy) = ctx.proxy_override {
             target.proxy = override_proxy.clone();
             target.proxy_notice = None;
@@ -785,7 +819,7 @@ async fn attempt_queue(
                     return Ok(outcome);
                 },
                 Err(error) => {
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     // 手动终止优先（与无状态路径同一判定与理由）：不把已受理的
                     // 终止当成「这一轮失败」去顺延下一个账号
@@ -798,10 +832,13 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
-                    return Err(error);
+                    // 兜底也没能给出下一个：这时**不再把上游的 4xx 原样透给下游**
+                    // —— 见 `exhausted_error`（换过 ≥2 个对象一律收成可重试的 503）。
+                    return Err(exhausted_error(Some(error), tried_ids.len()));
 
                 }
             }
@@ -871,10 +908,22 @@ async fn attempt_queue(
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
                 Err(error) => {
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
-                    if matches!(error.code.as_deref(), Some("plugin_busy" | "gateway_busy" | "account_busy" | "plugin_resource_limit"
-                        | "plugin_protocol_error" | "plugin_trap" | "plugin_response_started" | "web_tools_invalid_request")) { return Err(error); }
+                    // ── 这一支以前「忙 / 插件协议错 / 插件崩了」一律直接抛回下游 ──
+                    // 现在只有「响应字节已经在往客户端写」（`plugin_response_started`）
+                    // 例外。实测（2026-11-21 21:34，`pro` 组）：WorkBuddy 回 400
+                    // 「Illegal API invocation from an unapproved channel」，走的就是
+                    // 这张名单 → 直接 `return Err`，明细里那一轮的 `errorPolicy` 是
+                    // null（统一错误规则压根没跑）。结果请求在 4 次尝试后断在这家，
+                    // 下游拿到 400 —— 而同一时刻 autoclaw / codearts / quwork 都能答
+                    // （紧随其后的那条请求就是 quwork 200 的）。
+                    //
+                    // 忙（`plugin_busy` / `gateway_busy` / `account_busy`）、资源满
+                    // （`plugin_resource_limit`）、插件协议错 / 插件崩了（`plugin_trap`）
+                    // 都属于「换一个候选仍可能有救」，交给下面的统一规则顺延：
+                    // 顺延的前提是没救，而这几种恰恰是「这次没发成」而不是「这条请求死了」。
+                    if error.code.as_deref() == Some("plugin_response_started") { return Err(error); }
                     let account_unavailable = matches!(error.code.as_deref(),
                         Some("account_model_unavailable" | "account_model_permissions_unknown"));
                     if ctx.images.is_some() && !account_unavailable { return Err(error); }
@@ -895,10 +944,11 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
-                    return Err(error);
+                    return Err(exhausted_error(Some(error), tried_ids.len()));
 
                 }
             }
@@ -1146,25 +1196,21 @@ async fn attempt_queue(
                     // 个模型名在别几家都能答。换号顺延本来就不该只看「发出去之后
                     // 上游怎么回」：既然本地就判定不可用，队列里的下一家有机会。
                     //
-                    // 其余构造期错误（400 缺模型名 / 转换失败、401 账号缺凭证、
-                    // 500 内部坏了）继续**直接终止**：那些是「这份请求本身坏了」，
-                    // 换个账号发的是同一份坏请求，换满预算只会把一次 400 变成四条
-                    // 400，并把真实原因埋进顺延链里。
-                    let account_unavailable = error.code.as_deref().is_some_and(|code| {
-                        matches!(code, "account_model_unavailable" | "account_model_permissions_unknown")
-                    });
+                    // 其余构造期错误（网页工具字符预算超限这类 400、账号对模型无
+                    // 权限、转换失败）同样交给**统一错误规则**判定（#644）：规则会
+                    // 区分「换一个账号仍可能好」（换号）、「同一家换账号也没用」（跳过
+                    // 这一家）与「再发一次可能重复执行」（硬终止）。在这里写死
+                    // `return Err` 等于绕过用户的整套错误处理设置。
                     if i32::from(readiness::LOCAL_PRECONDITION_STATUS) != error.status_code {
-                        if account_unavailable || error.status_code == 501 {
-                            let mut error = error;
-                            if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
-                                last_error = Some(error); continue 'accounts;
-                            }
-                            return Err(error);
+                        let mut error = error;
+                        if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
+                            &target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                            &conv_key, &model, sticky_generation) {
+                            last_error = Some(error); continue 'accounts;
                         }
-                        return Err(error);
+                        return Err(exhausted_error(Some(error), tried_ids.len()));
                     }
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if defer_to_next_account(
                         service,
                         provider_ids,
@@ -1206,7 +1252,7 @@ async fn attempt_queue(
                     if !tried_ids.contains(&attempt_key) {
                         tried_ids.push(attempt_key.clone());
                     }
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &error) { return Err(error); }
                     if target.account_id.as_deref().is_some_and(|id| rotate::allows_route_skip(service, id))
                         && rotate::pick_next_account(service, provider_ids, &cooldown_keys,
                             &tried_ids, ctx.pinned_account, &ctx.routing).is_some()
@@ -1338,10 +1384,14 @@ async fn attempt_queue(
                     // 时，粘的必须是现在这个能干活的。
                     let route_settings = ctx.routing.settings;
                     if let Some(account_id) = target.account_id.as_deref() {
-                        if route_settings.breaker_enabled {
-                            service
-                                .route
-                                .breaker_success(account_id, route_settings.breaker_success_threshold);
+                        // 熔断的「开关与阈值」以错误规则那份设置为准：失败计数在
+                        // `error_policy_finish` 里读的是 `error_policy.settings`，
+                        // 成功恢复若还读 `routing.settings`，升级后两边一旦不同步，
+                        // 失败计数就永远清零不了 —— 于是一个历史失败的账号每失败
+                        // 一次都被当成「刚攒够阈值」，反复熔断。
+                        let policy = &ctx.error_policy.settings;
+                        if policy.breaker {
+                            service.route.breaker_success(account_id, policy.breaker_successes as i64);
                         }
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
@@ -1394,7 +1444,7 @@ async fn attempt_queue(
                     break (response, wire_model, plan.response, antigravity_session);
                 }
                 Err(failure) => {
-                    if ctx.telemetry.replay_guard().blocked() {
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &failure.error) {
                         ctx.telemetry.finish_last_attempt(Some(i64::from(failure.error.status_code)), Some(&failure.error.message));
                         return Err(failure.error);
                     }
@@ -1484,12 +1534,21 @@ async fn attempt_queue(
                                 service, provider_id, target.account_id.as_deref(),
                             ).await {
                                 let delay = host_rule.retry_delay(0);
-                                if !budget.take_retry(delay) { return Err(failure.error); }
-                                ctx.telemetry.note_attempt_retry("登录凭证已刷新，在原账号重试一次", Some(401), delay);
-                                super::error_policy_send::sleep_or_cancel(ctx.telemetry, delay).await;
-                                session = fresh;
-                                last_error = Some(failure.error);
-                                continue;
+                                // 等待预算用完只说明「这一刻不适合原地再等」，**不是**整条
+                                // 请求的结论：以前这里直接 `return Err`，用户看到的就是
+                                // 「401 之后什么都没换就抛出异常」。现在落下去走统一分类
+                                // （换号 / 换家），把剩下的候选试完。
+                                if budget.take_retry(delay) {
+                                    ctx.telemetry.note_attempt_retry("登录凭证已刷新，在原账号重试一次", Some(401), delay);
+                                    super::error_policy_send::sleep_or_cancel(ctx.telemetry, delay).await;
+                                    session = fresh;
+                                    last_error = Some(failure.error);
+                                    continue;
+                                }
+                                logging::console_line(
+                                    "[Upstream]",
+                                    &format!("账号 {account_id} 的凭证已刷新，但等待预算已用完，改为换号继续"),
+                                );
                             }
                         } else {
                             // 刷新**失败**：这是「401 了、也试过续期、但没救回来」的
@@ -1556,13 +1615,16 @@ async fn attempt_queue(
                         Some(i64::from(failure.error.status_code)),
                         Some(&failure.error.message),
                     );
-                    if ctx.telemetry.replay_guard().blocked() { return Err(failure.error); }
+                    if ctx.telemetry.replay_guard().blocked() && !reopen_after_rejection(ctx, &failure.error) {
+                        return Err(failure.error);
+                    }
                     let mut error = failure.error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                         last_error = Some(error); continue 'accounts;
                     }
-                    return Err(error);
+                    return Err(exhausted_error(Some(error), tried_ids.len()));
 
                 }
             }
@@ -1664,10 +1726,11 @@ async fn attempt_queue(
                 super::error_policy::attach(&mut error, &decision);
                 ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
                 if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total,
+                        &conv_key, &model, sticky_generation) {
                     last_error = Some(error); continue 'accounts;
                 }
-                return Err(error);
+                return Err(exhausted_error(Some(error), tried_ids.len()));
             }
             Gate::Held(head)
         } else {
@@ -1842,8 +1905,88 @@ async fn attempt_queue(
             }
         }
     }
-    Err(GatewayError::with_status(500, "上游转发重试次数超限"))
+    // ── 「换号轮转用完」：给下游一个**可重试**的答案，而不是一条 500 ──────
+    // 改造前这里恒返回 `500 上游转发重试次数超限`：客户端把它当服务器错误，
+    // 既不知道能不能重试，也看不到最后一次真实原因（排队里 43 个账号试到
+    // 预算用尽，日志只剩这一句）。见 [`exhausted_error`]。
+    Err(exhausted_error(last_error, tried_ids.len()))
 }
+
+/// 换号 / 排队轮转走到尽头时的收尾错误。
+///
+/// 判据只有一条：**这条最终错误是否「等一会儿再试可能就好」**。
+///
+/// * 是（402 余额、408、425、429 限流/无套餐、5xx、以及并发排队超时的
+///   `account_busy`）→ 收成 **503 + `Retry-After`**，正文带上最后一次的上游
+///   原文。理由：换号 / 排队已经试遍整个池子，这一轮确实没人能答；对下游来说
+///   这属于「网关暂时没有承载者」，重发一次就有机会落到已经恢复的账号上。
+///   保持上游的 429 反而更糟 —— 同一个模型名在下一分钟可能就由另一家答上来，
+///   而 429 让客户端以为「是它自己的额度问题」。
+/// * 否（400 参数 / 401 凭据 / 403 权限 / 404 模型不存在这类）→ **原样返回** ——
+///   但只在**这条请求只试过一个对象**时才原样：那才可能真的是「客户端请求本身
+///   有问题」。一旦已经换过号 / 换过家（`tried >= 2`）还是同一个结论，就不能再
+///   把它当客户端错误丢出去 —— 同一份 body 在两家都撞 400，最先该怀疑的是网关
+///   侧的渠道 / 模型映射，把 400 透给下游只会让客户端以为「我的请求写错了」直接
+///   中止（实测 WorkBuddy 那条 `Illegal API invocation from an unapproved
+///   channel` 就是这样：上游渠道问题，客户端却收到 400）。这类收成 503 +
+///   `Retry-After`，正文保留上游原文，客户端会按可重试处理。
+fn exhausted_error(last: Option<GatewayError>, tried: usize) -> GatewayError {
+    let Some(error) = last else {
+        return GatewayError::with_status(
+            503, "上游转发重试次数超限：这一轮没有任何候选账号应答，请稍后重试",
+        )
+        .with_code("route_exhausted")
+        .with_retry_after_seconds(1);
+    };
+    let retryable = matches!(error.status_code, 402 | 408 | 425 | 429 | 500 | 502 | 503 | 504)
+        || matches!(error.code.as_deref(), Some("account_busy" | "route_empty" | "route_exhausted"));
+    if !retryable && tried < 2 {
+        return error;
+    }
+    crate::server::logging::log_with_level(
+        "[Upstream]",
+        &format!(
+            "⚠️ 候选池本轮全部失败（最后一次 HTTP {} {}），按可重试的 503 route_exhausted 收尾",
+            error.status_code, error.message,
+        ),
+        "warn",
+    );
+    GatewayError::with_status(503, format!(
+        "本轮候选账号都没答上来（最后一次：HTTP {} {}）；已进入冷却或排队的账号会自动恢复，请稍后重试",
+        error.status_code, error.message,
+    ))
+    .with_code("route_exhausted")
+    .with_reason("route_exhausted")
+    .with_retry_after_seconds(error.retry_after_secs.unwrap_or(1))
+}
+
+/// 上游**明确拒收**这一轮之后，解除请求级的「禁止重放」位，让队列继续（2026-11-21 加）。
+///
+/// ── 这是 WorkBuddy 那条 400 的真正卡点 ───────────────────────────────
+/// 插件家（`workbuddy` / `raccoon` / `loomy` 这类 WASM 对话）在**提交前**就会
+/// `freeze()` 请求级的 ReplayGuard（`wasm/conversation/workbuddy_http.rs`），把
+/// `blocked` 永久置 true。上游回 400 之后，本函数这些分支一进来就看到
+/// `blocked() == true` → `return Err(error)`，于是：
+/// 队列里还有十几个可用候选一个都不试、`finish_failure` 根本没跑（明细里
+/// `errorPolicy` 是 null，日志里没有「错误结算」）、下游直接收到 400。
+///
+/// 判据刻意写死成「上游当场拒收」这一档：400 / 401 / 402 / 403 / 404 / 405 /
+/// 406 / 409 / 410 / 413 / 415 / 422 / 429 / 501。这些状态说明请求**没有**进
+/// 上游执行队列，重放不会造成重复执行 / 重复计费；超时、5xx、无响应（0）不在此列
+/// —— 那些可能已经执行了，仍按「禁止重放」原样收尾。
+fn reopen_after_rejection(ctx: &ProviderContext<'_>, error: &crate::server::errors::GatewayError) -> bool {
+    if !ctx.telemetry.replay_guard().blocked() { return false; }
+    if ctx.telemetry.response_started() || ctx.telemetry.is_cancelled() { return false; }
+    if !matches!(error.status_code, 400 | 401 | 402 | 403 | 404 | 405 | 406 | 409 | 410 | 413 | 415 | 422 | 429 | 501) {
+        return false;
+    }
+    ctx.telemetry.replay_guard().confirm_not_sent();
+    logging::log_with_level("[Upstream]", &format!(
+        "上游当场拒收（HTTP {} {}）：这一轮没有执行，已解除「禁止重放」，继续顺延下一家",
+        error.status_code, error.message), "warn");
+    true
+}
+
 
 /// 门控后的 Chat 响应形态：`Live` = 未消费的 `Response`（原样直通）；
 /// `Held` = 预读产物（用预读字节 + 剩余流重建，见 `upstream::refusal`）。
@@ -2081,7 +2224,8 @@ async fn attempt_custom(
                 return Ok(outcome);
             }
             Err(mut error) => {
-                if ctx.telemetry.replay_guard().blocked() || ctx.telemetry.response_started() {
+                let blocked = ctx.telemetry.replay_guard().blocked();
+                if (blocked && !reopen_after_rejection(ctx, &error)) || ctx.telemetry.response_started() {
                     ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
                     return Err(error);
                 }

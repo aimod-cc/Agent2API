@@ -9,6 +9,10 @@ edition = "2021"
 # 要求 1.88，会让「照着 rust-version 装旧工具链」的构建直接失败。
 rust-version = "1.88"
 license = "AGPL-3.0-only"
+# workspace 拆出 `server/` 之后本 crate 与它各有一个 bin，`tauri dev` 调的是
+# 裸 `cargo run`（不带 --bin）：不指定 default-run 就会报
+# 「could not determine which binary to run」。桌面端是默认入口。
+default-run = "workbuddy-proxy-desktop"
 repository = "https://github.com/aimod-cc/Agent2API"
 homepage = "https://github.com/aimod-cc/Agent2API"
 

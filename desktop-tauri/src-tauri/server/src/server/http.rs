@@ -1223,6 +1223,9 @@ fn attach_cors(headers: &mut axum::http::HeaderMap) {
 /// `/v1/models` 是独立的只读探针：不带 Key 可读取，携带 Key 时必须有效。
 async fn require_api_key(mut request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
+    // 面包屑：面板/客户端的**每个**请求都在这里过一遍。启动后崩溃时，
+    // 最后一行能直接告诉我们「是后台维护还是某个接口」，不用再猜。
+    crate::server::logging::stage(format!("请求 {} {path}", request.method()));
     if path.starts_with("/v1/") {
         let access = match api::model_access::authenticate(request.headers(), "") {
             Ok(access) => access,

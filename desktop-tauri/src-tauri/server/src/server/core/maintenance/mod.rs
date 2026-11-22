@@ -268,12 +268,15 @@ async fn complete(
     recorder: storage::Recorder,
 ) -> Result<Detail, String> {
     let manual = request.source == "manual";
+    logging::stage(format!("维护开始 task={}", request.task_id));
     let snapshots = types::accounts(store);
     let raw = if request.task_id == CREDENTIAL {
         if request.forced_account_ids.is_empty() {
+            logging::stage("维护分支：凭证维护（自动）");
             credential_maintenance::refresh_selected_accounts(store, request.account_ids.as_deref())
                 .await
         } else {
+            logging::stage("维护分支：凭证维护（指定账号）");
             credential_maintenance::refresh_accounts(
                 store,
                 request.account_ids.as_deref(),
@@ -282,6 +285,7 @@ async fn complete(
             .await
         }
     } else if manual {
+        logging::stage("维护分支：模型/凭证刷新（手动）");
         providers::adapter::refresh_implemented_forced(
             store,
             &request.accounts,
@@ -289,8 +293,10 @@ async fn complete(
         )
         .await
     } else {
+        logging::stage("维护分支：模型/凭证刷新（自动）");
         providers::adapter::refresh_implemented(store).await
     };
+    logging::stage("维护分支完成，开始整理逐账号结果");
     let mut items = raw
         .iter()
         .enumerate()

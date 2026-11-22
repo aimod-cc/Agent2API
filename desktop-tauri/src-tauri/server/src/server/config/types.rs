@@ -643,27 +643,30 @@ pub const KEY_RETRY_ACCOUNT_SWITCH_COUNT: &str = "retryCrossProviderCount";
 /// 两次重试之间的等待秒数
 pub const KEY_RETRY_INTERVAL_SECONDS: &str = "retryIntervalSeconds";
 
-/// 同一账号的原地重发次数默认值：失败后再试 3 次（连同首发共 4 次发送）
-pub const DEFAULT_RETRY_COUNT: i64 = 3;
-/// 换账号的次数默认值：失败后最多换 5 个账号。
+/// 同一账号的原地重发次数默认值：0 —— 上游明确报错后不再原地重发。
 ///
-/// 比原地重发那档更宽是刻意的：换号的成本主要在「等到下一个可用账号」，
-/// 而一个账号失败往往说明它这份额度确实不通，多换几个比快速失败更符合预期。
-pub const DEFAULT_RETRY_SWITCH_COUNT: i64 = 5;
+/// 原地重发的成本是「客户端干等一个间隔」，收益只是「上游也许抖了一下」。
+/// 有别的候选时，换一个账号/模型的成功率高得多，所以默认直接顺延；需要
+/// 原地重发的人可以在设置里调大。
+pub const DEFAULT_RETRY_COUNT: i64 = 0;
+/// 换账号的次数默认值：32 —— 覆盖绝大多数部署的候选队列；上限另见
+/// [`RETRY_MAX_SWITCH_COUNT`]（100），账号多的人可以自己往上调。
+pub const DEFAULT_RETRY_SWITCH_COUNT: i64 = 32;
 /// 重试间隔默认值：5 秒
 pub const DEFAULT_RETRY_INTERVAL_SECONDS: i64 = 5;
 
-/// 「指定错误码直接换号」的配置键（值是 HTTP 状态码数组，如 `[402, 429]`）。
+/// **例外**错误码名单的配置键（值是 HTTP 状态码数组，如 `[400]`）。
 ///
-/// 键名里的 `NoRetry` 是历史措辞（最早的语义是「命中即报错」），行为后来
-/// 改成了「不在同一账号重发、直接换下一个账号」—— 键名是配置契约，改名
-/// 会让老配置读不到，保留至今。命中名单的上游失败跳过本账号：原地重发与
-/// 同账号补救（内容拦截换提示词 / 401 刷新）都不做，按队列换下一个账号
-/// 继续试，换满仍失败才把错误给客户端。
+/// ── 语义在 #644 之后反转 ────────────────────────────────
+/// 现在默认是「任何上游错误都换号」，名单表达的是**例外**：命中的状态码
+/// **允许直接返回给下游、不换号**（例如调用方希望自己处理 400 的请求校验错误）。
+///
+/// 键名里的 `NoRetry` 是历史措辞（最早的语义是「命中即报错」，后来一度改成
+/// 「命中就直换」），键名是配置契约，改名会让老配置读不到，所以保留至今 ——
+/// 语义以本节为准：**命中 = 允许把错误透传给下游（因此不再换号）**。
 pub const KEY_RETRY_NO_RETRY_CODES: &str = "noRetryStatusCodes";
-/// 默认名单：402（WorkBuddy 积分不足）。余额问题重发结论不变，
-/// 客户端拿到 402 才能如实体感「这个账号没钱了」。
-pub const DEFAULT_NO_RETRY_CODES: &[u16] = &[402];
+/// 默认名单：空 —— 任何上游错误都换号，不把错误透传给下游。
+pub const DEFAULT_NO_RETRY_CODES: &[u16] = &[];
 /// 名单里状态码的合法范围：HTTP 状态码本身就定义在 100–599
 pub const RETRY_CODE_MIN: u16 = 100;
 pub const RETRY_CODE_MAX: u16 = 599;
@@ -678,6 +681,12 @@ pub const RETRY_MAX_NO_RETRY_CODES: usize = 50;
 /// 该档（不重发 / 不换号），间隔 0 = 立即重发。
 pub const RETRY_MIN_COUNT: i64 = 0;
 pub const RETRY_MAX_COUNT: i64 = 10;
+/// 「换账号次数」的上界：与转发层 `MAX_ROUTE_ATTEMPTS`（100）对齐。
+///
+/// 换账号不是「重发」：一份请求最多试几个候选，本身受循环上限约束，所以
+/// 这里放到 100，让账号多的部署能把整条队列试完，而不是被一个 10 次的上界
+/// 提前收尾。
+pub const RETRY_MAX_SWITCH_COUNT: i64 = 100;
 pub const RETRY_MIN_INTERVAL_SECONDS: i64 = 0;
 pub const RETRY_MAX_INTERVAL_SECONDS: i64 = 300;
 
@@ -700,11 +709,12 @@ pub struct RetrySettings {
     pub account_switch_count: i64,
     /// 两次重试之间的间隔（秒）
     pub interval_seconds: i64,
-    /// **指定错误码直接换号**名单（[`KEY_RETRY_NO_RETRY_CODES`]）。
+    /// **例外**错误码名单（[`KEY_RETRY_NO_RETRY_CODES`]）：命中的上游状态码允许
+    /// 直接返回给下游、不再换号。
     ///
-    /// 为什么是 `Arc<[u16]>` 而不是 `Vec<u16>`：快照被逐失败请求取用，
-    /// `Arc` 让克隆只付一次指针自增；判定（`no_retry`）读的是共享切片，
-    /// 不需要任何锁。
+    /// 默认空 = 任何上游错误都换号。为什么是 `Arc<[u16]>` 而不是 `Vec<u16>`：
+    /// 快照被逐失败请求取用，`Arc` 让克隆只付一次指针自增；判定（`no_retry`）
+    /// 读的是共享切片，不需要任何锁。
     pub no_retry_codes: Arc<[u16]>,
 }
 
@@ -727,7 +737,7 @@ impl RetrySettings {
         self.account_switch_count.max(0) as usize
     }
 
-    /// 这个上游状态码是否命中「直接换号」名单。
+    /// 这个上游状态码是否在**例外**名单里（命中 = 允许直接把错误返回下游）。
     pub fn no_retry(&self, status: u16) -> bool {
         self.no_retry_codes.contains(&status)
     }

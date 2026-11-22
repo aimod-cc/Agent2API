@@ -222,6 +222,34 @@ pub fn console_line(tag: &str, text: &str) {
     write_file_line(&line);
 }
 
+/// 阶段面包屑：只在 `AGENT2API_TRACE_STAGES=1` 时输出 `[Stage] …` 一行。
+///
+/// 为什么需要它：Windows 上的栈溢出走 SEH，`0xC00000FD` 直接终止进程，
+/// **不会**打印调用栈（`RUST_BACKTRACE` 也拿不到帧）。进程死前留下的唯一线索
+/// 就是控制台最后一行，于是把「现在走到哪一步」显式打出来 —— 复现一次就能
+/// 指着最后一条 `[Stage]` 说「死在这一步」，不用再靠猜。
+///
+/// 只写控制台、不入库：一次启动会打出几十行，属于排障期的一次性输出，
+/// 不该污染日志页。
+pub fn stage(text: impl AsRef<str>) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        // **debug 构建默认打开**：栈溢出是「进程说死就死」，逼着人先设环境变量
+        // 再复现一次，等于多一轮 8 分钟编译。排障期宁可吵一点。
+        // release 构建仍默认关闭（正式分发不带这些行）。
+        // 显式 `AGENT2API_TRACE_STAGES=0` 可在 debug 下静音。
+        let raw = std::env::var("AGENT2API_TRACE_STAGES").ok();
+        match raw.as_deref().map(str::trim) {
+            Some("0" | "false" | "FALSE" | "no") => false,
+            Some("1" | "true" | "TRUE" | "yes") => true,
+            _ => cfg!(debug_assertions),
+        }
+    });
+    if enabled {
+        console_line("[Stage]", text.as_ref());
+    }
+}
+
 /// 双通道日志（对应 Node 版 log()）。
 ///
 /// 入库前会做与 Node 版相同的处理：把各段参数用空格连接后 trim，

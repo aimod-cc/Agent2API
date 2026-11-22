@@ -48,6 +48,10 @@ export type RouteDecision = {
   configSnapshot?: { groupId?: string; groupName?: string; members?: Array<Omit<RouteMember, 'accounts'> & { accountCount: number }>; capturedAt: number; scope: string; strategy: string; sticky: string; providerScope?: RouteProviderScope; accountCount?: number; providerCount?: number }
   orderedTotal?: number
   blockedTotal?: number
+  /** ordered 里「并发已满、排队等槽位」的个数（状态仍是 concurrency） */
+  queuedTotal?: number
+  /** 被跳过者按原因聚合（state → 个数）：先看这一眼，再展开看具体是谁 */
+  blockedByReason?: Record<string, number>
   ordered?: RouteEntry[]
   blocked?: RouteEntry[]
 }

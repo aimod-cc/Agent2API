@@ -314,7 +314,19 @@ fn select_target_account_sync(
     decision["scope"] = Value::String(request_routing.scope.clone());
     decision["configSnapshot"] = request_routing.json();
     if let Some(blocked) = decision.get_mut("blocked").and_then(Value::as_array_mut) {
-        blocked.extend(request_routing.group_projection.blocked.iter().take(12usize.saturating_sub(blocked.len())).cloned());
+        // 路由组投影里被挡下的成员同样全量带上（理由见 `decision_json`）：
+        // 「成员不可用原因」是「为什么要换家」的头号证据，截断后只剩前几条。
+        blocked.extend(request_routing.group_projection.blocked.iter().take(DECISION_LIST_CAP).cloned());
+    }
+    // 路由组投影（成员级：网关 Key 不允许 / 提供商不可用 / 生图模型 / 模型不在目录 /
+    // 该家没有可用账号）的拦截也并进同一条聚合 —— 排障时「为什么换家」与「为什么
+    // 换号」是同一个问题的两面，分在两处看就又得靠人脑拼。
+    if let Some(map) = decision.get_mut("blockedByReason").and_then(Value::as_object_mut) {
+        for entry in &request_routing.group_projection.blocked {
+            let Some(state) = entry.get("state").and_then(Value::as_str) else { continue };
+            let count = map.get(state).and_then(Value::as_u64).unwrap_or(0) + 1;
+            map.insert(state.to_string(), Value::from(count));
+        }
     }
     decision["blockedTotal"] = (plan.blocked.len() + request_routing.group_projection.blocked.len()).into();
     if !conv_key.is_empty() {
@@ -348,23 +360,28 @@ fn select_target_account_sync(
             .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
             .count();
         if !balance_blocked_ids.is_empty() && enabled_total > 0 {
+            logging::log_with_level("[Upstream]", &format!(
+                "⚠️ 路由内没有可转发账号：{} 个启用账号全部被限制器拦下（余额不足 / Token 周期额度到顶）",
+                balance_blocked_ids.len()), "warn");
             return Err(GatewayError::with_status(
                 503,
                 format!(
                     "所有启用中的账号都被限制器拦下（已跳过 {} 个账号），无账号可转发：请检查余额读数与 Token 周期用量，或到账号设置的「限制器」里调整规则",
                     balance_blocked_ids.len()
                 ),
-            ));
+            ).with_route_snapshot(decision.clone()));
         }
+        logging::log_with_level("[Upstream]",
+            "⚠️ 路由内没有可转发账号：候选账号全部被禁用", "warn");
         return Err(GatewayError::with_status(
             503,
             "所有账号均已禁用，无账号可转发：请在账号页启用至少一个账号",
-        ));
+        ).with_route_snapshot(decision.clone()));
     }
 
     if super::account_admission::all_busy(&candidates, &counts, tried_ids) {
         return Err(GatewayError::with_status(503, "当前路由内的账号均已达到并发上限")
-            .with_code("account_busy"));
+            .with_code("account_busy").with_route_snapshot(decision.clone()));
     }
 
     if request_routing.strict_vision {
@@ -379,6 +396,25 @@ fn select_target_account_sync(
     if pinned.is_none() {
         let earliest = enabled.iter().map(|account| routing::rate_limit_reset_at(account, keys, now)).filter(|at| *at > now).min();
         if let Some(at) = earliest {
+            // ── 兜底：全队列都在冷却，但冷却未必是上游说的 ────────────
+            // `routing_cooldown` 这条 429 是本请求「一个候选都没试就失败」的
+            // 唯一来源，也是用户看到的「又是直接报错、没换号没换家」。
+            //
+            // 冷却有两类来源：上游明确给了 `resetAt`（`guessed = false`）——
+            // 它说「现在别来」，必须尊重，照旧回 429 让客户端等；另一类是我们
+            // 自己按退避规则**估算**出来的时长（`guessed = true`），用它把整条
+            // 请求判死属于「自己的记账把自己的活掐了」。所以这里只越过估算
+            // 冷却：挑最早恢复的那个先试一次。成了就解开，不成也照常记一次
+            // 失败（下一次估算会更长）。
+            if let Some(account) = last_resort(&enabled, keys, tried_ids, now, &snap.open) {
+                let id = routing::account_id(&account).unwrap_or_default().to_string();
+                if let Some(picked) = service.store.get_session_by_id(&id) {
+                    logging::console_line("[Upstream]", &format!(
+                        "候选全部处于冷却（最早 {} 恢复），按兜底尝试估算冷却中的账号 {id}", errors::format_reset_at_text(at)));
+                    decision["lastResort"] = Value::Bool(true);
+                    return Ok(with_proxy_notice(account, picked.proxy, picked.proxy_error, id, Some(decision)));
+                }
+            }
             return Err(GatewayError::with_status(429, format!("当前路由对象处于冷却期，最早 {} 恢复；未提前重发", errors::format_reset_at_text(at)))
                 .with_code("routing_cooldown").with_retry_after_seconds(at.saturating_sub(now).max(0) as u64 / 1000 + 1));
         }
@@ -405,6 +441,7 @@ fn select_target_account_sync(
             best_effort = Some(account.clone());
         }
     }
+    let mut no_session: Vec<String> = Vec::new();
     if let Some(account) = best_effort {
         if let Some(id) = routing::account_id(&account).map(str::to_string) {
             if let Some(entry) = service.store.get_session_by_id(&id) {
@@ -416,22 +453,61 @@ fn select_target_account_sync(
                     Some(decision),
                 ));
             }
+            // 账号在库里但取不到会话 = 凭证缺失。以前这里静默跳过，最后让
+            // 上层报一句「都没有可用凭证」，看不出是哪个账号、为什么。
+            no_session.push(account_display(&account));
         }
     }
     if request_routing.requires_account() {
         return Err(GatewayError::with_status(503,
             "当前生图账号均无可用凭证；未使用默认登录态或其他账号")
-            .with_code("image_account_unavailable"));
+            .with_code("image_account_unavailable").with_route_snapshot(decision.clone()));
     }
     if pinned.is_some() {
         return Err(GatewayError::with_status(401,
             "指定账号没有可用凭证；未回退到队首或默认登录态")
-            .with_code("account_scope_mismatch"));
+            .with_code("account_scope_mismatch").with_route_snapshot(decision.clone()));
     }
+    // ── 收尾之前先排除「只是忙」这一种可能 ─────────────────────
+    // `all_busy` 会跳过本轮已被排除（`tried`）的账号，于是「所有有凭证的账号
+    // 都只是被并发上限挤掉」时它会返回 false，请求一路掉到下面的收尾分支，
+    // 报出「没有可用凭证」这种与事实相反的话。这里按**不看 tried** 的口径再判
+    // 一次：还有凭证的账号全在并发上限上就返回排队超时，让准入循环继续等。
+    if super::account_admission::all_busy(&enabled, &counts, &[]) {
+        return Err(GatewayError::with_status(503, "当前路由内的账号均达到并发上限，正在排队等待槽位")
+            .with_code("account_busy").with_reason("account_busy").with_retry_after_seconds(1)
+            .with_route_snapshot(decision.clone()));
+    }
+    // ── 收尾：这一轮一个都发不出去 ─────────────────────────────
+    // 以前这里固定写「当前模型路由中的账号都没有可用凭证」。触发它的原因其实
+    // 有六种：模型权限不含该模型、账号没凭证、全在冷却 / 熔断、并发全满、
+    // 本轮已全部试过、候选被限制器拦下。文案必须按 `plan.blocked` 的真实原因
+    // 拼出来，否则用户只能看到一句与事实不符的「没有凭证」。
+    let reasons = summarize_blocked(&plan);
+    let reason_text = if reasons.is_empty() {
+        "候选账号都被本轮尝试排除或并发占满".to_string()
+    } else {
+        reasons.join("；")
+    };
+    let tried_note = if tried_ids.is_empty() {
+        String::new()
+    } else {
+        format!("，本轮已试 {} 个", tried_ids.len())
+    };
+    let session_note = if no_session.is_empty() {
+        String::new()
+    } else {
+        format!("；{} 取不到可用会话（凭证缺失）", no_session.join("、"))
+    };
+    logging::log_with_level("[Upstream]", &format!(
+        "⚠️ 路由内没有可转发的账号：候选 {} 个{}，原因：{}{}",
+        enabled.len(), tried_note, reason_text, session_note), "warn");
+    let message = format!(
+        "当前路由内没有可转发的账号：{}{}（候选 {} 个{}）。请在路由页检查账号的模型权限、凭证与冷却状态",
+        reason_text, session_note, enabled.len(), tried_note);
     if request_routing.profile.is_some() {
-        return Err(GatewayError::with_status(
-            503, "当前模型路由中的账号都没有可用凭证，请在路由页检查账号状态",
-        ));
+        return Err(GatewayError::with_status(503, message)
+            .with_code("route_empty").with_route_snapshot(decision.clone()));
     }
     decision["picked"] = Value::String(String::new());
     Ok(RouteTarget {
@@ -443,6 +519,24 @@ fn select_target_account_sync(
         proxy_notice: None,
         decision: Some(decision),
     })
+}
+
+/// 把 `plan.blocked`（以及排在队尾等槽位的「并发已满」）聚成一句可读文本。
+///
+/// 只用于收尾时的用户文案与日志：**每个状态取第一条原因的原话**，计数按状态。
+/// 这样「全在冷却」「全没有该模型」「并发全满」在提示里能直接区分开，不必再让
+/// 人翻库猜。
+fn summarize_blocked(plan: &routing::RoutePlan) -> Vec<String> {
+    let mut counts: std::collections::BTreeMap<&'static str, (usize, String)> = Default::default();
+    let queued = plan.ordered.iter().filter(|entry| entry.state != "usable");
+    for entry in plan.blocked.iter().chain(queued) {
+        let slot = counts.entry(entry.state).or_insert_with(|| (0, entry.reason.clone()));
+        slot.0 += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(state, (count, reason))| format!("{}（{} 个，state={}）", reason, count, state))
+        .collect()
 }
 
 /// 账号记录上的 provider id（缺失按默认 provider）。
@@ -502,12 +596,7 @@ pub(super) fn scoped_accounts(
     pinned: Option<&str>,
     request_routing: Option<&super::route_context::RequestRouting>,
 ) -> Vec<Value> {
-    let accounts = accounts_in_providers(service, providers, pinned);
-    let accounts = if pinned.is_some() && !request_routing.is_some_and(|routing| routing.strict_vision) { accounts } else if let Some(request_routing) = request_routing {
-        request_routing.accounts(accounts)
-    } else {
-        crate::server::core::routing_scope::apply_accounts(&accounts, model)
-    };
+    let accounts = scoped_in_providers(service, providers, model, pinned, request_routing);
     let keys = routing::CooldownKeys::new(model);
     let accounts: Vec<Value> = accounts.into_iter().map(|mut account| {
         let provider = provider_of(&account).to_string();
@@ -523,6 +612,41 @@ pub(super) fn scoped_accounts(
         .filter(|account| !readiness::gated(provider_of(account)))
         .cloned().collect();
     if routable.is_empty() { accounts } else { routable }
+}
+
+/// 候选账号的**作用域过滤**（路由组 / 指定账号 / 路由作用范围），不含冷却判定。
+fn scoped_in_providers(
+    service: &UpstreamService,
+    providers: &[&str],
+    model: &str,
+    pinned: Option<&str>,
+    request_routing: Option<&super::route_context::RequestRouting>,
+) -> Vec<Value> {
+    let accounts = accounts_in_providers(service, providers, pinned);
+    if pinned.is_some() && !request_routing.is_some_and(|routing| routing.strict_vision) {
+        accounts
+    } else if let Some(request_routing) = request_routing {
+        request_routing.accounts(accounts)
+    } else {
+        crate::server::core::routing_scope::apply_accounts(&accounts, model)
+    }
+}
+
+/// 这条请求的候选池**规模**（不含冷却 / 限额 / 熔断判定）。
+///
+/// 用途只有一个：给「最多换几个账号」定一条**下限**。队列里有多少候选，
+/// 这条请求至少就该换几次 —— 否则一条 10 个候选的队列配上默认 5 次的预算，
+/// 就会出现「第 6 个候选本来能答上来，却因为预算用完直接 400 给下游」。
+/// 这里刻意不逐账号查冷却（那是 `scoped_accounts` 的活）：拿到的是上界，
+/// 宁可多给几个额度（真失败时队列自己会把名额用光），也不要提前截断。
+pub(super) fn scoped_account_cap(
+    service: &UpstreamService,
+    providers: &[&str],
+    model: &str,
+    pinned: Option<&str>,
+    request_routing: Option<&super::route_context::RequestRouting>,
+) -> usize {
+    scoped_in_providers(service, providers, model, pinned, request_routing).len()
 }
 
 /// 组装选路结果；代理解析失败时把提示**带进选路结果**（本次回退直连）。
@@ -720,8 +844,15 @@ pub(super) fn allows_route_skip(service: &UpstreamService, account_id: &str) -> 
 /// `keys` 见 [`select_target_account`]：冷却按各家真名判定。
 /// 排序走与第一级选路**同一个** `routing::plan_route`（同一策略、同一份运行期
 /// 状态快照，只是不做粘性查找、不前进轮转游标）—— 429 降级 / 失败顺延接的
-/// 「下一个」与队列面板画的顺序因此一致；并发上限的过滤由此自动获得，
-/// 换号顺延不会把请求塞回一个已达上限的账号。
+/// 「下一个」与队列面板画的顺序因此一致。
+///
+/// ── 并发满的账号现在也在「下一个」里（2026-11-21 改）──────────────
+/// 改造前 `plan_route` 把「并发已满」与「禁用 / 冷却 / 余额不足」同等剔掉，于是
+/// 某家三个账号同时有在途请求时整家从顺延链里消失：一次 `pro` 组请求 56 个候选
+/// 跳过 55 个，唯一剩下的那个没套餐，撞 429 之后这里返回 `None` ⇒ 客户端直接
+/// 收到 429「没有下一家」。现在忙账号排在可用账号之后的**队尾**，会被当成
+/// 「下一个」返回，由发送前的并发预占（`account_admission`）原地等槽位。
+/// 「不会塞回已达上限的账号」这条仍然成立：预占失败就不发，只是**等**而不是**跳**。
 ///
 /// `pinned` 见 [`select_target_account`]：钉住账号时，候选池里只有那一个账号、
 /// 它已经在 `tried_ids` 里 —— 本函数因此必然返回 None，也就是「不顺延」。
@@ -759,13 +890,84 @@ pub(super) fn pick_next_account(
         sticky_account: None,
     };
     let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
-    plan.ordered.into_iter().next().map(|entry| entry.account)
+    if let Some(entry) = plan.ordered.into_iter().next() {
+        return Some(entry.account);
+    }
+    // 队列被冷却 / 并发 / 退避挡得一个不剩 —— 顺延路径同样不能就此收尾：
+    // 与首轮选路共用 `last_resort` 的口径（只越过我们自己的估算冷却）。
+    last_resort(&candidates, keys, tried_ids, now, &snap.open)
+}
+
+/// 账号此刻的冷却如果**全是我们自己估算**的，返回最晚的恢复时间。
+///
+/// 任何一个上游明确声明过的冷却（`guessed != true`）都直接返回 `None` ——
+/// 那是上游在说「现在别来」，兜底不得越过它。
+fn guessed_reset(account: &Value, wire: &str, now: i64) -> Option<i64> {
+    let mut entries: Vec<&Value> = Vec::new();
+    if let Some(entry) = account.get("rateLimits").and_then(|limits| limits.get(wire)) {
+        entries.push(entry);
+    }
+    if let Some(entry) = account.get("routingCooldowns").and_then(|limits| limits.get("@account")) {
+        entries.push(entry);
+    }
+    if let Some(entry) = account.get("providerCooldown") {
+        entries.push(entry);
+    }
+    let mut latest = 0i64;
+    for entry in entries {
+        let Some(at) = entry["resetAt"].as_i64().filter(|at| *at > now) else { continue };
+        if entry["guessed"].as_bool() != Some(true) {
+            return None;
+        }
+        latest = latest.max(at);
+    }
+    (latest > 0).then_some(latest)
+}
+
+/// 全队列被冷却挡住时的兜底候选：估算冷却中、最早恢复、本请求还没试过的那个。
+///
+/// 只看估算冷却（见 [`guessed_reset`]），所以「上游明确让我们等」的队列不会
+/// 被这条兜底绕过；**熔断中的账号也不碰** —— 熔断的含义就是「先别用它」，兜底
+/// 越过它等于把熔断作废。反复失败时估算会一次比一次长，不会把同一个账号
+/// 无休止地重试（且每次都会进 `tried_ids`）。
+fn last_resort(
+    accounts: &[Value],
+    keys: &routing::CooldownKeys<'_>,
+    tried_ids: &[String],
+    now: i64,
+    open: &std::collections::HashSet<String>,
+) -> Option<Value> {
+    accounts
+        .iter()
+        .filter(|account| {
+            if matches!(account.get("enabled"), Some(Value::Bool(false))) {
+                return false;
+            }
+            if routing::account_id(account).is_some_and(|id| open.contains(id)) {
+                return false;
+            }
+            let key = crate::server::core::routing_groups::attempt_key(account);
+            !key.is_empty() && !tried_ids.iter().any(|tried| tried == &key)
+        })
+        .filter_map(|account| {
+            guessed_reset(account, &keys.for_account(account), now).map(|at| (at, account))
+        })
+        .min_by_key(|(at, account)| (*at, account.get("priority").and_then(Value::as_i64).unwrap_or(i64::MAX)))
+        .map(|(_, account)| Value::clone(account))
 }
 
 /// 选路决策快照（请求日志「路由回放」的数据源）。
 ///
-/// 有界：排序清单与被跳过者各最多带 12 条 —— 账号几十个时全部带上只会
-/// 让每条请求日志膨胀，而前 12 位已足以回答「为什么是它、为什么不是那个」。
+/// ── 为什么不再截断到 12 条（2026-11-21 修正）─────────────────────
+/// 改造前这里的排序清单与被跳过者各 `take(12)`，`blockedTotal` 只给一个数。
+/// 现实里的队列是这个量级：`pro` 组 14 个成员、43 个账号、56 个候选，
+/// 一次请求里 55 个被跳过 —— 12 条窗口永远只露出同一批「便宜账号」
+/// （workbuddy / catpaw / trae / raccoon），剩下 43 条为什么被跳过一个字都没留。
+/// 排障时看到的就是「池子莫名其妙全不可用」，却查不出哪几家被谁拦了。
+///
+/// 现在改成**全量落库**，并额外给一份 `blockedByReason`（状态 → 个数）聚合：
+/// 前者回答「具体谁被跳过」，后者一眼能看出「55 个里 40 个是冷却、10 个是忙」。
+/// 上限只留一个防爆的硬顶（[`DECISION_LIST_CAP`]），正常队列碰不到。
 fn decision_json(
     plan: &routing::RoutePlan,
     settings: &config::RoutingSettings,
@@ -784,17 +986,26 @@ fn decision_json(
             "reason": entry.reason,
         })
     };
+    let mut by_reason: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    for entry in &plan.blocked {
+        *by_reason.entry(entry.state).or_insert(0) += 1;
+    }
     json!({
         "strategy": settings.strategy.as_str(),
         "sticky": settings.sticky.as_str(),
         "stickyHit": plan.sticky_hit,
         "picked": plan.ordered.first().map(|entry| entry.id.clone()).unwrap_or_default(),
-        "ordered": plan.ordered.iter().take(12).map(entry_json).collect::<Vec<_>>(),
-        "blocked": plan.blocked.iter().take(12).map(entry_json).collect::<Vec<_>>(),
+        "ordered": plan.ordered.iter().take(DECISION_LIST_CAP).map(entry_json).collect::<Vec<_>>(),
+        "blocked": plan.blocked.iter().take(DECISION_LIST_CAP).map(entry_json).collect::<Vec<_>>(),
+        "blockedByReason": by_reason,
+        "queuedTotal": plan.ordered.iter().filter(|entry| entry.state == "concurrency").count(),
         "orderedTotal": plan.ordered.len(),
         "blockedTotal": plan.blocked.len(),
     })
 }
+
+/// 决策快照里每份清单的硬顶（防爆，正常队列几十个成员碰不到）。
+const DECISION_LIST_CAP: usize = 200;
 
 /// 限制器软跳过的候选剔除：**余额不足**（限制器余额 skip 规则命中：最近读数
 /// 低于阈值）或 **Token 限额**（Token skip 规则命中：当前重置窗口内消耗已达

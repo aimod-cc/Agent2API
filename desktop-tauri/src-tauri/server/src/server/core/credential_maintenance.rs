@@ -246,6 +246,8 @@ pub async fn refresh_accounts(store: &AccountStore, selected: Option<&[String]>,
         // 不会中断循环（见模块头的失败隔离）。
         let started = std::time::Instant::now();
         let credential_stamp = store.credential_stamp(&id);
+        // 面包屑：万一在这一步爆栈（wasm 插件调用链），最后一行就是它
+        logging::stage(format!("凭证刷新 {provider}/{id}"));
         let result = refresh_checked(store, adapter.as_ref(), &id).await.map(|_| ());
         let mut row = match &result {
             Ok(_) => json!({

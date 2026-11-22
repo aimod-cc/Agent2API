@@ -84,6 +84,30 @@ impl ReplayGuard {
         }
     }
 
+    /// 上游**明确拒绝**这一轮之后，解除「禁止重放」位，让同一份请求可以换下
+    /// 一个候选继续（2026-11-21 加）。
+    ///
+    /// ── 为什么这件事是安全的 ─────────────────────────────────────
+    /// `blocked` 的语义是「已经开了调用，不许再开第二次」，防的是**重复执行 /
+    /// 重复计费**。但 400 / 401 / 403 / 404 / 409 / 413 / 422 / 429 / 501 这一档
+    /// 是上游**当场拒收**：请求根本没进执行队列，重放不会产生第二次执行。
+    ///
+    /// 不解除的后果实测过（2026-11-21 23:43，`pro` 组）：WorkBuddy 的插件在
+    /// 提交前就 `freeze()` 了这个位（见 `wasm/conversation/workbuddy_http.rs`），
+    /// 随后上游回 400 `Illegal API invocation from an unapproved channel` ——
+    /// 请求在这一格 `return Err` 直接砸给下游，队列里另外 13 个可用候选一个都
+    /// 没被试过，日志里连「错误结算」都没打出来。
+    ///
+    /// 只由 upstream 在**确认这一轮没被执行**之后调用（判据见调用点），
+    /// 插件与托管任务层不得自己恢复权限。
+    pub(super) fn confirm_not_sent(&self) {
+        if let Ok(mut state) = self.lock() {
+            if state.active_generation.is_none() {
+                state.blocked = false;
+            }
+        }
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, State>, ReplayError> {
         match self.state.lock() {
             Ok(state) => Ok(state),
