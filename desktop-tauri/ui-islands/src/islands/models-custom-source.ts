@@ -92,6 +92,13 @@ export type ManageModel = {
    */
   visibility?: unknown
   upstreamStatus?: 'undeployed' | null
+  /** 自定义提供商模型显式指定的协议（空串 / undefined = 跟随提供商默认或模板推导） */
+  protocol?: string
+  /** 自定义提供商模型实际生效的协议（chat_completions / responses / anthropic） */
+  effectiveProtocol?: string
+  /** 所属自定义提供商的默认协议 */
+  providerProtocol?: string
+  pricing?: import('./model-pricing').ModelPricingInfo | null
 }
 
 /** 一条映射（含表格现造的默认绑定：alias == target） */
@@ -122,16 +129,94 @@ export type ManageView = {
   providers?: ManageProvider[]
   /** 候选思考等级（只有内置家那份响应带；缺了走 models-reasoning.ts 的兜底表） */
   reasoningLevels?: string[]
+  pricingSettings?: import('./model-pricing').ModelPricingSettings | null
 }
 
 /** 目录缓存里的一条自定义提供商记录（providers.js 的 customList()） */
 export type CustomProviderRecord = {
   id?: string
   name?: string
+  protocol?: string
+  baseUrl?: string
+  urlSuffix?: string
+  presetKey?: string
   createdAt?: unknown
   /** `capabilities` 是该条模型的能力位覆盖（可选稀疏表，键名见 `model-capability`） */
-  models?: Array<{ id?: unknown; enabled?: unknown; reasoning?: unknown; capabilities?: unknown }>
+  models?: Array<{ id?: unknown; enabled?: unknown; reasoning?: unknown; protocol?: unknown; capabilities?: unknown }>
   mappings?: Array<{ alias?: unknown; target?: unknown; enabled?: unknown; reasoning?: unknown }>
+}
+
+export const CUSTOM_PROTOCOL_OPTIONS = [
+  { value: 'chat_completions', label: 'OpenAI - Chat Completions', shortLabel: 'Chat Completions' },
+  { value: 'responses', label: 'OpenAI - Responses', shortLabel: 'Responses' },
+  { value: 'anthropic', label: 'Anthropic - Messages', shortLabel: 'Anthropic Messages' },
+] as const
+
+export type CustomProtocolValue = (typeof CUSTOM_PROTOCOL_OPTIONS)[number]['value']
+
+export function normalizeCustomProtocol(value: unknown): CustomProtocolValue | undefined {
+  const text = String(value ?? '').trim()
+  return CUSTOM_PROTOCOL_OPTIONS.find(item => item.value === text)?.value
+}
+
+export function customProtocolLabel(value: unknown, short = false): string {
+  const hit = CUSTOM_PROTOCOL_OPTIONS.find(item => item.value === String(value ?? '').trim())
+  if (!hit) return String(value || 'OpenAI - Chat Completions')
+  return short ? hit.shortLabel : hit.label
+}
+
+/** 根据 Base URL 与协议拼接实际转发时的完整请求地址预览 */
+export function previewCustomEndpointUrl(baseUrl: unknown, protocol: unknown, urlSuffix: unknown = ''): string {
+  const base = String(baseUrl ?? '').trim().replace(/\/+$/, '')
+  if (!base) return ''
+  const proto = normalizeCustomProtocol(protocol) || 'chat_completions'
+  const suffix = String(urlSuffix ?? '').trim()
+  if (proto === 'anthropic') {
+    const path = base.toLowerCase().endsWith('/v1') ? '/messages' : '/v1/messages'
+    return `${base}${path}${suffix}`
+  }
+  if (proto === 'responses') {
+    return `${base}/responses${suffix}`
+  }
+  return `${base}/chat/completions${suffix}`
+}
+
+/** 针对 OpenCode Go 等多协议混合模板，按模型 ID 推导默认协议 */
+export function inferPresetModelProtocol(
+  provider: CustomProviderRecord | null | undefined,
+  modelId: unknown,
+): CustomProtocolValue | undefined {
+  if (!provider) return undefined
+  const base = String(provider.baseUrl ?? '').trim().replace(/\/+$/, '').toLowerCase()
+  const isOpencodeGo = String(provider.presetKey ?? '').toLowerCase() === 'opencode-go'
+    || base === 'https://opencode.ai/zen/go/v1'
+  if (!isOpencodeGo) return undefined
+  const raw = String(modelId ?? '').trim()
+  const bare = (raw.split('/').pop() || raw).toLowerCase()
+  if (bare.startsWith('claude')) return 'anthropic'
+  if (
+    bare.startsWith('gpt-')
+    || bare.startsWith('o1')
+    || bare.startsWith('o3')
+    || bare.startsWith('o4')
+    || bare.startsWith('codex')
+  ) {
+    return 'responses'
+  }
+  return undefined
+}
+
+export function effectiveModelProtocol(
+  provider: CustomProviderRecord | null | undefined,
+  modelId: unknown,
+  explicitProtocol?: unknown,
+): CustomProtocolValue {
+  return (
+    normalizeCustomProtocol(explicitProtocol)
+    || inferPresetModelProtocol(provider, modelId)
+    || normalizeCustomProtocol(provider?.protocol)
+    || 'chat_completions'
+  )
 }
 
 /** 目录模块（providers.js）里本模块用到的那几个方法 */
@@ -205,7 +290,13 @@ export function record(id: string): CustomProviderRecord | null {
  * 每次提交都从**目录缓存的当前值**重建，所以本函数是幂等的：连点两次开关，第二次读到
  * 的就是第一次提交后的值。
  */
-type DraftModel = { id: string; enabled: boolean; reasoning: string; capabilities?: Record<string, number | boolean> }
+type DraftModel = {
+  id: string
+  enabled: boolean
+  reasoning: string
+  protocol?: CustomProtocolValue
+  capabilities?: Record<string, number | boolean>
+}
 type DraftMapping = { alias: string; target: string; enabled: boolean; reasoning: string }
 
 /**
@@ -230,6 +321,8 @@ function draftOf(provider: CustomProviderRecord | null): { models: DraftModel[];
         enabled: model?.enabled !== false,
         reasoning: typeof model?.reasoning === 'string' ? model.reasoning : '',
       }
+      const protocol = normalizeCustomProtocol(model?.protocol)
+      if (protocol) draft.protocol = protocol
       // 能力位覆盖**必须原样带回**：整表替换的语义下，草稿漏了它，用户填过的
       // 能力就会被一次「切开关」的提交顺手清掉
       draft.capabilities = sparseCapabilities(model?.capabilities)
@@ -274,9 +367,11 @@ export function buildView(id: string): { models: ManageModel[]; mappings: Manage
   if (!provider) return null
   const draft = draftOf(provider)
   const name = provider.name || id
+  const providerProtocol = normalizeCustomProtocol(provider.protocol) || 'chat_completions'
   const models: ManageModel[] = []
   const mappings: ManageMapping[] = []
   for (const model of draft.models) {
+    const effectiveProtocol = effectiveModelProtocol(provider, model.id, model.protocol)
     models.push({
       id: model.id,
       name: '',
@@ -285,6 +380,9 @@ export function buildView(id: string): { models: ManageModel[]; mappings: Manage
       source: '',
       enabled: model.enabled,
       aliases: [],
+      protocol: model.protocol || '',
+      effectiveProtocol,
+      providerProtocol,
       // 能力位是**记录自带的**（用户填的），没有「上游原值」这回事 ——
       // 覆盖标记恒空，弹窗按「未声明 / 已填」两态呈现
       capabilities: model.capabilities || {},
@@ -417,7 +515,7 @@ export async function removeMapping(id: string, alias: string, target: string): 
 }
 
 /** 登记一个模型（手动添加走它，判重口径与内置家一致） */
-export async function addModel(id: string, modelId: string): Promise<void> {
+export async function addModel(id: string, modelId: string, protocol?: string): Promise<void> {
   const value = String(modelId ?? '').trim()
   if (!value) throw new Error(t('请填写模型 ID'))
   await submit(id, draft => {
@@ -427,7 +525,14 @@ export async function addModel(id: string, modelId: string): Promise<void> {
     if (activeModelBindings(draft.models, draft.mappings, value, value).length) {
       throw new Error(t('模型 ID「{id}」在该提供商已有启用绑定，请先关闭它再添加', { id: value }))
     }
-    draft.models.push({ id: value, enabled: true, reasoning: '' })
+    const provider = record(id)
+    const resolvedProtocol = normalizeCustomProtocol(protocol) || inferPresetModelProtocol(provider, value)
+    draft.models.push({
+      id: value,
+      enabled: true,
+      reasoning: '',
+      ...(resolvedProtocol ? { protocol: resolvedProtocol } : {}),
+    })
     return null
   })
 }
@@ -443,16 +548,35 @@ export async function addModels(id: string, modelIds: readonly unknown[]): Promi
     .filter(Boolean)
   if (!values.length) throw new Error(t('没有选中任何模型'))
   return submit(id, draft => {
+    const provider = record(id)
     let added = 0
     for (const value of values) {
       if (draft.models.some(model => same(model.id, value))) continue
       if (activeModelBindings(draft.models, draft.mappings, value, value).length) {
         throw new Error(t('模型 ID「{id}」在该提供商已有启用绑定，请先关闭它再添加', { id: value }))
       }
-      draft.models.push({ id: value, enabled: true, reasoning: '' })
+      const inferred = inferPresetModelProtocol(provider, value)
+      draft.models.push({
+        id: value,
+        enabled: true,
+        reasoning: '',
+        ...(inferred ? { protocol: inferred } : {}),
+      })
       added++
     }
     return added
+  })
+}
+
+/** 设置或清除单个自定义提供商模型的请求协议（空串 / null = 跟随提供商默认） */
+export async function setModelProtocol(id: string, modelId: string, protocol: string | null): Promise<void> {
+  await submit(id, draft => {
+    const model = draft.models.find(item => same(item.id, modelId))
+    if (!model) throw new Error(t('该提供商的清单里没有模型「{name}」', { name: modelId }))
+    const normalized = normalizeCustomProtocol(protocol)
+    if (normalized) model.protocol = normalized
+    else delete model.protocol
+    return null
   })
 }
 
@@ -509,13 +633,20 @@ export async function fetchModels(id: string): Promise<{ total: number; added: n
     .map(value => String(value ?? '').trim())
     .filter(Boolean)
   const added = await submit(id, draft => {
+    const provider = record(id)
     let count = 0
     for (const value of ids) {
       if (draft.models.some(model => same(model.id, value))) continue
       if (activeModelBindings(draft.models, draft.mappings, value, value).length) {
         throw new Error(t('模型 ID「{id}」在该提供商已有启用绑定，请先关闭它再添加', { id: value }))
       }
-      draft.models.push({ id: value, enabled: true, reasoning: '' })
+      const inferred = inferPresetModelProtocol(provider, value)
+      draft.models.push({
+        id: value,
+        enabled: true,
+        reasoning: '',
+        ...(inferred ? { protocol: inferred } : {}),
+      })
       count++
     }
     return count
@@ -535,6 +666,7 @@ export type CustomSourceApi = {
   removeMapping: typeof removeMapping
   addModel: typeof addModel
   addModels: typeof addModels
+  setModelProtocol: typeof setModelProtocol
   removeModel: typeof removeModel
   setCapabilities: typeof setCapabilities
   fetchModels: typeof fetchModels
@@ -559,6 +691,7 @@ shared().wbModelsCustom = {
   removeMapping,
   addModel,
   addModels,
+  setModelProtocol,
   removeModel,
   setCapabilities,
   fetchModels,

@@ -26,6 +26,7 @@ pub struct TokenUsage {
     pub total: Option<i64>,
     pub cache_read: Option<i64>,
     pub cache_creation: Option<i64>,
+    pub cache_creation_1h: Option<i64>,
     pub reasoning: Option<i64>,
     pub deferred_prompt: Option<i64>,
     pub deferred_completion: Option<i64>,
@@ -46,6 +47,7 @@ impl TokenUsage {
                 cache_count(object, CACHE_CREATION_KEYS),
                 creation_breakdown(object),
             ]),
+            cache_creation_1h: creation_1h_count(object),
             reasoning: preferred_count([
                 token_count(usage.pointer("/completion_tokens_details/reasoning_tokens")),
                 token_count(usage.pointer("/output_tokens_details/reasoning_tokens")),
@@ -67,6 +69,7 @@ impl TokenUsage {
         self.completion = next.completion.or(self.completion);
         self.cache_read = next.cache_read.or(self.cache_read);
         self.cache_creation = next.cache_creation.or(self.cache_creation);
+        self.cache_creation_1h = next.cache_creation_1h.or(self.cache_creation_1h);
         self.reasoning = next.reasoning.or(self.reasoning);
         self.deferred_prompt = next.deferred_prompt.or(self.deferred_prompt);
         self.deferred_completion = next.deferred_completion.or(self.deferred_completion);
@@ -185,6 +188,16 @@ fn creation_breakdown(object: &Map<String, Value>) -> Option<i64> {
     let long = token_count(details.get("ephemeral_1h_input_tokens"));
     (short.is_some() || long.is_some())
         .then(|| short.unwrap_or(0).saturating_add(long.unwrap_or(0)))
+}
+
+fn creation_1h_count(object: &Map<String, Value>) -> Option<i64> {
+    let direct = token_count(object.get("cache_creation_1h_tokens"))
+        .or_else(|| token_count(object.get("cacheCreation1hTokens")));
+    let detail = object
+        .get("cache_creation")
+        .and_then(Value::as_object)
+        .and_then(|details| token_count(details.get("ephemeral_1h_input_tokens")));
+    preferred_count([detail, direct])
 }
 
 fn set_count(object: &mut Map<String, Value>, key: &str, count: Option<i64>) -> bool {

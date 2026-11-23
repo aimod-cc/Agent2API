@@ -69,7 +69,7 @@
 //!     auth_http.rs 上游请求发送与解包（管理接口）+ 鉴权错误类型
 //!     login.rs     无头登录与登录任务表
 //!     proxies.rs   账号级出网代理解析（Clash 读取在 clash.rs）
-//!     clash.rs     Clash Verge 配置读取与快照缓存
+//!     clash.rs     EasyClash 配置读取与快照缓存
 //!     egress.rs    出网点（按出口缓存 reqwest Client）+ 出口连通性测试
 //!     billing/     积分 / 签到（checkin.rs） / 运营活动
 //!     models/      模型条目的出口形状（/v1/models 的条目与信封翻译，各家共用）
@@ -422,6 +422,7 @@ impl ServerState {
         // 时只读内嵌快照（功能仍在，只是拿不到上次的刷新结果），所以位置不敏感；
         // 放在这里是为了和另外两个 kv 使用者排在一起，便于核对「谁在用这个库」。
         core::model_meta::install(db.clone());
+        core::model_pricing::install(db.clone());
         // ── 旧文件一次性迁移：**本切片起不再自动跑** ────────────────
         // 它现在由用户在升级弹窗里点「升级」触发（`POST /api/upgrade/run`）。
         // 为什么改成手动：需求是「弹窗告诉用户换了 SQLite，点升级才开始导」——
@@ -934,6 +935,7 @@ impl ServerState {
             let outcome = tokio::task::spawn_blocking(move || {
                 stats.remap_model_dimension_once();
                 stats.backfill_source_dimensions();
+                stats.backfill_pricing_once();
                 stats.prune();
             })
             .await;

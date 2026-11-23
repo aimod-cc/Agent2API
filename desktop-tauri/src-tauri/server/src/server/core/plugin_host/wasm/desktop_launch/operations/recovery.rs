@@ -47,6 +47,7 @@ pub async fn retry_start(manager: Source, intent: &str, restart_confirmed: bool)
             paths::identity(&runner.binding.client, &runner.executable)?;
             let expected = runner.expected.lock().map_err(|_| "本机启动账号状态不可用")?;
             runner.binding.origin()?.check(expected.as_ref().ok_or("缺少本次启动账号快照")?)?;
+            runner.check_proxy()?;
             let id = runner.state.lock().map_err(|_| "本机启动状态不可用")?.backup.clone().ok_or("缺少本次切换备份")?;
             let mut journal = Journal::read(&id)?;
             for edit in &journal.edits {
@@ -65,8 +66,9 @@ pub async fn retry_start(manager: Source, intent: &str, restart_confirmed: bool)
                 }
             }
             if !runner.manager.is_current() || runner.binding.current().is_err() { return Err("本机启动来源已变化，未启动客户端".into()); }
+            runner.check_proxy()?;
             runner.state.lock().map_err(|_| "本机启动状态不可用")?.phase = "starting";
-            windows::start(&runner.executable)?;
+            windows::start(&runner.executable, runner.proxy.resolved.as_ref())?;
             {
                 let mut state = runner.state.lock().map_err(|_| "本机启动状态不可用")?;
                 state.started = true; state.client_running = true;
@@ -75,7 +77,10 @@ pub async fn retry_start(manager: Source, intent: &str, restart_confirmed: bool)
             Ok::<_, String>(())
         }).await;
         match result {
-            Ok(Ok(())) => operation.finish("started", "客户端已启动", false),
+            Ok(Ok(())) => {
+                let message = if operation.proxy.resolved.is_some() { "客户端已使用账号代理启动" } else { "客户端已启动" };
+                operation.finish("started", message, false);
+            }
             Ok(Err(error)) => {
                 if let Ok(running) = windows::running(&operation.executable) {
                     if let Ok(mut state) = operation.state.lock() { state.client_running = running; }

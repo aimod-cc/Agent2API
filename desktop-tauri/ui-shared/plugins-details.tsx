@@ -55,7 +55,7 @@ export function PluginDetailsDialog({ name, description, version, sourceLabel, i
       </Header>
       <Description className='sr-only'>{t('插件详情')}</Description>
       {settings ? <div className='flex shrink-0 items-center justify-between gap-3 border-b border-hairline px-5 py-3'>
-        <SegmentedControl<PluginDetailsPane> value={pane} aria-label={t('插件详情')} disabled={closeDisabled}
+        <SegmentedControl<PluginDetailsPane> value={pane} aria-label={t('插件详情')}
           className='max-w-full [&_[data-slot=segmented-item]]:h-7 [&_[data-slot=segmented-item]]:px-3 max-[767px]:[&_[data-slot=segmented-item]]:h-9'
           options={[{ value: 'about', label: t('插件介绍') }, { value: 'settings', label: t('设置') }]}
           onValueChange={value => {

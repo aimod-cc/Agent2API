@@ -93,8 +93,19 @@ impl BoundResultSnapshot {
     /// old Source/代次、未交付的执行记录、重复消费或官方确认状态都不能进入账号CAS。
     /// 调用方不得持任何外层生命周期/Signal/账号/Db锁；本桥只保证自身门退出后才开始CAS。
     pub(in crate::server::core::plugin_host::wasm) fn save_unknown(
-        mut self, result: ResultReceipt,
+        self, result: ResultReceipt,
     ) -> SaveOutcome {
+        self.finalize_unknown(result, false)
+    }
+
+    /// 当本次提交被明确拒绝且回查仍未签时撤回本轮暂存 Pending，避免死锁当日重签。
+    pub(in crate::server::core::plugin_host::wasm) fn clear_pending(
+        self, result: ResultReceipt,
+    ) -> SaveOutcome {
+        self.finalize_unknown(result, true)
+    }
+
+    fn finalize_unknown(mut self, result: ResultReceipt, clear: bool) -> SaveOutcome {
         let admitted = self.consume(&result);
         if let Err(reason) = admitted { return refused(reason); }
         // consume内的Signal/HostLifecycle/Runtime门已经全部退出；不把它们带入账号/Db锁。
@@ -102,7 +113,7 @@ impl BoundResultSnapshot {
         // 最初snapshot在外面持有：即使CAS unwind，其凭据来源也不在上述外层门内析构。
         let attempt = catch_unwind(AssertUnwindSafe(|| {
             let candidate = snapshot.unknown_candidate();
-            snapshot.save_unknown(candidate)
+            if clear { snapshot.clear_pending(candidate) } else { snapshot.save_unknown(candidate) }
         }));
         // 原result只持有有界事实；直到CAS完整结束或异常槽形成才按值释放。
         drop(result);

@@ -7,10 +7,11 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::normalize::{clip, SourceDraft, MAX_CONTENT_LENGTH, MAX_TITLE_LENGTH};
+use super::search::LongQueryPolicy;
 use super::{ProviderConfig, SearchError, SearchErrorCode};
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::plugin_host;
-use crate::server::core::providers::adapter::ProviderAdapter;
+use crate::server::core::providers::adapter::{ProviderAdapter, WebSearchCapability};
 
 const CAPABILITIES: &str = "web-search.capabilities";
 const SEARCH: &str = "web-search.search";
@@ -49,9 +50,12 @@ pub(super) fn validate_account(store: &AccountStore, provider: &str, account_id:
 async fn capability(
     store: &AccountStore,
     provider: &str,
-) -> Result<(Arc<dyn ProviderAdapter>, usize), SearchError> {
+) -> Result<(Arc<dyn ProviderAdapter>, WebSearchCapability), SearchError> {
     let adapter = plugin_host::lookup(provider)
         .ok_or_else(|| configuration("提供商插件未安装或未启用"))?;
+    if let Some(cap) = adapter.web_search_capability() {
+        return Ok((adapter, cap));
+    }
     let metadata = tokio::time::timeout(Duration::from_secs(5),
         adapter.admin_action(store, "", CAPABILITIES, &json!({}))).await
         .map_err(|_| SearchError::new(SearchErrorCode::ProviderUnavailable, "提供商插件暂不可用"))?
@@ -62,31 +66,49 @@ async fn capability(
                 SearchError::new(SearchErrorCode::ProviderUnavailable, "无法确认插件搜索能力，请更新或重启提供商插件")
             }
         })?;
-    if metadata.get("version").and_then(Value::as_u64) != Some(1)
-        || metadata.get("search").and_then(Value::as_bool) != Some(true) {
-        return Err(configuration("当前提供商插件不支持账号搜索，请更新插件"));
-    }
-    let max_chars = metadata.get("max_query_chars").and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok()).filter(|value| (1..=16000).contains(value))
-        .ok_or_else(|| configuration("插件搜索能力声明不完整，请更新插件"))?;
-    Ok((adapter, max_chars))
+    let cap = WebSearchCapability::from_metadata(&metadata)
+        .ok_or_else(|| {
+            if metadata.get("version").and_then(Value::as_u64) != Some(1)
+                || metadata.get("search").and_then(Value::as_bool) != Some(true)
+            {
+                configuration("当前提供商插件不支持账号搜索，请更新插件")
+            } else {
+                configuration("插件搜索能力声明不完整，请更新插件")
+            }
+        })?;
+    Ok((adapter, cap))
 }
 
-pub(super) async fn provider_row(store: &AccountStore, provider: &str, entry: ProviderConfig) -> Value {
-    let options = account_options(store, provider);
+fn effective_account_limit(entry: &ProviderConfig, cap: &WebSearchCapability) -> Option<usize> {
+    if !cap.supports_max_results {
+        return None;
+    }
+    let upper = cap.max_results_limit.unwrap_or(10);
+    let default = cap.default_max_results.unwrap_or_else(|| upper.min(10));
+    Some(entry.max_results.unwrap_or(default).clamp(1, upper))
+}
+
+pub(super) async fn provider_row(store: &AccountStore, provider: String, entry: ProviderConfig) -> Value {
+    let options = account_options(store, &provider);
     let account_name = options.iter().find(|account| account["id"] == entry.account_id)
         .and_then(|account| account.get("name")).and_then(Value::as_str).unwrap_or("");
-    let support = capability(store, provider).await;
-    let account = validate_account(store, provider, &entry.account_id);
+    let support = capability(store, &provider).await;
+    let account = validate_account(store, &provider, &entry.account_id);
     let error = support.as_ref().err().or_else(|| account.as_ref().err());
     let configured = support.is_ok() && account.is_ok();
+    let cap = support.as_ref().ok().map(|(_, cap)| cap);
+    let max_results = cap.and_then(|cap| effective_account_limit(&entry, cap));
     json!({
         "provider": provider,
-        "display_name": super::provider_display_name(provider),
+        "display_name": super::provider_display_name(&provider),
         "auth_type": "account", "supports_search": true, "supports_fetch": false,
+        "supports_max_results": cap.is_some_and(|cap| cap.supports_max_results),
+        "max_results": max_results,
+        "default_max_results": cap.and_then(|cap| cap.default_max_results),
+        "max_results_limit": cap.and_then(|cap| cap.max_results_limit),
         "available": support.is_ok(), "configured": configured, "enabled": entry.enabled,
         "account_id": entry.account_id, "account_name": account_name, "accounts": options,
-        "max_query_chars": support.as_ref().ok().map(|(_, chars)| chars),
+        "max_query_chars": cap.map(|cap| cap.max_query_chars),
         "unavailable_reason": error.map(|error| error.message.as_str()), "key_hint": Value::Null,
         "updated_at": if entry.updated_at > 0 { json!(entry.updated_at) } else { Value::Null },
     })
@@ -94,8 +116,19 @@ pub(super) async fn provider_row(store: &AccountStore, provider: &str, entry: Pr
 
 #[derive(Clone)]
 pub(super) enum SearchSource {
-    Key { provider: String },
-    Account { provider: String, account_id: String, adapter: Arc<dyn ProviderAdapter>, max_chars: usize },
+    Key {
+        provider: String,
+        configured_limit: usize,
+        hard_limit: usize,
+        max_query_chars: Option<usize>,
+    },
+    Account {
+        provider: String,
+        account_id: String,
+        adapter: Arc<dyn ProviderAdapter>,
+        capability: WebSearchCapability,
+        configured_limit: Option<usize>,
+    },
 }
 
 impl SearchSource {
@@ -103,20 +136,53 @@ impl SearchSource {
         match self { Self::Key { provider, .. } | Self::Account { provider, .. } => provider }
     }
 
-    pub(super) async fn search(&self, store: &AccountStore, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
+    fn max_query_chars(&self) -> Option<usize> {
         match self {
-            Self::Key { provider } => super::providers::search(provider, query, timeout).await,
-            Self::Account { provider, account_id, adapter, max_chars } => {
-                if query.chars().count() > *max_chars {
-                    return Err(SearchError::new(SearchErrorCode::InvalidInput, format!("该搜索来源最多接受 {max_chars} 个字符")));
-                }
+            Self::Key { max_query_chars, .. } => *max_query_chars,
+            Self::Account { capability, .. } => Some(capability.max_query_chars),
+        }
+    }
+
+    pub(super) async fn search(
+        &self,
+        store: &AccountStore,
+        query: &str,
+        timeout: u64,
+        requested_limit: Option<usize>,
+        policy: LongQueryPolicy,
+    ) -> Result<Vec<SourceDraft>, SearchError> {
+        let effective_query = super::search::apply_query_policy(query, self.max_query_chars(), policy)?;
+        match self {
+            Self::Key { provider, configured_limit, hard_limit, .. } => {
+                let limit = requested_limit
+                    .map_or(*configured_limit, |req| req.min(*configured_limit))
+                    .clamp(1, *hard_limit);
+                super::providers::search(provider, &effective_query, timeout, limit).await
+            }
+            Self::Account { provider, account_id, adapter, capability, configured_limit } => {
                 validate_account(store, provider, account_id)?;
-                let payload = json!({ "query": query, "timeout_seconds": timeout });
+                let mut payload = json!({ "query": effective_query, "timeout_seconds": timeout });
+                let result_cap = if capability.supports_max_results {
+                    let upper = capability.max_results_limit.unwrap_or(10);
+                    let base = configured_limit
+                        .or(capability.default_max_results)
+                        .unwrap_or_else(|| upper.min(10))
+                        .clamp(1, upper);
+                    let limit = requested_limit.map_or(base, |req| req.min(base)).clamp(1, upper);
+                    payload["max_results"] = json!(limit);
+                    Some(limit)
+                } else {
+                    requested_limit
+                };
                 let result = tokio::time::timeout(Duration::from_secs(timeout.saturating_add(2)),
                     adapter.admin_action(store, account_id, SEARCH, &payload)).await
                     .map_err(|_| SearchError::new(SearchErrorCode::TimedOut, "搜索请求超时"))?
                     .map_err(search_failure)?;
-                source_rows(provider, &result)
+                let mut rows = source_rows(provider, &result)?;
+                if let Some(cap) = result_cap {
+                    rows.truncate(cap);
+                }
+                Ok(rows)
             }
         }
     }
@@ -125,11 +191,29 @@ impl SearchSource {
 pub(super) async fn prepare(store: &AccountStore, provider: &str, entry: &ProviderConfig) -> Result<SearchSource, SearchError> {
     if super::is_account_provider(provider) {
         validate_account(store, provider, &entry.account_id)?;
-        let (adapter, max_chars) = capability(store, provider).await?;
-        Ok(SearchSource::Account { provider: provider.to_string(), account_id: entry.account_id.clone(), adapter, max_chars })
+        let (adapter, capability) = capability(store, provider).await?;
+        let configured_limit = effective_account_limit(entry, &capability);
+        Ok(SearchSource::Account {
+            provider: provider.to_string(),
+            account_id: entry.account_id.clone(),
+            adapter,
+            capability,
+            configured_limit,
+        })
     } else {
         if !super::provider_keys::has_keys(entry) { return Err(configuration("提供商尚未配置有效密钥")); }
-        Ok(SearchSource::Key { provider: provider.to_string() })
+        let meta = super::providers::api_provider_meta(provider)
+            .ok_or_else(|| configuration("未知的搜索提供商"))?;
+        let configured_limit = entry
+            .max_results
+            .unwrap_or(meta.default_max_results)
+            .clamp(1, meta.max_results_limit);
+        Ok(SearchSource::Key {
+            provider: provider.to_string(),
+            configured_limit,
+            hard_limit: meta.max_results_limit,
+            max_query_chars: meta.max_query_chars,
+        })
     }
 }
 
@@ -151,7 +235,7 @@ fn search_failure(error: crate::server::errors::GatewayError) -> SearchError {
 fn source_rows(provider: &str, value: &Value) -> Result<Vec<SourceDraft>, SearchError> {
     let rows = value.get("sources").and_then(Value::as_array)
         .ok_or_else(|| SearchError::new(SearchErrorCode::ProviderUnavailable, "插件返回的搜索来源格式不正确"))?;
-    Ok(rows.iter().take(50).filter_map(|row| {
+    Ok(rows.iter().take(200).filter_map(|row| {
         let url = row.get("url").and_then(Value::as_str)?.trim();
         let parsed = url::Url::parse(url).ok()?;
         if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none()
@@ -175,7 +259,13 @@ pub async fn test_provider(store: &AccountStore, provider: &str, key_id: Option<
     let started = crate::server::logging::now_ms();
     let entry = super::load().providers.get(provider).cloned().unwrap_or_default();
     let result = match prepare(store, provider, &entry).await {
-        Ok(source) => source.search(store, "Agent2API connectivity check", super::timeout_seconds(super::WEB_SEARCH_SERVICE_ID)).await,
+        Ok(source) => source.search(
+            store,
+            "Agent2API connectivity check",
+            super::timeout_seconds(super::WEB_SEARCH_SERVICE_ID),
+            Some(5),
+            LongQueryPolicy::Truncate,
+        ).await,
         Err(error) => Err(error),
     };
     let duration = crate::server::logging::now_ms() - started;

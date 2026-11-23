@@ -146,6 +146,7 @@ pub(crate) async fn test_connection(input: settings::SaveInput) -> Result<Value,
         )?;
     }
     probe.s3.endpoint = input.s3_endpoint;
+    probe.s3.url_style = input.s3_url_style;
     probe.s3.user_agent = input.s3_user_agent;
     probe.remote_root = input.remote_root;
     probe.profile = input.profile;

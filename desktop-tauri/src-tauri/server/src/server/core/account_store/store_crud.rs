@@ -402,7 +402,7 @@ impl AccountStore {
         // 单行落地：`put` 是 DELETE + INSERT，于是「更新既有记录时它在列表里
         // 往后挪」这个旧行为（`retain` + `push`）原样保留（见 `sql::put`）。
         self.with_conn(&_guard, |conn| sql::put(conn, &saved))?;
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!(
                 "✅ 账号已保存: {}（{}…，{}，优先级 {}）",
@@ -411,6 +411,7 @@ impl AccountStore {
                 edition.label,
                 priority
             ),
+            "info",
         );
         Ok(self.public_account(&saved))
     }
@@ -488,9 +489,10 @@ impl AccountStore {
             return Err(AccountStoreError::not_found("账号不存在"));
         }
         // 落库之后立刻记一笔（与批量删除同一格式）
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!("🗑️  账号已删除: {name}（{id}，{provider}）"),
+            "info",
         );
         // 落库已完成，账号锁在这里放开：注册表作废是另一把锁的操作，
         // 两者不必（也不该）嵌套（见 `invalidate_catpaw_sessions` 的说明）
@@ -620,9 +622,10 @@ impl AccountStore {
         // 自己按优先级排，没有消费方观察数组顺序（推演见 `sql.rs` 模块头「顺序」一节）。
         self.save(&state, &_guard)?;
         let current_id = Self::pick_current(&state.accounts).map(|record| record.id().to_string());
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!("⬆️  账号已置顶: {display_name}（{}）", changes.join("，")),
+            "info",
         );
         let mut result = json!({
             "id": id,
@@ -686,9 +689,12 @@ impl AccountStore {
         if patch.contains_key("proxy") || patch.contains_key("userAgent") || patch.contains_key("usageQuery") {
             crate::server::core::usage_query::jobs::invalidate_changed(id, &crate::server::core::usage_query::config::fingerprint(&record));
         }
-        logging::log(
+        // 变更文案包含「失败重试 / 失败后换号」及用户输入的备注名，显式标 info，
+        // 避免 infer_level 因「失败」二字把正常配置更新误判成 error。
+        logging::log_with_level(
             "[Accounts]",
             &format!("✏️  账号已更新: {name}（{}）", changes.join("，")),
+            "info",
         );
         let limiter_changed = patch.contains_key("limiterGroups") || patch.contains_key("limiters");
         if was_enabled && now_disabled || limiter_changed {
@@ -697,6 +703,94 @@ impl AccountStore {
             if limiter_changed { limiter::counter::refresh_account(&account); }
         }
         Ok((account, changes))
+    }
+
+    /// 新建账号表单可能附带的账号级设置字段（不参与提供商凭证归一化）。
+    pub(crate) const INITIAL_SETTING_KEYS: [&'static str; 6] = [
+        "enabled",
+        "allowRouteSkip",
+        "maxConcurrent",
+        "userAgent",
+        "usageQuery",
+        "limiterGroups",
+    ];
+
+    /// 从请求体剥离账号级设置键（供插件手动凭证归一化前清理未知字段）。
+    pub(crate) fn strip_initial_settings_keys(fields: &mut Map<String, Value>) {
+        for key in Self::INITIAL_SETTING_KEYS {
+            fields.remove(key);
+        }
+    }
+
+    /// 在创建提供商 / 写入账号前预先校验随表单提交的账号级设置，避免「账号建成功但设置非法」。
+    pub(crate) fn validate_initial_settings_patch(
+        provider: &str,
+        payload: &Value,
+    ) -> Result<(), AccountStoreError> {
+        let Some(object) = payload.as_object() else {
+            return Ok(());
+        };
+        if let Some(value) = object.get("enabled") {
+            if !value.is_boolean() {
+                return Err(AccountStoreError::bad_request("enabled 必须是布尔值"));
+            }
+        }
+        if let Some(value) = object.get("allowRouteSkip") {
+            if !value.is_boolean() {
+                return Err(AccountStoreError::bad_request("allowRouteSkip 必须是布尔值"));
+            }
+        }
+        if let Some(value) = object.get("maxConcurrent") {
+            normalize_max_concurrent(value)?;
+        }
+        if let Some(value) = object.get("userAgent") {
+            crate::server::core::user_agent::normalize_override(provider, value)?;
+        }
+        if let Some(value) = object.get("usageQuery") {
+            Self::normalize_usage_query(value)?;
+        }
+        if let Some(value) = object.get("limiterGroups") {
+            limiter::normalize_groups(value).map_err(AccountStoreError::bad_request)?;
+        }
+        Ok(())
+    }
+
+    /// 把新建账号随表单提交的账号级设置应用到刚创建的账号上，并与「账号设置」共用同一条校验与刷新语义。
+    pub(crate) fn apply_initial_account_settings(
+        &self,
+        id: &str,
+        payload: &Value,
+        include_user_agent: bool,
+    ) -> Result<Option<Value>, AccountStoreError> {
+        if id.is_empty() {
+            return Ok(None);
+        }
+        let Some(object) = payload.as_object() else {
+            return Ok(None);
+        };
+        let mut patch = Map::new();
+        for key in Self::INITIAL_SETTING_KEYS {
+            if let Some(value) = object.get(key) {
+                patch.insert(key.to_string(), value.clone());
+            }
+        }
+        if !include_user_agent {
+            patch.remove("userAgent");
+        } else if patch
+            .get("userAgent")
+            .is_some_and(|value| value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty()))
+        {
+            patch.remove("userAgent");
+        }
+        if patch.is_empty() {
+            return Ok(None);
+        }
+        let usage_touched = patch.contains_key("usageQuery") || patch.contains_key("userAgent");
+        let (account, _) = self.update_account(id, &Value::Object(patch))?;
+        if usage_touched {
+            crate::server::core::usage_query::refresh_configuration(self);
+        }
+        Ok(Some(account))
     }
 
     /// 把 patch 应用到**单条记录**（纯内存操作：不落库、不动记录之外的东西）。
@@ -1087,9 +1181,10 @@ impl AccountStore {
                 record.set_updated_at(now);
             }
         }
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!("↕️  优先级交换: {mine_name}(P{mine}) ⇄ {theirs_name}(P{theirs})"),
+            "info",
         );
         Ok(json!({
             "moved": true,

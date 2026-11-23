@@ -1,0 +1,550 @@
+/* ─── DashboardConnectedGroup (M3 Expressive Connected Row) */
+
+.fc-connected-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.fc-connected-btn {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  border: none;
+  background: var(--fc-card);
+  color: var(--fc-text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: border-radius 200ms var(--fc-ease-out), background 160ms ease, color 160ms ease, transform 120ms ease;
+}
+
+.fc-connected-group.in-card .fc-connected-btn {
+  background: var(--fc-block);
+}
+
+.fc-connected-btn:first-child {
+  border-top-left-radius: 18px;
+  border-bottom-left-radius: 18px;
+}
+
+.fc-connected-btn:last-child {
+  border-top-right-radius: 18px;
+  border-bottom-right-radius: 18px;
+}
+
+.fc-connected-btn.is-active {
+  border-radius: var(--fc-r-full);
+  background: var(--fc-primary) !important;
+  color: var(--fc-on-primary);
+  font-weight: 700;
+}
+
+.fc-connected-btn:active {
+  transform: scale(0.96);
+}
+
+/* ─── SearchField (Borderless Pill) ──────────────────────── */
+
+.fc-search-field {
+  height: 42px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-card);
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fc-search-field.in-sheet {
+  background: var(--fc-block);
+}
+
+.fc-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  color: var(--fc-text);
+}
+
+.fc-search-input::placeholder {
+  color: var(--fc-text-tertiary);
+}
+
+.fc-search-clear {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--fc-r-full);
+  border: none;
+  background: var(--fc-inset);
+  color: var(--fc-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* ─── CommonSwitch (52x32 Solid Track Pill) ──────────────── */
+
+.fc-switch {
+  position: relative;
+  width: 52px;
+  height: 32px;
+  border-radius: var(--fc-r-full);
+  border: none;
+  background: var(--fc-inset);
+  padding: 4px;
+  cursor: pointer;
+  flex: none;
+  transition: background 200ms ease, opacity 150ms ease;
+}
+
+.fc-switch.is-checked {
+  background: var(--fc-primary);
+}
+
+.fc-switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.fc-switch-thumb {
+  display: block;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--fc-r-full);
+  background: #ffffff;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+  transform: translateX(0);
+  transition: transform 240ms var(--fc-ease-spring), width 150ms ease;
+}
+
+.fc-switch.is-checked .fc-switch-thumb {
+  transform: translateX(20px);
+}
+
+/* ─── TonalChip & Badges ─────────────────────────────────── */
+
+.fc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: var(--fc-r-sm);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  background: var(--fc-inset);
+  color: var(--fc-text-secondary);
+}
+
+.fc-chip.tone-primary {
+  background: var(--fc-primary-soft);
+  color: var(--fc-primary);
+}
+
+.fc-chip.tone-success {
+  background: var(--fc-success-soft);
+  color: var(--fc-success);
+}
+
+.fc-chip.tone-warning {
+  background: var(--fc-warning-soft);
+  color: var(--fc-warning);
+}
+
+.fc-chip.tone-danger {
+  background: var(--fc-danger-soft);
+  color: var(--fc-danger);
+}
+
+/* ─── Buttons & Inputs ───────────────────────────────────── */
+
+.fc-btn {
+  border: none;
+  height: 42px;
+  padding: 0 16px;
+  border-radius: var(--fc-r-md);
+  font-size: 13.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  background: var(--fc-block);
+  color: var(--fc-text);
+  transition: transform 120ms ease, opacity 150ms ease, background 150ms ease;
+  white-space: nowrap;
+}
+
+.fc-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.fc-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.fc-btn.is-primary {
+  background: var(--fc-primary);
+  color: var(--fc-on-primary);
+}
+
+.fc-btn.is-tonal {
+  background: var(--fc-primary-soft);
+  color: var(--fc-primary);
+}
+
+.fc-btn.is-danger {
+  background: var(--fc-danger-soft);
+  color: var(--fc-danger);
+}
+
+.fc-btn.is-pill {
+  border-radius: var(--fc-r-full);
+}
+
+.fc-btn.is-sm {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  border-radius: 12px;
+}
+
+.fc-input,
+.fc-textarea,
+.fc-select {
+  width: 100%;
+  border: 2px solid transparent;
+  outline: none;
+  background: var(--fc-block);
+  color: var(--fc-text);
+  border-radius: var(--fc-r-md);
+  padding: 10px 14px;
+  font-size: 14px;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.fc-input {
+  height: 44px;
+}
+
+.fc-input:focus,
+.fc-textarea:focus,
+.fc-select:focus {
+  border-color: var(--fc-primary);
+}
+
+.fc-input::placeholder,
+.fc-textarea::placeholder {
+  color: var(--fc-text-tertiary);
+}
+
+/* ─── BottomSheet (AdaptiveSheetScaffold) ────────────────── */
+
+.fc-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(8, 10, 14, 0.52);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  animation: fcFadeIn 180ms ease;
+}
+
+.fc-sheet-panel {
+  width: 100%;
+  max-height: 88dvh;
+  background: var(--fc-page);
+  border-top-left-radius: var(--fc-r-xxl);
+  border-top-right-radius: var(--fc-r-xxl);
+  box-shadow: var(--fc-shadow-sheet);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: max(var(--fc-safe-bottom), 14px);
+  animation: fcSlideUp 240ms var(--fc-ease-out);
+}
+
+.fc-sheet-handle-bar {
+  flex: none;
+  padding: 10px 0 4px;
+  display: flex;
+  justify-content: center;
+}
+
+.fc-sheet-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-inset);
+}
+
+.fc-sheet-header {
+  flex: none;
+  padding: 6px 18px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fc-sheet-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--fc-text);
+}
+
+.fc-sheet-fixed-header {
+  flex: none;
+  padding: 0 16px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fc-picker-trigger {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 14px;
+  border-radius: var(--fc-r-md);
+  border: 1px solid var(--fc-line);
+  background: var(--fc-block);
+  color: var(--fc-text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, transform 120ms ease;
+}
+
+.fc-picker-trigger.in-list {
+  width: auto;
+  min-height: 36px;
+  max-width: 190px;
+  padding: 6px 10px 6px 12px;
+  border-radius: var(--fc-r-sm);
+}
+
+.fc-picker-trigger:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.fc-picker-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fc-picker-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fc-picker-value.is-placeholder {
+  color: var(--fc-text-dim);
+}
+
+.fc-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  padding: 2px 0;
+}
+
+.fc-filter-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.fc-filter-pill {
+  flex: none;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--fc-r-full);
+  border: 1px solid var(--fc-line);
+  background: var(--fc-card);
+  color: var(--fc-text-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.fc-filter-pill.is-active {
+  background: var(--fc-primary-soft);
+  color: var(--fc-primary);
+  border-color: var(--fc-primary);
+}
+
+.fc-filter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.fc-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fc-sheet-body > * {
+  flex-shrink: 0;
+}
+
+.fc-sheet-footer {
+  flex: none;
+  padding: 10px 16px 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ─── Metric Grid (Dashboard KPI Tiles) ──────────────────── */
+
+.fc-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.fc-kpi-card {
+  background: var(--fc-card);
+  border-radius: 26px;
+  padding: 16px;
+  box-shadow: var(--fc-shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fc-kpi-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fc-kpi-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fc-text-secondary);
+}
+
+.fc-kpi-value {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--fc-text);
+  line-height: 1.15;
+}
+
+.fc-kpi-sub {
+  font-size: 11.5px;
+  color: var(--fc-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ─── Toast Notifications ────────────────────────────────── */
+
+.fc-toast-host {
+  position: fixed;
+  top: calc(var(--fc-safe-top) + 12px);
+  left: 16px;
+  right: 16px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.fc-toast {
+  pointer-events: auto;
+  max-width: 380px;
+  padding: 10px 16px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-text);
+  color: var(--fc-page);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  animation: fcFadeIn 160ms ease;
+}
+
+.fc-toast.tone-success {
+  background: var(--fc-success);
+  color: #ffffff;
+}
+
+.fc-toast.tone-danger {
+  background: var(--fc-danger);
+  color: #ffffff;
+}
+
+@keyframes fcFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fcSlideUp {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}

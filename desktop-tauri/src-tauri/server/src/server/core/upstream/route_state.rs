@@ -33,6 +33,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
 use axum::http::HeaderMap;
+use serde_json::Value;
+
+use crate::server::config::error_policy::{CooldownScope, ErrorRule};
+use crate::server::core::routing::{account_id, provider_of, CooldownKeys};
 
 /// 失败退避的起步时长（15 分钟）与上限（1 小时）。
 pub(super) const BACKOFF_BASE_MS: i64 = 15 * 60 * 1000;
@@ -88,8 +92,13 @@ pub(super) struct RouteState {
     sticky: super::route_sticky::StickySessions,
     /// 失败退避：账号 id → 休息记录
     backoff: Mutex<HashMap<String, BackoffEntry>>,
-    /// 限流垫底：账号 id → 沉底时刻（还有额度时被 429 的；超 [`SINK_TTL_MS`] 自动失效）
+    /// 限流垫底：账号 id → 沉底截止时刻（还有额度时被 429 的）
     sink: Mutex<HashMap<String, i64>>,
+    /// 规则显式「将优先级调到最低」：账号级 / 模型级 / 提供商级，以及连续触发次数记录
+    deprioritized_accounts: Mutex<HashMap<String, i64>>,
+    deprioritized_models: Mutex<HashMap<(String, String), i64>>,
+    deprioritized_providers: Mutex<HashMap<String, i64>>,
+    deprioritized_strikes: Mutex<HashMap<String, (i64, u64)>>,
     /// 熔断：账号 id → 状态
     breaker: Mutex<HashMap<String, BreakerEntry>>,
 }
@@ -463,6 +472,131 @@ impl RouteState {
         if let Ok(mut table) = self.sink.lock() {
             table.remove(account_id);
         }
+        if let Ok(mut table) = self.deprioritized_accounts.lock() {
+            table.remove(account_id);
+        }
+        if let Ok(mut table) = self.deprioritized_strikes.lock() {
+            table.remove(&format!("a:{account_id}"));
+        }
+    }
+
+    /// 规则选择「将优先级调到最低」：按作用范围写入最低优先级窗口，支持连续失败翻倍延长；
+    /// 该状态不阻塞选路，只在还有其他可用候选时排到最后，成功转发一次或到点自动恢复。
+    pub(super) fn deprioritize_mark_scoped(
+        &self,
+        account_id: &str,
+        provider: &str,
+        model: &str,
+        scope: CooldownScope,
+        rule: &ErrorRule,
+        now: i64,
+    ) -> i64 {
+        let strike_key = match scope {
+            CooldownScope::Provider => format!("p:{provider}"),
+            CooldownScope::Model if !model.is_empty() => format!("m:{account_id}:{model}"),
+            _ => format!("a:{account_id}"),
+        };
+        let strikes = if let Ok(mut table) = self.deprioritized_strikes.lock() {
+            table.retain(|_, (until, _)| until.saturating_add(1_800_000) > now);
+            let prev = table.get(&strike_key).copied().unwrap_or((0, 0));
+            let next = if now.saturating_sub(prev.0) <= 1_800_000 {
+                prev.1.saturating_add(1)
+            } else {
+                1
+            };
+            let delay = if rule.exponential {
+                rule.fallback_seconds
+                    .saturating_mul(1u64 << next.saturating_sub(1).min(30))
+                    .min(rule.fallback_cap_seconds)
+            } else {
+                rule.fallback_seconds
+            };
+            let until = now.saturating_add(delay.saturating_mul(1000).min(i64::MAX as u64) as i64);
+            table.insert(strike_key, (until, next));
+            until
+        } else {
+            now.saturating_add(rule.fallback_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64)
+        };
+        match scope {
+            CooldownScope::Provider if !provider.is_empty() => {
+                if let Ok(mut table) = self.deprioritized_providers.lock() {
+                    table.retain(|_, until| *until > now);
+                    table.insert(provider.to_string(), strikes);
+                }
+            }
+            CooldownScope::Model if !model.is_empty() && !account_id.is_empty() => {
+                if let Ok(mut table) = self.deprioritized_models.lock() {
+                    table.retain(|_, until| *until > now);
+                    table.insert((account_id.to_string(), model.to_string()), strikes);
+                }
+            }
+            _ if !account_id.is_empty() => {
+                if let Ok(mut table) = self.deprioritized_accounts.lock() {
+                    table.retain(|_, until| *until > now);
+                    table.insert(account_id.to_string(), strikes);
+                }
+            }
+            _ => {}
+        }
+        strikes
+    }
+
+    pub(super) fn sink_clear_scoped(&self, account_id: &str, provider: &str, model: &str) {
+        self.sink_clear(account_id);
+        if !model.is_empty() {
+            if let Ok(mut table) = self.deprioritized_models.lock() {
+                table.remove(&(account_id.to_string(), model.to_string()));
+            }
+            if let Ok(mut table) = self.deprioritized_strikes.lock() {
+                table.remove(&format!("m:{account_id}:{model}"));
+            }
+        }
+        if !provider.is_empty() {
+            if let Ok(mut table) = self.deprioritized_providers.lock() {
+                table.remove(provider);
+            }
+            if let Ok(mut table) = self.deprioritized_strikes.lock() {
+                table.remove(&format!("p:{provider}"));
+            }
+        }
+    }
+
+    pub(super) fn merge_scoped_sunk(
+        &self,
+        accounts: &[Value],
+        keys: &CooldownKeys<'_>,
+        now: i64,
+        out: &mut HashMap<String, i64>,
+    ) {
+        let accs = self.deprioritized_accounts.lock().ok();
+        let mods = self.deprioritized_models.lock().ok();
+        let provs = self.deprioritized_providers.lock().ok();
+        let req_model = keys.request_model();
+        for account in accounts {
+            let Some(id) = account_id(account) else { continue };
+            let provider = provider_of(account);
+            let wire_model = keys.for_account(account);
+            let mut best = out.get(id).copied().unwrap_or(0);
+            if let Some(until) = accs.as_ref().and_then(|m| m.get(id)).copied().filter(|u| *u > now) {
+                best = best.max(until);
+            }
+            if let Some(mods) = mods.as_ref() {
+                if let Some(until) = mods.get(&(id.to_string(), wire_model.clone())).copied().filter(|u| *u > now) {
+                    best = best.max(until);
+                }
+                if !req_model.is_empty() && req_model != wire_model {
+                    if let Some(until) = mods.get(&(id.to_string(), req_model.to_string())).copied().filter(|u| *u > now) {
+                        best = best.max(until);
+                    }
+                }
+            }
+            if let Some(until) = provs.as_ref().and_then(|m| m.get(provider)).copied().filter(|u| *u > now) {
+                best = best.max(until);
+            }
+            if best > 0 {
+                out.insert(id.to_string(), best);
+            }
+        }
     }
 
     /// 记一笔失败；返回熔断是否**就此打开**（用于打日志）。
@@ -520,7 +654,7 @@ impl RouteState {
         // 上游原实现是整张表原样克隆（没有时间判定），于是垫底永不失效；
         // 唯一的解除路径是「该账号成功转发一次」，而它正排在队尾 —— 自锁。
         let settings = crate::server::config::error_policy::snapshot();
-        let sunk = self
+        let mut sunk: HashMap<String, i64> = self
             .sink
             .lock()
             .map(|table| {
@@ -531,6 +665,22 @@ impl RouteState {
                     .collect()
             })
             .unwrap_or_default();
+        if let Ok(table) = self.deprioritized_accounts.lock() {
+            for (id, until) in table.iter() {
+                if *until > now {
+                    sunk.entry(id.clone()).and_modify(|prev| *prev = (*prev).max(*until)).or_insert(*until);
+                }
+            }
+        }
+        if !model.is_empty() {
+            if let Ok(table) = self.deprioritized_models.lock() {
+                for ((id, entry_model), until) in table.iter() {
+                    if entry_model == model && *until > now {
+                        sunk.entry(id.clone()).and_modify(|prev| *prev = (*prev).max(*until)).or_insert(*until);
+                    }
+                }
+            }
+        }
         let resting = self
             .backoff
             .lock()

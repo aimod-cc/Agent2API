@@ -157,6 +157,7 @@ pub async fn run_upgrade(State(state): State<ServerState>) -> Response {
             // 的报表会一直把映射别名当成独立模型。
             request_stats.remap_model_dimension_once();
             request_stats.backfill_source_dimensions();
+            request_stats.backfill_pricing_once();
             request_stats.prune();
             if let Some(logs) = logging::store_ref() {
                 logs.prune();

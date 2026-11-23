@@ -807,10 +807,13 @@ pub fn plan_route(
                     }
                 }
             };
-            if meta.sunk.contains_key(&id) {
-                // 文案跟着 `route_state::SINK_TTL_MS` 走：垫底现在有 30 分钟寿命，
-                // 不再是「轮一圈才回来」（那句是上游原实现的说法，那时垫底永不失效）。
-                reason.push_str("；曾还有额度时被 429（垫底中，30 分钟后自动回到队列）");
+            if let Some(&until) = meta.sunk.get(&id) {
+                let text = clock_text(until, now);
+                if text.is_empty() {
+                    reason.push_str("；优先级已调至最低（成功一次自动恢复）");
+                } else {
+                    reason.push_str(&format!("；优先级已调至最低（{text} 后自动恢复，成功一次提前恢复）"));
+                }
             }
             if let Some(until) = meta.resting.get(&id) {
                 reason.push_str(&format!("；转发失败休息至 {}", clock_text(*until, now)));

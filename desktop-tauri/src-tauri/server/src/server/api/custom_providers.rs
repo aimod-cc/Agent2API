@@ -76,6 +76,14 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
         Err(response) => return response,
     };
     let payload = Value::Object(object);
+    if let Err(error) =
+        crate::server::core::account_store::AccountStore::validate_initial_settings_patch(
+            "custom-pending",
+            &payload,
+        )
+    {
+        return crate::server::api::accounts::store_error(error);
+    }
     let provider = match custom_providers::create(&payload) {
         Ok(provider) => provider,
         Err(message) => return errors::management_error(400, message),
@@ -113,6 +121,32 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
             return crate::server::api::accounts::store_error(error);
         }
     };
+    let account_id = upsert
+        .account
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut account = upsert.account;
+    let applied = match store.apply_initial_account_settings(&account_id, &payload, false) {
+        Ok(Some(updated)) => {
+            account = updated;
+            true
+        }
+        Ok(None) => false,
+        Err(error) => {
+            if let Err(rollback) = custom_providers::remove(&provider_id, store) {
+                logging::log(
+                    "[CustomProvider]",
+                    &format!("❌ 回滚新建的提供商 {provider_id} 失败: {rollback}"),
+                );
+            }
+            return crate::server::api::accounts::store_error(error);
+        }
+    };
+    if !applied && payload.get("balanceQuery").is_some_and(|v| !v.is_null()) {
+        crate::server::core::usage_query::refresh_configuration(store);
+    }
     let label = provider
         .get("name")
         .and_then(Value::as_str)
@@ -123,7 +157,7 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
     );
     ok_json(json!({
         "provider": provider,
-        "account": upsert.account,
+        "account": account,
         // 刚建的提供商名下不可能已有账号，这里恒为 true；带上它是为了让两条
         // 添加路径的响应形状一致（前端按同一份契约读）
         "created": upsert.created,
@@ -187,13 +221,14 @@ pub async fn update_custom_provider(State(state): State<ServerState>, body: Byte
         .to_string();
     if !before_base.is_empty() && before_base != after_base {
         match state.store().clear_custom_base_url_overrides(&id, &before_base) {
-            Ok(names) if !names.is_empty() => logging::log(
+            Ok(names) if !names.is_empty() => logging::log_with_level(
                 "[CustomProvider]",
                 &format!(
                     "🔗 已把 {} 个账号的旧地址覆盖项改回「跟随提供商」: {}",
                     names.len(),
                     names.join("、")
                 ),
+                "info",
             ),
             Ok(_) => {}
             Err(error) => logging::log(
@@ -208,9 +243,10 @@ pub async fn update_custom_provider(State(state): State<ServerState>, body: Byte
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or(&id);
-    logging::log(
+    logging::log_with_level(
         "[CustomProvider]",
         &format!("✏️  自定义提供商「{label}」已更新（{changes}）"),
+        "info",
     );
     ok_json(json!({ "provider": updated }))
 }
@@ -361,12 +397,13 @@ pub async fn set_custom_models(State(_state): State<ServerState>, body: Bytes) -
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    logging::log(
+    logging::log_with_level(
         "[CustomProvider]",
         &format!(
             "✅ 自定义提供商「{}」已保存模型清单（{model_count} 个模型、{mapping_count} 条映射）",
             label.as_deref().unwrap_or(&provider_id),
         ),
+        "info",
     );
     ok_json(json!({ "provider": updated }))
 }

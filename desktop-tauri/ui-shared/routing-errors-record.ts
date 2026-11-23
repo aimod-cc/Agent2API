@@ -15,7 +15,9 @@ export function errorPolicyDescription(record: ErrorPolicyRecord | null | undefi
   const name = record.ruleName && record.ruleId !== record.kind ? record.ruleName : kindLabels(t)[record.kind]
   const parts = [name, record.reason ? reasons[record.reason] || t(record.reason) : actionLabels(t)[record.action]]
   if (record.resetAt && record.timeSource !== 'none') {
-    parts.push(record.timeSource === 'upstream' ? t('冷却来自上游时间') : t('冷却来自本机估算'))
+    parts.push(record.timeSource === 'sink'
+      ? t('优先级已调至最低')
+      : record.timeSource === 'upstream' ? t('冷却来自上游时间') : t('冷却来自本机估算'))
     if (record.scope) parts.push(scopeLabels(t)[record.scope])
     parts.push(t('{time} 恢复', { time: new Date(record.resetAt).toLocaleString() }))
   }

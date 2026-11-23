@@ -40,7 +40,7 @@ struct Published {
 struct State {
     generation: u64,
     revision: u64,
-    current: Option<Published>,
+    current: Option<Arc<Published>>,
     replacement: bool,
     failed: bool,
 }
@@ -118,7 +118,8 @@ impl Source {
     /// 保持原权威门覆盖 action；只允许短同步核对/CAS，不能等待或执行 IO。
     /// 禁止从 action 重入本模块/config；下层须依约使用 try 终检。
     pub(crate) fn with_current<R>(&self, action: impl FnOnce() -> R) -> Option<R> {
-        let state = AUTHORITY.try_lock().ok()?;
+        // 使用阻塞加锁避免高并发瞬时冲突误判不可用；锁异常时按 fail-closed 返回 None。
+        let state = AUTHORITY.lock().ok()?;
         if !matches_current(&state, &self.authority, &self.record, self.generation, self.revision) {
             return None;
         }
@@ -162,53 +163,59 @@ pub(crate) fn authenticate_key(presented: &str) -> Option<(KeyScope, Source)> {
     if presented.is_empty() {
         return None;
     }
-    let (authority, candidates) = {
-        let state = AUTHORITY.try_lock().ok()?;
+    let current = {
+        // 门内仅克隆 Arc 与核对原子标记，不克隆配置 JSON，避免高并发 try_lock 竞态误报 401。
+        let state = AUTHORITY.lock().ok()?;
         if state.failed || state.replacement {
             return None;
         }
-        let current = state.current.as_ref()?;
+        let current = state.current.as_ref()?.clone();
         if current.authority.revoked.load(Ordering::Acquire) {
             return None;
         }
-        let candidates = current.authority.records.iter().enumerate()
-            .filter_map(|(index, record)| {
-                current.definition.slot_raw(index).map(|raw| (record.clone(), raw))
-            }).collect::<Vec<_>>();
-        (current.authority.clone(), candidates)
+        current
     };
     // entries_from 可能解密/记录日志，必须在所有权威/CONFIG 锁外执行。
-    for (record, raw) in candidates {
+    for (index, record) in current.authority.records.iter().enumerate() {
+        if current.authority.revoked.load(Ordering::Acquire) {
+            return None;
+        }
+        let Some(raw) = current.definition.slot_raw(index) else {
+            continue;
+        };
         let Some(entry) = api_keys::entries_from(&raw).into_iter()
             .find(|entry| entry.is_usable() && entry.key == presented)
         else { continue; };
         let scope = KeyScope::from_entry(&entry);
         let identity = ApiKeyIdentity { id: entry.id, name: entry.name, source: "key".to_string() };
-        let state = AUTHORITY.try_lock().ok()?;
-        if !matches_current(&state, &authority, &record, authority.generation, record.revision) {
+        let state = AUTHORITY.lock().ok()?;
+        if !matches_current(&state, &current.authority, record, current.authority.generation, record.revision) {
             return None;
         }
         return Some((scope, Source {
-            generation: authority.generation, revision: record.revision,
-            authority, record, identity,
+            generation: current.authority.generation,
+            revision: record.revision,
+            authority: current.authority.clone(),
+            record: record.clone(),
+            identity,
         }));
     }
     None
 }
 
-fn revoke_locked(state: &mut State) -> Option<Arc<Authority>> {
-    let original = state.current.take()?.authority;
-    original.revoked.store(true, Ordering::Release);
-    for record in &original.records {
+fn revoke_locked(state: &mut State) -> Option<Arc<Published>> {
+    let original = state.current.take()?;
+    original.authority.revoked.store(true, Ordering::Release);
+    for record in &original.authority.records {
         record.revoked.store(true, Ordering::Release);
     }
     Some(original)
 }
 
-fn notify(original: Option<Arc<Authority>>) {
+fn notify(original: Option<Arc<Published>>) {
     if let Some(original) = original {
-        original.notification.cancel();
-        for record in &original.records {
+        original.authority.notification.cancel();
+        for record in &original.authority.records {
             record.notification.cancel();
         }
     }
@@ -259,17 +266,64 @@ pub(super) fn before_change(previous: &RuntimeConfig, next: &RuntimeConfig) {
     }
 }
 
+pub(super) fn is_failed() -> bool {
+    AUTHORITY
+        .lock()
+        .is_ok_and(|state| state.failed && !state.replacement)
+}
+
+#[derive(Clone, Copy)]
+enum PublishMode {
+    Normal,
+    Resync,
+    Reload,
+}
+
 /// 仅真实 CONFIG 发布成功后调用，且仍持写侧更新锁；本门内不读 CONFIG。
-/// 正常发布保留原代；reload 即使内容完全相同仍永久替换旧代。
+/// 正常发布保留原代；reload 即使内容完全相同仍永久替换旧代，并在门自身未中毒时从外层 failed 自愈。
 pub(super) fn published(next: &RuntimeConfig, reloaded: bool) {
+    let mode = if reloaded {
+        PublishMode::Reload
+    } else {
+        PublishMode::Normal
+    };
+    publish_inner(next, mode);
+}
+
+/// 从数据库重同步配置后的自愈入口；不清除外部尚未收尾的 replacement 替换期封锁。
+pub(super) fn republish_from_db(next: &RuntimeConfig, clear_replacement: bool) {
+    let mode = if clear_replacement {
+        PublishMode::Reload
+    } else {
+        PublishMode::Resync
+    };
+    publish_inner(next, mode);
+}
+
+fn publish_inner(next: &RuntimeConfig, mode: PublishMode) {
     let definition = Definition::from_raw(next.raw());
     let original = match AUTHORITY.lock() {
         Ok(mut state) => {
-            if state.failed || state.replacement && !reloaded {
-                return;
-            }
-            if !reloaded && state.current.as_ref().is_some_and(|current| current.definition.same(&definition)) {
-                return;
+            match mode {
+                PublishMode::Normal => {
+                    if state.failed || state.replacement {
+                        return;
+                    }
+                    if state.current.as_ref().is_some_and(|current| current.definition.same(&definition)) {
+                        return;
+                    }
+                }
+                PublishMode::Resync => {
+                    if state.replacement {
+                        return;
+                    }
+                    if !state.failed
+                        && state.current.as_ref().is_some_and(|current| current.definition.same(&definition))
+                    {
+                        return;
+                    }
+                }
+                PublishMode::Reload => {}
             }
             let original = revoke_locked(&mut state);
             let Some(generation) = state.generation.checked_add(1) else {
@@ -286,17 +340,20 @@ pub(super) fn published(next: &RuntimeConfig, reloaded: bool) {
             };
             state.generation = generation;
             state.revision = revision;
-            state.replacement = false;
+            state.failed = false;
+            if matches!(mode, PublishMode::Reload) {
+                state.replacement = false;
+            }
             let records = (0..definition.slots).map(|_| Arc::new(Record {
                 revision, revoked: AtomicBool::new(false), notification: CancellationToken::new(),
             })).collect();
-            state.current = Some(Published {
+            state.current = Some(Arc::new(Published {
                 authority: Arc::new(Authority {
                     generation, revision, revoked: AtomicBool::new(false),
                     notification: CancellationToken::new(), records,
                 }),
                 definition,
-            });
+            }));
             original
         }
         Err(error) => {

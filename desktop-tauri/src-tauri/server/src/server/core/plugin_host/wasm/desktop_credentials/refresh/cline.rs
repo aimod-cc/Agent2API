@@ -15,19 +15,26 @@ impl Drop for SecretValue {
     fn drop(&mut self) { wipe(&mut self.0); }
 }
 
-pub(super) fn replacement(bytes: &[u8], uid: &str, previous_public: &Value) -> Result<(SecretValue, Value), proto::WireError> {
+pub(super) fn replacement(bytes: &[u8], uid: &str, previous_public: &Value, fallback_refresh: Option<&str>) -> Result<(SecretValue, Value), proto::WireError> {
     let value: Value = super::super::super::managed_task::declaration::parse_object(bytes, MAX_RESPONSE).map_err(|_| invalid())?;
     let value = SecretValue(value);
     envelope(&value.0)?;
     let data = value.0.get("data").unwrap_or(&value.0);
     envelope(data)?;
     for key in ["tokenType", "token_type"] {
-        if data.get(key).is_some_and(|value| value.as_str().is_none_or(|value| !value.eq_ignore_ascii_case("Bearer"))) {
+        if data.get(key).filter(|value| !value.is_null()).is_some_and(|value| value.as_str().is_none_or(|value| !value.eq_ignore_ascii_case("Bearer"))) {
             return Err(invalid());
         }
     }
-    let access = tokens(data, &["accessToken", "access_token", "token"], true)?;
-    let refresh = tokens(data, &["refreshToken", "refresh_token"], false)?;
+    let access = tokens(data, &["accessToken", "access_token", "token"], true, false)?
+        .ok_or_else(invalid)?;
+    let refresh = match tokens(data, &["refreshToken", "refresh_token"], false, true)? {
+        Some(refresh) => refresh,
+        None => fallback_refresh
+            .filter(|token| valid_token(token))
+            .map(|token| Zeroizing::new(token.to_string()))
+            .ok_or_else(invalid)?,
+    };
     let claims = claims(&access)?;
     let declared = identity(&claims.0, &["external_id"])?;
     let info = data.get("userInfo").map(|info| identity(info, &["clineUserId", "external_id"])).transpose()?.flatten();
@@ -59,11 +66,15 @@ fn envelope(value: &Value) -> Result<(), proto::WireError> {
     Ok(())
 }
 
-fn tokens(value: &Value, keys: &[&str], access: bool) -> Result<Zeroizing<String>, proto::WireError> {
+fn tokens(value: &Value, keys: &[&str], access: bool, allow_empty: bool) -> Result<Option<Zeroizing<String>>, proto::WireError> {
     let mut found: Option<Zeroizing<String>> = None;
     for key in keys {
-        if let Some(value) = value.get(*key) {
-            let text = value.as_str().filter(|text| valid_token(text)).ok_or_else(invalid)?;
+        if let Some(value) = value.get(*key).filter(|value| !value.is_null()) {
+            let text = value.as_str().ok_or_else(invalid)?;
+            if text.is_empty() && allow_empty {
+                continue;
+            }
+            if !valid_token(text) { return Err(invalid()); }
             let normalized = if access {
                 let raw = text.strip_prefix("workos:").unwrap_or(text);
                 if raw.is_empty() || raw.starts_with("workos:") { return Err(invalid()); }
@@ -75,7 +86,7 @@ fn tokens(value: &Value, keys: &[&str], access: bool) -> Result<Zeroizing<String
             found = Some(normalized);
         }
     }
-    found.ok_or_else(invalid)
+    Ok(found)
 }
 
 fn claims(token: &str) -> Result<SecretValue, proto::WireError> {
@@ -108,13 +119,14 @@ fn identity(value: &Value, keys: &[&str]) -> Result<Option<String>, proto::WireE
 
 fn expiration(value: Option<&Value>) -> Result<Option<i64>, proto::WireError> {
     let Some(value) = value.filter(|value| !value.is_null()) else { return Ok(None); };
+    if value.as_str().is_some_and(|text| text.trim().is_empty()) { return Ok(None); }
     let expiry = match value {
         Value::Number(value) => value.as_i64(),
         Value::String(text) if text.len() <= 64 && text.trim() == text && !text.chars().any(char::is_control) =>
             text.parse().ok().or_else(|| chrono::DateTime::parse_from_rfc3339(text).ok().map(|value| value.timestamp_millis())),
         _ => None,
     };
-    expiry.filter(|value| *value > 0).map(Some).ok_or_else(invalid)
+    expiry.filter(|value| *value > 0).map(|value| if value < 100_000_000_000 { value.saturating_mul(1000) } else { value }).map(Some).ok_or_else(invalid)
 }
 
 fn valid_token(text: &str) -> bool {

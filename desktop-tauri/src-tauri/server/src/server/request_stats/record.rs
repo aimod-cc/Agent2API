@@ -255,6 +255,12 @@ pub struct RequestEntry {
     /// 请求发生时的统计分类与识别依据；旧行没有依据，不重新猜测来源。
     #[serde(flatten)]
     pub source: RequestSource,
+    #[serde(rename = "cacheCreationTokens", default)]
+    pub cache_creation_tokens: i64,
+    #[serde(rename = "cacheCreation1hTokens", default)]
+    pub cache_creation_1h_tokens: i64,
+    #[serde(rename = "costUsd", default)]
+    pub cost_usd: Option<f64>,
 }
 
 /// 一个被命中的敏感词及其次数（存储契约）。
@@ -390,8 +396,18 @@ impl RequestEntry {
         copy.completion_tokens = 0;
         copy.total_tokens = 0;
         copy.cache_read_tokens = 0;
+        copy.cache_creation_tokens = 0;
+        copy.cache_creation_1h_tokens = 0;
         copy.credit = None;
+        copy.cost_usd = None;
         copy
+    }
+
+    pub fn has_billable_tokens(&self) -> bool {
+        self.prompt_tokens > 0
+            || self.completion_tokens > 0
+            || self.cache_read_tokens > 0
+            || self.cache_creation_tokens > 0
     }
 }
 
@@ -419,6 +435,8 @@ pub struct NewRequestEntry {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
     /// 上游按请求上报的积分消耗（可空：`None` = 没上报，不是 0；见
     /// `RequestEntry::credit`）
     pub credit: Option<f64>,
@@ -470,6 +488,8 @@ impl NewRequestEntry {
             completion_tokens: 0,
             total_tokens: 0,
             cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             credit: None,
             provider: None,
             client_model: String::new(),
@@ -528,6 +548,29 @@ impl NewRequestEntry {
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty())
             .unwrap_or_default();
+        let cw = token(self.cache_creation_tokens);
+        let cw1h = token(self.cache_creation_1h_tokens);
+        let prompt_norm = token(self.prompt_tokens);
+        let completion_norm = token(self.completion_tokens);
+        let cache_read_norm = token(self.cache_read_tokens);
+        let cost_usd = if discard_usage {
+            None
+        } else {
+            let um = self.upstream_model.trim();
+            crate::server::core::model_pricing::calc_request_cost_usd(
+                &crate::server::core::model_pricing::settings(),
+                &provider,
+                &self.model,
+                um,
+                ts,
+                prompt_norm,
+                completion_norm,
+                cache_read_norm,
+                cw,
+                cw1h,
+            )
+            .flatten()
+        };
         RequestEntry {
             ts,
             // 关联 id 透传（trim 的理由同 provider）：空串 = 没生成 / 旧行
@@ -625,6 +668,9 @@ impl NewRequestEntry {
             is_test: self.is_test,
             // 分类在入口定稿，收尾时不因设置变动重新归类。
             source: self.source.normalized(),
+            cache_creation_tokens: cw,
+            cache_creation_1h_tokens: cw1h,
+            cost_usd,
         }
     }
 }
@@ -744,6 +790,10 @@ pub struct DailyEntry {
     /// 来源维度回填版本，旧行默认 0；用于一次性修正历史回填口径。
     #[serde(rename = "sourceStatsVersion", default)]
     pub source_stats_version: i64,
+    #[serde(rename = "costUsd", default)]
+    pub cost_usd: f64,
+    #[serde(rename = "unpricedRequests", default)]
+    pub unpriced_requests: i64,
 }
 
 impl DailyEntry {
@@ -762,6 +812,8 @@ impl DailyEntry {
             client_stats: Vec::new(),
             api_key_stats: Vec::new(),
             source_stats_version: SOURCE_STATS_VERSION,
+            cost_usd: 0.0,
+            unpriced_requests: 0,
         }
     }
 }
@@ -774,6 +826,10 @@ pub struct ModelAccum {
     pub requests: i64,
     #[serde(default)]
     pub tokens: i64,
+    #[serde(rename = "costUsd", default)]
+    pub cost_usd: f64,
+    #[serde(rename = "unpricedRequests", default)]
+    pub unpriced_requests: i64,
 }
 
 /// 单个 provider 在某天的累计（聚合行的组成部分，W4 新增）。
@@ -794,6 +850,10 @@ pub struct ProviderAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
+    #[serde(rename = "costUsd", default)]
+    pub cost_usd: f64,
+    #[serde(rename = "unpricedRequests", default)]
+    pub unpriced_requests: i64,
 }
 
 /// 单个账号在某天的累计（聚合行的组成部分）。
@@ -822,6 +882,10 @@ pub struct AccountAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
+    #[serde(rename = "costUsd", default)]
+    pub cost_usd: f64,
+    #[serde(rename = "unpricedRequests", default)]
+    pub unpriced_requests: i64,
 }
 
 /// 明细查询条件（「模型请求日志」页用）——
@@ -872,6 +936,9 @@ pub(super) struct RequestListRow {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
+    pub cost_usd: Option<f64>,
     pub provider: String,
     pub client_model: String,
     pub upstream_model: String,

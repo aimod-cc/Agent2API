@@ -89,6 +89,8 @@ impl PersistenceSlot {
                 let run = observed.claim_once(binding, call, snapshot).await;
                 collector.submitted = run.submitted;
                 collector.claimed = run.claimed;
+                collector.rollback_pending = run.rollback_pending;
+                collector.rejection = run.rejection;
                 (run.outcome, run.binding)
             }
             observation => (observation, binding),

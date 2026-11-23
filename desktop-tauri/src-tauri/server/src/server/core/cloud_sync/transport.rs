@@ -36,6 +36,7 @@ impl Transport {
                     region: settings.s3.region.clone(),
                     bucket: settings.s3.bucket.clone(),
                     endpoint: settings.s3.endpoint.clone(),
+                    url_style: settings.s3.url_style.clone(),
                     user_agent: settings.s3.user_agent.clone(),
                 },
                 prefix: segments.join("/"),

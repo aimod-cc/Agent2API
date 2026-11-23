@@ -215,6 +215,23 @@ pub(super) fn put_fixed(
     Ok(())
 }
 
+/// 仅撤回本轮暂存的待确认条目；被移出的旧条目与空容器均移至外持有槽锁外释放。
+pub(super) fn clear_fixed(
+    raw: &mut Value, displaced: &mut Option<Value>, displaced_container: &mut Option<Value>,
+) -> Result<(), StateError> {
+    if displaced.is_some() || displaced_container.is_some() { return Err(state_error(StateFailure::InvalidEntry)); }
+    container(raw)?;
+    let root = raw.as_object_mut().ok_or(Error::InvalidRecord)?;
+    let Some(fields) = root.get_mut("pluginState").and_then(Value::as_object_mut) else {
+        return Err(state_error(StateFailure::StateChanged));
+    };
+    *displaced = fields.remove(STATE_KEY);
+    if displaced.is_none() { return Err(state_error(StateFailure::StateChanged)); }
+    if fields.is_empty() { *displaced_container = root.remove("pluginState"); }
+    container(raw)?;
+    Ok(())
+}
+
 #[derive(Default)]
 pub(super) struct RawSlot {
     pub(super) value: Value,

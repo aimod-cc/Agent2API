@@ -609,16 +609,24 @@ pub fn pick_asset_by_name(assets: Option<&Value>, wanted: &str) -> Option<Value>
 ///
 /// 多个候选（例如同时挂了 universal 与分架构包）时取第一个：当前 CI 只产一个，
 /// 等真出现多包再补优先级。
-pub fn pick_android_apk(assets: Option<&Value>) -> Option<Value> {
+fn pick_asset_by_suffix(assets: Option<&Value>, suffix: &str) -> Option<Value> {
     let list = assets.and_then(Value::as_array)?;
     let chosen = list
         .iter()
-        .find(|item| asset_name(item).to_lowercase().ends_with(".apk"))?;
+        .find(|item| asset_name(item).to_lowercase().ends_with(suffix))?;
     Some(serde_json::json!({
         "name": asset_name(chosen),
         "size": chosen.get("size").and_then(Value::as_u64).unwrap_or(0),
         "url": chosen.get("browser_download_url").and_then(Value::as_str).unwrap_or(""),
     }))
+}
+
+pub fn pick_android_apk(assets: Option<&Value>) -> Option<Value> {
+    pick_asset_by_suffix(assets, ".apk")
+}
+
+pub fn pick_ios_ipa(assets: Option<&Value>) -> Option<Value> {
+    pick_asset_by_suffix(assets, ".ipa")
 }
 
 /// JS `String.prototype.trim` 的空白集合 = White_Space ∪ {U+FEFF}。

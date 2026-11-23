@@ -346,7 +346,7 @@ impl AccountStore {
         // 单行落地：`put` = DELETE + INSERT（更新既有记录时它落到列表末尾，
         // 与旧实现 retain + push 的结果一致，见 `sql::put`）
         self.with_conn(&_guard, |conn| sql::put(conn, &saved))?;
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!(
                 "{} 自定义账号{}: {}（{}）",
@@ -356,6 +356,7 @@ impl AccountStore {
                 custom_providers::label_of(provider_id)
                     .unwrap_or_else(|| provider_id.to_string()),
             ),
+            "info",
         );
         Ok(CustomAccountUpsert {
             account: self.public_account(&saved),
@@ -497,9 +498,10 @@ impl AccountStore {
         record.set_updated_at(logging::now_ms());
         let name = record.name();
         self.with_conn(&_guard, |conn| sql::update_in_place(conn, &record))?;
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!("🌐 自定义账号上游地址已更新: {name}（{change}）"),
+            "info",
         );
         Ok(vec![change])
     }
@@ -673,9 +675,10 @@ impl AccountStore {
         record.set_updated_at(logging::now_ms());
         let name = record.name();
         self.with_conn(&_guard, |conn| sql::update_in_place(conn, &record))?;
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!("🔑 自定义账号凭证已更新: {name}（{}）", changes.join("，")),
+            "info",
         );
         Ok(changes)
     }
@@ -757,9 +760,10 @@ impl AccountStore {
         record.set_updated_at(logging::now_ms());
         let name = record.name();
         self.with_conn(&_guard, |conn| sql::update_in_place(conn, &record))?;
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!("🔎 自定义账号余额查询配置已更新: {name}（{}）", changes.join("，")),
+            "info",
         );
         Ok(changes)
     }

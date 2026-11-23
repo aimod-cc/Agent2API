@@ -9,10 +9,17 @@ const TASK: &str = "travel";
 
 pub(crate) fn state() -> Option<Value> {
     if !super::super::has_capability(PROVIDER, "tasks.v1") { return None; }
+    let states = task_state::read_all();
+    state_with(&states)
+}
+
+pub(crate) fn state_with(
+    states: &Result<std::collections::HashMap<String, task_state::TaskState>, String>,
+) -> Option<Value> {
+    if !super::super::has_capability(PROVIDER, "tasks.v1") { return None; }
     let raw = settings::legacy_state();
     let declared = definition(PROVIDER, TASK);
     let task = declared.as_ref().map(|task| current(PROVIDER, task));
-    let states = task_state::read_all();
     let unavailable = if !super::registry::serves(PROVIDER) || task.is_none() {
         Some("旅行任务尚未就绪，未回退到旧版执行入口")
     } else if !settings::readable() {

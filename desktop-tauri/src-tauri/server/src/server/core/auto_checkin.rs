@@ -88,20 +88,12 @@ pub fn default_time() -> String {
 ///     见 `providers::modelscope::checkin`。两个站点各打各的网页站，令牌不通用
 ///     （打错得 401）。链路依据是 CPA 的 `modelscope-ratelimit` 插件源码，
 ///     2026-10 实测复核。
-///   - **ZCode 国内版 / 国际版**：签到 = **领当天那份赠送套餐**。上游每天下发
-///     一份带日期段的新套餐（`zcode-v3-start-plan-<日期>` 这类），在客户端里
-///     点一下就领，那一动作就是本家的签到；同一期再领回 `1003 already claimed`，
-///     所以「今天领过没」不需要本地记账（见 `providers::zcode::checkin`）。
-///     ⚠️ 窗口是**每天 19:00 开启**（官方公告：19:00 起可领，23:00 至次日 09:00
-///     可用），所以它的生效时刻在 `times::PROVIDER_TIMES` 里钉的是 19:01 ——
-///     跟其它家一起在 00:01 去签只会拿到「窗口没开」。
-///     ⚠️ 领取验证按需交给已连接的管理界面；无可用界面或验证未完成返回
-///     `captcha`，不记已领取，也不归入等待活动的自动重试。
 ///
 /// 这是「有签到或每日活跃任务」的清单，不是「有积分概念」的清单：CatPaw 有积分
 /// 查询但没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
+/// ZCode 每日赠送套餐活动已下架，也已从每日签到清单中移除。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 19] = [
+pub const CHECKIN_PROVIDERS: [&str; 17] = [
     "workbuddy",
     "workbuddy-intl",
     "raccoon",
@@ -137,10 +129,6 @@ pub const CHECKIN_PROVIDERS: [&str; 19] = [
     // check_in），实测 +100 积分/号/天。幂等靠客户端（idempotencyKey + 上游
     // 的 `claimedToday` 预检），见 `lobsterai::checkin` 的模块头。
     "lobsterai",
-    // ZCode 两地：签到 = 领当天那份赠送套餐（见上面那条说明）。
-    // 两个地区各打各的站点、令牌不通用，因此两个 id 分开登记。
-    "zcode",
-    "zcode-intl",
 ];
 
 /// 缺省的签到提供商集合（全选 = **已知**清单，不是「此刻可用」清单）。
@@ -184,15 +172,22 @@ pub fn checkin_providers() -> Vec<String> {
             list.push(id);
         }
     }
-    for id in raw_object()
-        .get("pluginProvidersSeen")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        if !list.iter().any(|known| known == id) {
-            list.push(id.to_string());
+    let seen = config::with_raw(|raw| {
+        raw.get(CONFIG_KEY)
+            .and_then(|value| value.get("pluginProvidersSeen"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    })
+    .unwrap_or_default();
+    for id in seen {
+        if !list.iter().any(|known| known == &id) {
+            list.push(id);
         }
     }
     list
@@ -233,8 +228,8 @@ pub const PROVIDERS_VERSION: i64 = 6;
 /// 的存量兼容规则跟着 `qoder` 带上，不在这里重复登记）。
 /// 版本 3 = 智谱清言；版本 4 = ModelScope 的两个站点与 AtomCode；
 /// 版本 5 = LobsterAI（两条 provider PR 各自用了一个号，合起来取并集）；
-/// 版本 6 = ZCode 的两个站点（签到 = 领当天赠送套餐）。
-const PROVIDERS_ADDED_IN: [(&str, i64); 9] = [
+/// 版本 6 曾用于 ZCode 两站点，现已因官方赠送套餐活动下架从签到清单移除。
+const PROVIDERS_ADDED_IN: [(&str, i64); 7] = [
     ("officeace", 2),
     ("codearts", 2),
     ("chatglm", 3),
@@ -242,8 +237,6 @@ const PROVIDERS_ADDED_IN: [(&str, i64); 9] = [
     ("modelscope-intl", 4),
     ("atomcode", 4),
     ("lobsterai", 5),
-    ("zcode", 6),
-    ("zcode-intl", 6),
 ];
 
 /// 版本 `version` 之后才加入清单的家（按注册顺序）。空数组 = 这一版没有新家，
@@ -282,29 +275,33 @@ pub fn provider_label(id: &str) -> String {
 /// 自动签到会静默漏掉国际版账号。这里按账号迁移的同一口径补齐：勾了
 /// `qoder` 的，紧跟其后补上 `qoder-intl`（要签中国版就要签国际版，拆家只是
 /// 同一套能力的地区分身）；两者都没勾的（明确不签 Qoder）不动。
-pub fn normalize_providers(value: Option<&Value>) -> Vec<String> {
-    let Some(list) = value.and_then(Value::as_array) else {
-        return default_providers();
-    };
-    // 用 `checkin_providers()`（含插件家）而不是常量表：插件的签到能力位在
-    // 运行期才知道，拿常量表过滤会把用户勾选的插件家静默丢掉。
-    let known = checkin_providers();
-    let picked: Vec<String> = known
-        .iter()
-        .filter(|id| list.iter().any(|item| item.as_str() == Some(id.as_str())))
-        .cloned()
-        .collect();
-    let mut picked = if picked.is_empty() {
-        default_providers()
-    } else {
-        picked
-    };
+pub(crate) fn normalize_providers_with(value: Option<&Value>, known: &[String]) -> Vec<String> {
+    let mut picked = value
+        .and_then(Value::as_array)
+        .map(|list| {
+            known
+                .iter()
+                .filter(|id| list.iter().any(|item| item.as_str() == Some(id.as_str())))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if picked.is_empty() {
+        picked = known.to_vec();
+    }
     if let Some(pos) = picked.iter().position(|id| id == "qoder") {
         if !picked.contains(&"qoder-intl".to_string()) {
             picked.insert(pos + 1, "qoder-intl".to_string());
         }
     }
     picked
+}
+
+pub fn normalize_providers(value: Option<&Value>) -> Vec<String> {
+    // 用 `checkin_providers()`（含插件家）而不是常量表：插件的签到能力位在
+    // 运行期才知道，拿常量表过滤会把用户勾选的插件家静默丢掉。
+    let known = checkin_providers();
+    normalize_providers_with(value, &known)
 }
 
 /// config.json 里承载定时签到状态的键。
@@ -444,16 +441,23 @@ pub(crate) fn normalize_today_at(
 /// `pub(crate)`：多条目配置（`core::checkin_schedules`）在同一个键下读写，
 /// 合并写回的逻辑只有这一份。
 pub(crate) fn raw_object() -> Map<String, Value> {
-    match config::current().raw().get(CONFIG_KEY) {
+    config::with_raw(|raw| match raw.get(CONFIG_KEY) {
         Some(Value::Object(map)) => map.clone(),
         _ => Map::new(),
-    }
+    })
+    .unwrap_or_default()
 }
 
 /// 总开关（`autoCheckin.enabled`）：关了所有条目都不跑。
 /// 条目自己的开关在 `checkin_schedules::Schedule::enabled`，两层都开着才跑。
 pub fn master_enabled() -> bool {
-    raw_object().get("enabled").and_then(Value::as_bool) == Some(true)
+    config::with_raw(|raw| {
+        raw.get(CONFIG_KEY)
+            .and_then(|value| value.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    })
+    .unwrap_or(false)
 }
 
 /// 合并写回 `autoCheckin`（对应 Node 版 writeState 的 `{...current, ...patch}`）。

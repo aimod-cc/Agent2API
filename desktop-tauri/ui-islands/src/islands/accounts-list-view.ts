@@ -90,7 +90,11 @@ export function previewAccountPage(query: AccountListQuery, continuous: boolean,
 }
 
 export function mergeAccountPages(first: AccountListPage<AccountRecord>, previous: AccountListPage<AccountRecord> | null, continuous: boolean, snapshot: AccountsSnapshot | null | undefined): AccountListPage<AccountRecord> {
-  if (!continuous || !previous) return first
+  if (!continuous) return first
+  if (!previous) {
+    const displayIds = first.displayIds || first.accounts.map(account => account.id)
+    return { ...first, offset: nextOffset(displayIds, first.accounts) }
+  }
   const fresh = new Map(first.accounts.map(account => [account.id, account]))
   const indexes = new Map((snapshot?.accounts || []).map(account => [account.id, account]))
   const saved = new Map(previous.accounts.map(account => [account.id, account]))

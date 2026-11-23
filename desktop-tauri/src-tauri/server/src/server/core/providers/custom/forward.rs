@@ -60,10 +60,9 @@ pub(crate) async fn forward(
     let provider = custom_providers::get(provider_id).ok_or_else(|| {
         GatewayError::with_status(503, format!("自定义提供商不存在: {}", provider_id.trim()))
     })?;
-    let protocol = provider
-        .get("protocol")
-        .and_then(Value::as_str)
-        .unwrap_or(custom_providers::PROTOCOL_CHAT_COMPLETIONS);
+    let requested_model = route_model.or_else(|| body.get("model").and_then(Value::as_str));
+    let protocol_owned = custom_providers::effective_protocol_of_provider(&provider, requested_model);
+    let protocol = protocol_owned.as_str();
     // ── 协议分派（见模块头）────────────────────────────────────
     // 配置校验只放行三种协议，未知值仍 400 兜底 —— 明确的一句比「上游报了
     // 一个看不懂的错」有用得多。

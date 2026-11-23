@@ -35,7 +35,6 @@ mod http;
 pub(super) mod inbound_images;
 pub(super) mod install_source;
 mod limits;
-mod legacy_credentials;
 mod legacy_secret;
 mod login;
 pub(crate) mod managed;

@@ -79,6 +79,12 @@ pub(super) fn import(
     };
     let tables = table_row_counts(&temp.conn, &[]);
     set_phase(RestorePhase::SafetyBackup);
+    enum RestoreOutcome {
+        Ready(std::path::PathBuf),
+        RolledBack(String),
+        Corrupted(String),
+    }
+
     let suppression = cloud_sync::auto_sync::SuppressionGuard::new();
     if !config::model_key_source::pre_replace() {
         return Err("模型Key原授权无法安全撤销，未替换主数据库".into());
@@ -86,7 +92,7 @@ pub(super) fn import(
     // 原epoch先真实耐久轮换，随后暂存库另写新隔离epoch，最后才创建安全备份和覆盖。
     // 因而安全备份本身已隔离；覆盖失败回滚、应用重启均不能恢复本次之前的旧发送资格。
     // 槽payload不参与密钥重加密：原样保留但永远属于旧epoch，不按ID解密或建立Ready。
-    let safety = db.with_account_change(|change| change.restore(&temp.conn, |main| {
+    let attempt = db.with_account_change(|change| change.restore(&temp.conn, |main| {
         db.invalidate_accounts();
         let safety = safety::create(main, config_dir)?;
         set_phase(RestorePhase::Replacing);
@@ -96,14 +102,30 @@ pub(super) fn import(
                 .map_err(|error| format!("打开安全备份失败: {error}"))
                 .and_then(|old| replace(&old, main));
             db.invalidate_accounts();
-            return match rollback {
-                Ok(()) => Err(format!("{error}；已自动还原替换前的业务数据，本机密钥未更换；旧换证资格仍保持隔离")),
-                Err(rollback_error) => Err(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
-            };
+            return Ok(match rollback {
+                Ok(()) => RestoreOutcome::RolledBack(format!("{error}；已自动还原替换前的业务数据，本机密钥未更换；旧换证资格仍保持隔离")),
+                Err(rollback_error) => RestoreOutcome::Corrupted(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
+            });
         }
         db.invalidate_accounts();
-        Ok(safety)
-    })).ok_or("数据库连接不可用，恢复未执行")??;
+        Ok(RestoreOutcome::Ready(safety))
+    }));
+    let safety = match attempt {
+        Some(Ok(RestoreOutcome::Ready(safety))) => safety,
+        Some(Ok(RestoreOutcome::RolledBack(error))) | Some(Err(error)) => {
+            db.invalidate_accounts();
+            config::try_reload_from_db();
+            return Err(error);
+        }
+        Some(Ok(RestoreOutcome::Corrupted(error))) => {
+            db.invalidate_accounts();
+            return Err(error);
+        }
+        None => {
+            config::try_reload_from_db();
+            return Err("数据库连接不可用，恢复未执行".into());
+        }
+    };
     db.invalidate_accounts();
     set_phase(RestorePhase::Reloading);
     config::reload();

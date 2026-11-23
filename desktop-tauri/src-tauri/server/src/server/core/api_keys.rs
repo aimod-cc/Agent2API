@@ -343,22 +343,7 @@ pub fn entries_from(raw: &Map<String, Value>) -> Vec<ApiKeyEntry> {
 /// 判断依据与上面同一条（宁可留一条不可用的记录，也不让列表空掉）。
 fn legacy_entry(raw: &Map<String, Value>) -> Option<ApiKeyEntry> {
     let stored = raw.get(KEY_API_KEY)?.as_str()?.trim();
-    if stored.is_empty() {
-        return None;
-    }
-    let (key, key_unreadable) = decode_key(stored, LEGACY_ID);
-    Some(ApiKeyEntry {
-        id: LEGACY_ID.to_string(),
-        name: LEGACY_NAME.to_string(),
-        key,
-        enabled: true,
-        created_at: 0,
-        // 旧字段形态的 Key 从来没有白名单概念 —— 空 = 不限制，
-        // 与它升级前的行为（放行一切）逐字一致
-        allowed_providers: Vec::new(),
-        allowed_models: Vec::new(),
-        key_unreadable,
-    })
+    legacy_entry_from_str(stored)
 }
 
 /// 某个位置上**存着**的旧字段值 → 明文（界面掩码用）。
@@ -379,7 +364,112 @@ pub fn stored_plaintext(stored: &str) -> String {
 
 /// 当前全部记录
 pub fn list() -> Vec<ApiKeyEntry> {
-    entries_from(config::current().raw())
+    enum Stored {
+        Array(Vec<Value>),
+        Legacy(String),
+        None,
+    }
+    let stored = config::with_raw(|raw| {
+        if let Some(Value::Array(items)) = raw.get(KEY_API_KEYS) {
+            return Stored::Array(items.clone());
+        }
+        match raw.get(KEY_API_KEY).and_then(Value::as_str).map(str::trim) {
+            Some(key) if !key.is_empty() => Stored::Legacy(key.to_string()),
+            _ => Stored::None,
+        }
+    })
+    .unwrap_or(Stored::None);
+
+    match stored {
+        Stored::Array(items) => items.iter().filter_map(ApiKeyEntry::from_value).collect(),
+        Stored::Legacy(raw) => legacy_entry_from_str(&raw).into_iter().collect(),
+        Stored::None => Vec::new(),
+    }
+}
+
+fn legacy_entry_from_str(stored: &str) -> Option<ApiKeyEntry> {
+    if stored.is_empty() {
+        return None;
+    }
+    let (key, key_unreadable) = decode_key(stored, LEGACY_ID);
+    Some(ApiKeyEntry {
+        id: LEGACY_ID.to_string(),
+        name: LEGACY_NAME.to_string(),
+        key,
+        enabled: true,
+        created_at: 0,
+        // 旧字段形态的 Key 从来没有白名单概念 —— 空 = 不限制，
+        // 与它升级前的行为（放行一切）逐字一致
+        allowed_providers: Vec::new(),
+        allowed_models: Vec::new(),
+        key_unreadable,
+    })
+}
+
+/// 按 id 查找当前可用的一条记录（跳过停用记录，只解密命中那条，避免克隆整份配置与全表解密）。
+pub fn usable_by_id(id: &str) -> Option<ApiKeyEntry> {
+    enum Candidate {
+        Item(Value),
+        Legacy(String),
+        None,
+    }
+    let candidate = config::with_raw(|raw| {
+        if let Some(Value::Array(items)) = raw.get(KEY_API_KEYS) {
+            let item = items.iter().find(|value| {
+                value.get("id").and_then(Value::as_str) == Some(id)
+                    && !matches!(value.get("enabled"), Some(Value::Bool(false)))
+            });
+            return item.cloned().map(Candidate::Item).unwrap_or(Candidate::None);
+        }
+        if id == LEGACY_ID {
+            if let Some(stored) = raw.get(KEY_API_KEY).and_then(Value::as_str).map(str::trim) {
+                if !stored.is_empty() {
+                    return Candidate::Legacy(stored.to_string());
+                }
+            }
+        }
+        Candidate::None
+    })
+    .unwrap_or(Candidate::None);
+
+    match candidate {
+        Candidate::Item(value) => ApiKeyEntry::from_value(&value).filter(ApiKeyEntry::is_usable),
+        Candidate::Legacy(stored) => legacy_entry_from_str(&stored).filter(ApiKeyEntry::is_usable),
+        Candidate::None => None,
+    }
+}
+
+/// 查找第一把当前可用的网关 Key（按配置顺序；跳过停用记录并在命中首把可用 Key 后停止解密）。
+pub fn first_usable() -> Option<ApiKeyEntry> {
+    enum Candidates {
+        Items(Vec<Value>),
+        Legacy(String),
+        None,
+    }
+    let candidates = config::with_raw(|raw| {
+        if let Some(Value::Array(items)) = raw.get(KEY_API_KEYS) {
+            let enabled = items
+                .iter()
+                .filter(|value| !matches!(value.get("enabled"), Some(Value::Bool(false))))
+                .cloned()
+                .collect();
+            return Candidates::Items(enabled);
+        }
+        match raw.get(KEY_API_KEY).and_then(Value::as_str).map(str::trim) {
+            Some(stored) if !stored.is_empty() => Candidates::Legacy(stored.to_string()),
+            _ => Candidates::None,
+        }
+    })
+    .unwrap_or(Candidates::None);
+
+    match candidates {
+        Candidates::Items(items) => items
+            .iter()
+            .filter_map(ApiKeyEntry::from_value)
+            .find(ApiKeyEntry::is_usable),
+        Candidates::Legacy(stored) => legacy_entry_from_str(&stored).filter(ApiKeyEntry::is_usable),
+        Candidates::None => None,
+    }
 }
 
 /// 当前启用的 Key 配置（含降级态记录和环境变量 Key），不是可调用 Key 的清单。

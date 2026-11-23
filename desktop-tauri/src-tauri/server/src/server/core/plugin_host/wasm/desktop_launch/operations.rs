@@ -14,7 +14,7 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{binding::{Binding, Call}, declaration, paths, storage, windows};
+use super::{binding::{Binding, Call}, declaration, paths, proxy, storage, windows};
 use crate::server::{access::local_session::Source, core::account_store::AccountStore, db::Db};
 use crate::server::core::plugin_host::Host;
 
@@ -24,6 +24,16 @@ pub struct Selection {
     pub provider: String,
     pub account: String,
     pub client: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PrepareSelection {
+    pub provider: String,
+    pub account: String,
+    pub client: String,
+    #[serde(default)]
+    pub use_proxy: Option<bool>,
 }
 
 pub(super) struct State {
@@ -50,6 +60,7 @@ pub(super) struct Operation {
     pub restart: bool,
     pub hot_switch: bool,
     pub initial_running: bool,
+    pub proxy: proxy::LaunchProxyState,
     pub pending_backup: Option<String>,
     pub cancel: CancellationToken,
     pub deadline: Instant,
@@ -71,6 +82,18 @@ impl Operation {
         paths::identity(&self.binding.client, &self.executable)
     }
 
+    pub fn check_proxy(&self) -> Result<(), String> {
+        let origin = self.binding.origin()?;
+        origin.check_proxy()?;
+        if self.proxy.enabled && !self.proxy.available {
+            return Err(self.proxy.error.clone().unwrap_or_else(|| "当前账号代理不可用，无法带代理启动".into()));
+        }
+        if let Some(expected) = &self.proxy.resolved {
+            proxy::reverify(origin.initial_proxy(), expected)?;
+        }
+        Ok(())
+    }
+
     pub fn public(&self) -> Value {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         json!({ "intent": self.id, "provider": self.binding.provider, "account": self.binding.account,
@@ -78,6 +101,7 @@ impl Operation {
             "phase": state.phase, "message": state.message, "error": state.error,
             "committed": state.committed, "started": state.started, "restored": state.restored,
             "running": state.client_running, "requiresRestart": self.restart, "hotSwitch": self.hot_switch,
+            "proxy": self.proxy.to_json(),
             "executable": self.executable.display().to_string(), "package": self.binding.package,
             "resources": self.binding.client.resources.iter().map(|resource| json!({ "id": resource.id, "label": resource.label,
                 "location": self.targets.get(&resource.id).map(storage::Target::display) })).collect::<Vec<_>>(),
@@ -105,14 +129,18 @@ pub(super) fn find(manager: &Source, intent: &str) -> Result<Arc<Operation>, Str
     Ok(operation)
 }
 
-fn valid(selection: &Selection) -> Result<(), String> {
-    if !declaration::identifier(&selection.provider) || !declaration::identifier(&selection.client)
-        || !declaration::text(&selection.account, 512) { return Err("本机启动选择无效".into()); }
+fn valid_parts(provider: &str, client: &str, account: &str) -> Result<(), String> {
+    if !declaration::identifier(provider) || !declaration::identifier(client)
+        || !declaration::text(account, 512) { return Err("本机启动选择无效".into()); }
     Ok(())
 }
 
-pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Selection) -> Result<Value, String> {
-    valid(&selection)?;
+fn valid(selection: &Selection) -> Result<(), String> {
+    valid_parts(&selection.provider, &selection.client, &selection.account)
+}
+
+pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: PrepareSelection) -> Result<Value, String> {
+    valid_parts(&selection.provider, &selection.client, &selection.account)?;
     let binding = Binding::capture(&store, &selection.provider, &selection.account, &selection.client)?;
     let check = binding.invoke(Call::new(&binding, manager.clone(), None, None), declaration::CHECK).await?;
     binding.current()?;
@@ -121,28 +149,34 @@ pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Se
     if check["available"] != true {
         return Err(binding.failure(check["reason"].as_str().filter(|reason| !reason.is_empty()).unwrap_or("该账号没有可切换的完整凭证").to_string()));
     }
-    binding.origin()?.check(binding.origin()?.initial())?;
+    let origin = binding.origin()?;
+    origin.check(origin.initial())?;
+    origin.check_proxy()?;
+    let proxy_supported = binding.client.proxy_launch.is_some();
+    let raw_proxy = origin.initial_proxy().clone();
+    let requested_use_proxy = selection.use_proxy;
     let setting = settings::read(&db, &binding.provider, &binding.client.id)?;
     let client = binding.client.clone();
     let override_path = setting.path.clone();
-    let (executable, targets, running, hot_switch, pending) = crate::server::core::blocking::run(move || {
+    let (executable, targets, running, hot_switch, proxy_state, pending) = crate::server::core::blocking::run(move || {
+        let proxy_state = proxy::prepare_state(proxy_supported, &raw_proxy, requested_use_proxy)?;
         let executable = paths::detect(&client, &override_path)?.ok_or("没有找到本机客户端，请先选择程序位置")?;
         let targets = storage::targets(&client, &executable)?;
         for target in targets.values() { target.probe()?; }
         let running = windows::running(&executable)?;
-        let hot_switch = if running {
+        let hot_switch = if running && proxy_state.resolved.is_none() {
             windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
         } else {
             false
         };
         let pending = storage::Journal::pending(&executable, &targets)?;
-        Ok::<_, String>((executable, targets, running, hot_switch, pending))
+        Ok::<_, String>((executable, targets, running, hot_switch, proxy_state, pending))
     }).await.map_err(|_| "本机客户端检查中断")??;
     binding.current()?;
     if !manager.is_current() { return Err("本机管理会话已变化".into()); }
     let id = random_id()?;
     let operation = Arc::new(Operation { id: id.clone(), manager, binding, db, executable, targets: Arc::new(targets), setting,
-        restart: running && !hot_switch, hot_switch, initial_running: running, pending_backup: pending, cancel: CancellationToken::new(), deadline: Instant::now() + Duration::from_secs(180),
+        restart: running && !hot_switch, hot_switch, initial_running: running, proxy: proxy_state, pending_backup: pending, cancel: CancellationToken::new(), deadline: Instant::now() + Duration::from_secs(180),
         state: Mutex::new(State { phase: "awaiting_confirmation", message: String::new(), confirmed: false, worker: false,
             committed: false, started: false, restored: false, client_running: running, backup: None, error: false }), changed: Notify::new(),
         expected: Mutex::new(None), recovery_only: false });
@@ -186,10 +220,11 @@ pub fn confirm(manager: Source, intent: &str, restart_confirmed: bool) -> Result
     let client = operation.binding.client.clone();
     let executable = operation.executable.clone();
     let targets = operation.targets.clone();
+    let use_proxy = operation.proxy.resolved.is_some();
     let (running, hot_switch, pending) = crate::server::core::blocking::in_place(move || {
         paths::identity(&client, &executable)?;
         let running = windows::running(&executable)?;
-        let hot_switch = if running {
+        let hot_switch = if running && !use_proxy {
             windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
         } else {
             false
@@ -198,6 +233,7 @@ pub fn confirm(manager: Source, intent: &str, restart_confirmed: bool) -> Result
     })?;
     operation.check()?;
     operation.binding.origin()?.check(operation.binding.origin()?.initial())?;
+    operation.check_proxy()?;
     if operation.pending_backup.is_some() || pending.is_some() { return Err("上次本机切换未完整结束，请先恢复原凭证".into()); }
     if running && !operation.initial_running { return Err("客户端在准备后已启动，请重新确认".into()); }
     if operation.hot_switch && running && !hot_switch { return Err("客户端后台服务状态已变化，请重新确认".into()); }

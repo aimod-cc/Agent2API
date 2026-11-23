@@ -94,7 +94,13 @@ impl Owner {
                                             Some(Err(message)) => notice = Some(message),
                                             None => notice = Some("WorkBuddy冷却记录机会已消费，未重试".to_string()),
                                         }
-                                    } else { notice = Some("当前错误规则不记录冷却；响应未重放".to_string()); }
+                                    } else {
+                                        notice = Some(if decision.deprioritizes() {
+                                            "当前错误规则为降级排序；响应已开始未重放"
+                                        } else {
+                                            "当前错误规则不记录冷却；响应未重放"
+                                        }.to_string());
+                                    }
                                 }
                             }
                         }

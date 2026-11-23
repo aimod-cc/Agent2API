@@ -24,6 +24,7 @@
 .routing-errors-host .re-content-grid { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
 .re-primary { display: flex; flex-direction: column; min-width: 0; gap: 14px; }
 .re-primary > * { flex-shrink: 0; }
+.re-rules-switch { display: flex; align-items: center; }
 .routing-errors-host .re-primary { height: 100%; max-height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 4px 8px 0; }
 .re-primary [data-slot='card'], .re-preview { background: var(--ui-card); }
 .re-primary [data-slot='card-header'], .re-preview [data-slot='card-header'] { padding: 10px 14px; }
@@ -67,10 +68,23 @@
 .re-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .re-form-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .re-exceptions { padding: 12px 14px; }
+.re-exceptions-head { justify-content: space-between; }
+.re-exceptions-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.re-exceptions-filter { min-width: 168px; }
+.re-exception-groups { display: flex; flex-direction: column; gap: 8px; }
+.re-exception-group { border: 1px solid var(--ui-hairline); border-radius: 8px; overflow: hidden; }
+.re-exception-group-trigger { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border: 0; background: var(--ui-surface-inset); color: var(--ui-foreground); font-size: 12px; text-align: left; cursor: pointer; }
+.re-exception-group-trigger strong { font-weight: 550; }
+.re-exception-group-trigger[disabled] { cursor: default; }
+.re-exception-group-trigger svg { transition: transform 140ms ease; }
+.re-exception-group[data-state='open'] .re-exception-group-trigger svg, .re-exception-group-trigger[aria-expanded='true'] svg { transform: rotate(180deg); }
+.re-exception-group-meta { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 11px; color: var(--ui-muted-foreground); }
+.re-exception-group-list { padding: 0 12px; background: var(--ui-card); }
 .re-empty { text-align: center; color: var(--ui-muted-foreground); font-size: 11.5px; margin: 8px 0; }
 .re-exception { display: flex; gap: 7px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--ui-hairline); }
 .re-exception:last-child { border: 0; }
 .re-exception > div { flex: 1; min-width: 0; }
+.re-exception-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .re-exception strong { font-size: 12px; font-weight: 550; }
 .re-exception p { margin: 3px 0 0; font-size: 11px; color: var(--ui-muted-foreground); overflow-wrap: anywhere; }
 .re-rule-dialog { width: min(620px, calc(100vw - 32px)); }

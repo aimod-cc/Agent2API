@@ -1,5 +1,8 @@
 import * as React from 'react'
-import { Badge, Button, Checkbox, Switch, TableCell, cn } from '@ui'
+import {
+  Badge, Button, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Switch, TableCell, cn,
+} from '@ui'
 import { t } from '../i18n'
 import * as customSource from './models-custom-source'
 import type { ManageModel } from './models-custom-source'
@@ -10,9 +13,12 @@ import {
   exactTokens, formatTokens, normalizeOverrides, type CapabilityKey,
 } from './model-capability'
 import {
+  formatUnitPrice, pricingSourceLabel, usePricingDisplay,
+} from './model-pricing'
+import {
   bindingKeyOf, bindingsOf, enabledBindingConflicts, esc, formatTime, getSnapshot, levelOf, models,
   openCapability, openMapping, rowKeyOf, runRowAction, same, shared, subscribe, visibilityOf,
-  writeBinding, writeRemoveMapping, writeRemoveModel, type Align, type ColumnView, type Binding,
+  writeBinding, writeModelProtocol, writeRemoveMapping, writeRemoveModel, type Align, type ColumnView, type Binding,
 } from './models-panel-state'
 
 const cellClass = (base: string, align?: Align): string => (align ? `${base} ta-${align}` : base)
@@ -63,13 +69,15 @@ const CAP_ICON: Partial<Record<CapabilityKey, React.ReactNode>> = {
   ),
 }
 
-export function ModelCell({ columns, model, selection, togglePick, setTestTarget }: {
+export function ModelCell({ columns, model, selection, togglePick, setTestTarget, setPricingTarget }: {
   columns: ColumnView[]
   model: ManageModel
   selection: ReadonlySet<string>
   togglePick: (key: string, next: boolean) => void
   setTestTarget: (target: ModelTestTarget) => void
+  setPricingTarget: (model: ManageModel) => void
 }) {
+  const pricingDisplay = usePricingDisplay()
   const state = React.useSyncExternalStore(subscribe, getSnapshot)
   const busyRow = state.pending.has(rowKeyOf(model))
   /** chip 上那枚等级标（未绑定时也渲染虚线样式，否则「怎么绑等级」会变成一个查不出的问题） */
@@ -398,7 +406,30 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
               onCheckedChange={next => togglePick(rowKeyOf(model), next === true)} />
           </TableCell>
         )
-      case 'model':
+      case 'model': {
+        const isCustomModel = customSource.isCustom(model.provider)
+        const providerRecord = isCustomModel ? customSource.record(model.provider) : null
+        const defaultProtocol = customSource.normalizeCustomProtocol(providerRecord?.protocol)
+          || customSource.normalizeCustomProtocol(model.providerProtocol)
+          || 'chat_completions'
+        const inferredProtocol = isCustomModel ? customSource.inferPresetModelProtocol(providerRecord, model.id) : undefined
+        const explicitProtocol = customSource.normalizeCustomProtocol(model.protocol)
+        const effectiveProtocol = explicitProtocol || inferredProtocol || defaultProtocol
+        const selectValue = explicitProtocol || '__default__'
+        const fullUrl = isCustomModel
+          ? customSource.previewCustomEndpointUrl(providerRecord?.baseUrl, effectiveProtocol, providerRecord?.urlSuffix)
+          : ''
+        const defaultOptionLabel = inferredProtocol && inferredProtocol !== defaultProtocol
+          ? t('自动匹配（{protocol}）', { protocol: customSource.customProtocolLabel(inferredProtocol) })
+          : t('跟随提供商默认（{protocol}）', { protocol: customSource.customProtocolLabel(defaultProtocol) })
+        const protocolTip = [
+          explicitProtocol
+            ? t('当前模型已单独指定协议：{protocol}', { protocol: customSource.customProtocolLabel(effectiveProtocol) })
+            : (inferredProtocol && inferredProtocol !== defaultProtocol
+              ? t('已按模型自动匹配协议：{protocol}（点击可手动指定）', { protocol: customSource.customProtocolLabel(effectiveProtocol) })
+              : t('跟随提供商默认协议：{protocol}（点击可为此模型单独指定协议）', { protocol: customSource.customProtocolLabel(effectiveProtocol) })),
+          fullUrl ? t('实际请求地址：{url}', { url: fullUrl }) : '',
+        ].filter(Boolean).join('\n')
         return (
           <TableCell className={cellClass('cell-model', column.align)}>
             {/* 名字本身就是复制入口（data-copy 走 clipboard.js 的全局委托，点一下
@@ -415,14 +446,107 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
               ) : null}
             </div>
             {model.name && model.name !== model.id ? <div className='mname'>{model.name}</div> : null}
+            {isCustomModel ? (
+              <div className='mt-1 flex items-center gap-1.5'>
+                <Select
+                  value={selectValue}
+                  disabled={busyRow}
+                  onValueChange={next => {
+                    const value = String(next)
+                    const nextProtocol = value === '__default__' ? null : value
+                    void runRowAction(
+                      rowKeyOf(model),
+                      () => writeModelProtocol(model.provider, model.id, nextProtocol),
+                      nextProtocol
+                        ? t('已将 {model} 的请求协议设为 {protocol}', {
+                          model: model.id,
+                          protocol: customSource.customProtocolLabel(nextProtocol),
+                        })
+                        : t('已将 {model} 恢复为默认协议', { model: model.id }),
+                    )
+                  }}
+                >
+                  <SelectTrigger
+                    className={cn(
+                      'h-5 w-auto max-w-full gap-1 rounded px-1.5 py-0 text-[10.5px] font-medium shadow-none',
+                      explicitProtocol || (inferredProtocol && inferredProtocol !== defaultProtocol)
+                        ? 'border-primary/40 bg-primary/10 text-primary-fg'
+                        : 'border-hairline bg-surface-2 text-muted-foreground',
+                    )}
+                    title={protocolTip}
+                    aria-label={t('{model} 请求协议', { model: model.id })}
+                  >
+                    <SelectValue>
+                      {customSource.customProtocolLabel(effectiveProtocol, true)}
+                      {explicitProtocol ? ' · ' + t('独立') : (inferredProtocol && inferredProtocol !== defaultProtocol ? ' · ' + t('自动') : '')}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='__default__'>{defaultOptionLabel}</SelectItem>
+                    {customSource.CUSTOM_PROTOCOL_OPTIONS.map(option => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
           </TableCell>
         )
+      }
       case 'rate':
         return (
           <TableCell className={cellClass('cell-rate', column.align)}>
             <span className='rate'>{model.credits ? formatCredits(model.credits) : '—'}</span>
           </TableCell>
         )
+      case 'pricing': {
+        const info = model.pricing
+        const eff = info?.effective
+        const priced = Boolean(info?.priced && eff)
+        const titleLines: string[] = []
+        if (priced && eff) {
+          titleLines.push(`${t('来源')}：${pricingSourceLabel(info?.source ?? null)}${info?.sameAs ? ` (${info.sameAs})` : ''}`)
+          titleLines.push(`${t('输入')}：${formatUnitPrice(eff.input, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
+          titleLines.push(`${t('输出')}：${formatUnitPrice(eff.output, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
+          if ((eff.cacheRead ?? 0) > 0) titleLines.push(`${t('缓存读')}：${formatUnitPrice(eff.cacheRead, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
+          if ((eff.cacheWrite ?? 0) > 0) titleLines.push(`${t('缓存写')}：${formatUnitPrice(eff.cacheWrite, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
+          if (info?.priceRate && info.priceRate !== 1) titleLines.push(`${t('提供商倍率')}：×${info.priceRate}`)
+          if (info?.activeWindowRate && info.activeWindowRate !== 1) titleLines.push(`${t('当前时段倍率')}：×${info.activeWindowRate}`)
+          if (info?.inPeak) titleLines.push(t('当前处于高峰时段 (2×)'))
+          if (eff.tiers && eff.tiers.length > 0) titleLines.push(t('含 {n} 档长上下文阶梯定价', { n: eff.tiers.length }))
+        } else {
+          titleLines.push(t('点击配置模型计价或参考模型'))
+        }
+        return (
+          <TableCell className={cellClass('cell-pricing', column.align)}>
+            <button
+              type='button'
+              className={cn(
+                'inline-flex flex-col items-start gap-0.5 rounded px-1.5 py-0.5 text-left text-xs transition hover:bg-[var(--surface-2)]',
+                !priced && 'text-[var(--text-3)]',
+              )}
+              title={titleLines.join('\n')}
+              onClick={() => setPricingTarget(model)}
+            >
+              {priced && eff ? (
+                <>
+                  <span className='font-mono text-[11.5px] font-medium whitespace-nowrap'>
+                    {eff.input === 0 && eff.output === 0
+                      ? t('免费')
+                      : `${formatUnitPrice(eff.input, pricingDisplay.currency, pricingDisplay.exchangeRate)} / ${formatUnitPrice(eff.output, pricingDisplay.currency, pricingDisplay.exchangeRate)}`}
+                  </span>
+                  <span className='text-[10.5px] text-[var(--text-3)] whitespace-nowrap'>
+                    {pricingSourceLabel(info?.source ?? null)}
+                    {info?.inPeak ? ' · Peak 2×' : info?.activeWindowRate && info.activeWindowRate !== 1 ? ` · ×${info.activeWindowRate}` : info?.priceRate && info.priceRate !== 1 ? ` · ×${info.priceRate}` : ''}
+                  </span>
+                </>
+              ) : (
+                <span className='text-[11px] underline decoration-dashed underline-offset-2'>{t('未定价')}</span>
+              )}
+            </button>
+          </TableCell>
+        )
+      }
       case 'source':
         return <TableCell className={cellClass('cell-source', column.align)}>{sourceCell(model)}</TableCell>
       case 'visibility':

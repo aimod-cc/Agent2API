@@ -1,6 +1,6 @@
 [package]
 name = "agent2api-server"
-version = "3.5.0-beta.7"
+version = "3.5.0-beta.8"
 description = "Agent2API 网关本体 — AI 路由网关与 Agent 客户端接管（桌面端与 headless 服务器共用）"
 authors = ["Agent2API"]
 edition = "2021"
@@ -96,7 +96,7 @@ hyper-util = { version = "0.1.20", features = ["client-proxy", "client-proxy-sys
 # 的 Mozilla 根集，只是两家依赖锁在 0.26 / 1.x 两个版本上，属同一套数据，
 # 不是第二套 TLS 栈；刻意不用 native-roots，免得再拉平台证书库那一串依赖）。
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
-# 只读 Clash Verge 配置，不管理或运行代理内核。
+# 解析 DSH 等代理客户端的 YAML 配置。
 serde_yaml = "0.9"
 # DSH 的 Cordis 配置含序列、注释和 !!js 标签，编辑时保留未触及的语法树。
 yaml-edit = { version = "=0.3.6", default-features = false }

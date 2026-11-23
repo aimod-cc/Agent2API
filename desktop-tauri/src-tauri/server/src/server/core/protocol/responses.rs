@@ -25,9 +25,9 @@
 use serde_json::{json, Map, Value};
 
 use super::{
-    content_parts, content_text, event_frame, freeform, is_truthy, json_text, native_tool,
-    random_id, responses_phase, string_field, string_value, tool_plan, SseLineBuffer, TOOL_IMAGE_PLACEHOLDER,
-    FIELD_ENCRYPTED_CONTENT,
+    content_parts, content_text, event_frame, freeform, is_newline_only, is_truthy, json_text,
+    native_tool, random_id, responses_phase, string_field, string_value, tool_plan,
+    SseLineBuffer, TOOL_IMAGE_PLACEHOLDER, FIELD_ENCRYPTED_CONTENT,
 };
 use crate::server::logging;
 
@@ -1210,6 +1210,8 @@ pub struct ResponsesStream {
     text_index: i64,
     text_id: String,
     text: String,
+    /// 思考尚未转入正文前暂存的纯换行分片，防止未开启全局保活剥除时拆断思考项
+    pending_leading_newlines: String,
     /// 思考项（reasoning）：先于文本出现，遇到文本或工具时要先收尾
     reasoning_open: bool,
     reasoning_closed: bool,
@@ -1268,6 +1270,7 @@ impl ResponsesStream {
             text_index: -1,
             text_id: String::new(),
             text: String::new(),
+            pending_leading_newlines: String::new(),
             reasoning_open: false,
             reasoning_closed: false,
             reasoning_index: -1,
@@ -1354,9 +1357,13 @@ impl ResponsesStream {
             return out;
         }
         out.extend(self.close_reasoning());
-        // 上游什么都没给（空流）：补一条空 message，否则客户端解析不到 output
+        // 上游什么都没给（空流），或只暂存了纯换行正文：补一条 message 项，否则客户端解析不到 output
         if !self.text_open && self.tools.is_empty() {
             out.extend(self.open_text());
+        }
+        if self.text_open && !self.pending_leading_newlines.is_empty() {
+            let prefix = std::mem::take(&mut self.pending_leading_newlines);
+            out.extend(self.push_text_delta(&prefix));
         }
         let incomplete = responses_phase::incomplete_reason(self.finish_reason.as_deref());
         let phase = responses_phase::message_phase(
@@ -1452,6 +1459,18 @@ impl ResponsesStream {
             if from_field.is_empty() { string_field(delta, "reasoning") } else { from_field }
         };
         if !reasoning.is_empty() {
+            // 思考仍在继续时，此前在思考期暂存的纯换行分片只是保活噪声，直接清掉以免拆断思考。
+            if !self.text_open && self.reasoning_open && !self.reasoning_closed {
+                self.pending_leading_newlines.clear();
+            }
+            // 若前一段思考已关闭，先收尾打开的正文再开新的 reasoning 项，避免向已完结项续发 delta。
+            if self.reasoning_closed {
+                let phase = if self.reasoning_collapse { Some("commentary") } else { None };
+                out.extend(self.close_text(phase));
+                self.reasoning_open = false;
+                self.reasoning_closed = false;
+                self.reasoning.clear();
+            }
             out.extend(self.open_reasoning());
             self.reasoning.push_str(&reasoning);
             out.push(self.event(
@@ -1464,20 +1483,19 @@ impl ResponsesStream {
                 }),
             ));
         }
-        // 正文增量：思考必须先收尾（同一时刻只能有一个项在写）
+        // 正文增量：思考必须先收尾（同一时刻只能有一个项在写）；思考期暂存纯换行以防保活帧拆断思考
         if let Some(text) = delta.get("content").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-            out.extend(self.close_reasoning());
-            out.extend(self.open_text());
-            self.text.push_str(text);
-            out.push(self.event(
-                "response.output_text.delta",
-                json!({
-                    "output_index": self.text_index,
-                    "item_id": self.text_id,
-                    "content_index": 0,
-                    "delta": text,
-                }),
-            ));
+            if !self.text_open && self.reasoning_open && !self.reasoning_closed && is_newline_only(text) {
+                self.pending_leading_newlines.push_str(text);
+            } else {
+                let prefix = std::mem::take(&mut self.pending_leading_newlines);
+                out.extend(self.close_reasoning());
+                out.extend(self.open_text());
+                if !prefix.is_empty() {
+                    out.extend(self.push_text_delta(&prefix));
+                }
+                out.extend(self.push_text_delta(text));
+            }
         }
         // 工具调用增量
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -1491,7 +1509,8 @@ impl ResponsesStream {
     fn consume_tool(&mut self, call: &Value) -> Vec<bytes::Bytes> {
         let mut out = Vec::new();
         let key = call.get("index").and_then(Value::as_i64).unwrap_or(0);
-        // 工具调用与正文互斥：先把文本与思考收尾
+        // 工具调用与正文互斥：丢弃尚未转正文的纯换行保活暂存，再把文本与思考收尾
+        self.pending_leading_newlines.clear();
         out.extend(self.close_reasoning());
         // 有工具调用时，已经写出的正文属于过程说明，阶段补 commentary
         out.extend(self.close_text(Some("commentary")));
@@ -1728,6 +1747,7 @@ impl ResponsesStream {
             return Vec::new();
         }
         self.text_open = true;
+        self.text.clear();
         self.text_index = self.next_index;
         self.next_index += 1;
         self.text_id = random_id("msg");
@@ -1755,6 +1775,19 @@ impl ResponsesStream {
                 }),
             ),
         ]
+    }
+
+    fn push_text_delta(&mut self, delta: &str) -> Vec<bytes::Bytes> {
+        self.text.push_str(delta);
+        vec![self.event(
+            "response.output_text.delta",
+            json!({
+                "output_index": self.text_index,
+                "item_id": self.text_id,
+                "content_index": 0,
+                "delta": delta,
+            }),
+        )]
     }
 
     /// `phase` 为 `None` 时不补阶段标记（截断收尾走这条）。

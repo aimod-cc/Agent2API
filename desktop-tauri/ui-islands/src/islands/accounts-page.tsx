@@ -5,7 +5,8 @@ import { mountOnPage } from '../island-lazy'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { t } from '../i18n'
-import { Button, Checkbox, Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList, ComboboxTrigger, ComboboxValue, Input, ResponsiveSheet, SegmentedControl, cn, Card, Label, Empty, Table } from '@ui'
+import { Button, Checkbox, Input, ResponsiveSheet, SegmentedControl, cn, Card, Label, Empty, Table } from '@ui'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { TableFooter, useClientPaging } from './table-shell'
 import { useAccountsList } from './accounts-list-hook'
 import { accountDetailsRevision } from './accounts-list-api'
@@ -170,7 +171,7 @@ function AccountsPage() {
   const groupGripLocked = groupLocked || groups.length < 2
 
   // 代理列的选项（「网络代理」页的池条目）没就绪就补拉（节流 30 秒，失败不缓存）。
-  // Clash 出口那一组已经不在这一页了 —— 出口统一由代理页的「同步 Clash Verge」
+  // Clash 出口那一组已经不在这一页了 —— 出口统一由代理页的「同步 EasyClash」
   // 导入池，这里只读池（见 accounts-panels 的 ProxyCell）
   React.useEffect(() => { ensureProxyPoolOptions() })
 
@@ -393,27 +394,16 @@ function AccountsPage() {
               不用切页就能看到。取值与计数都以 store 为准（受控） */}
           <div className='group' data-provider-group='1'>
             <span className='label'>{t('提供商')}</span>
-            <Combobox items={providerOptions}
-              value={providerOptions.find(item => item.value === store.filter.provider) ?? providerOptions[0]}
-              onValueChange={item => { if (item) setProviderFilter(item.value) }}
-              isItemEqualToValue={(item, selected) => item.value === selected.value} autoHighlight>
-              <ComboboxTrigger className='max-w-none min-w-0 w-full min-[768px]:max-w-[200px] min-[768px]:min-w-[130px] min-[768px]:w-auto' aria-label={t('按提供商筛选账号')}>
-                <ComboboxValue>
-                  {providerOptions.find(item => item.value === store.filter.provider)?.label || t('全部')}
-                </ComboboxValue>
-              </ComboboxTrigger>
-              <ComboboxContent>
-                <div className='shrink-0 border-b border-hairline p-2'>
-                  <ComboboxInput placeholder={t('搜索提供商…')} aria-label={t('搜索提供商')} />
-                </div>
-                <ComboboxEmpty>{t('没有匹配的选项')}</ComboboxEmpty>
-                <ComboboxList>
-                  {(item: (typeof providerOptions)[number]) => (
-                    <ComboboxItem key={item.value} value={item}>{item.label}</ComboboxItem>
-                  )}
-                </ComboboxList>
-              </ComboboxContent>
-            </Combobox>
+            <SearchableSelect
+              value={store.filter.provider}
+              options={providerOptions}
+              onValueChange={setProviderFilter}
+              displayValue={providerOptions.find(item => item.value === store.filter.provider)?.label || t('全部')}
+              searchPlaceholder={t('搜索提供商…')}
+              emptyHint={t('没有匹配的选项')}
+              className='max-w-none min-w-0 w-full min-[768px]:max-w-[200px] min-[768px]:min-w-[130px] min-[768px]:w-auto'
+              aria-label={t('按提供商筛选账号')}
+            />
           </div>
           <div className='divider' data-provider-divider='1' />
 
@@ -580,7 +570,7 @@ function AccountsPage() {
                 selectionLabel={paging.paged ? t('选择本页账号') : t('选择已加载账号')}
                 disabled={!visibleIds.length} onToggleAll={next => setAllPicked(visibleIds, next)} />
               <AccountsListBody groups={groups} accounts={pageRows} collapsed={store.collapsed} columns={columns.length}
-                continuous={!paging.paged} total={accountList.data?.displayTotal ?? shown.length} scrollRef={listRef}
+                continuous={!paging.paged} loading={accountList.loading} total={accountList.data?.displayTotal ?? shown.length} scrollRef={listRef}
                 loadMore={accountList.loadMore} renderRow={renderRow}
                 groupLocked={groupGripLocked} groupLockTitle={groupUnavailableMessage} />
             </Table>

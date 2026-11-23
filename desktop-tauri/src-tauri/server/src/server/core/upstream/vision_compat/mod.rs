@@ -67,7 +67,7 @@ pub(super) async fn before_target(service: &UpstreamService, ctx: &ProviderConte
     slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<Option<ForwardOutcome>, GatewayError> {
     let Some(vision) = &ctx.vision else { return Ok(None); };
     if ctx.native.is_some_and(|native| native.protocol == crate::server::core::protocol::native::WireProtocol::Anthropic || native.requires_native())
-        && super::native_payload::eligible(ctx, &target.provider)?
+        && super::native_payload::eligible(ctx, &target.provider, target.account.as_ref())?
     { return Ok(None); }
     if vision.triggered.load(Ordering::Acquire) { return Ok(None); }
     let model = targets::actual_model(ctx, target);

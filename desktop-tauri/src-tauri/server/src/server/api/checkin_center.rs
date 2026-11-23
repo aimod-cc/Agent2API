@@ -90,12 +90,15 @@ fn account_display_name(account: &Value) -> String {
 /// 「访客没有积分体系」这条由插件申报（`CheckinInfo::exclude_guest`）：
 /// 哪一家有访客概念、访客能不能签，是 provider 知识。下面按 `isGuest` /
 /// `edition` / Accio 家族的三条特判只服务**没申报的旧插件**。
-fn out_of_scope_reason(account: &Value) -> &'static str {
-    let provider = account_text(account, "provider");
+fn out_of_scope_reason(
+    account: &Value,
+    provider: &str,
+    declared: Option<&agent2api_provider_protocol::CheckinInfo>,
+) -> &'static str {
     let guest = account.get("isGuest").and_then(Value::as_bool) == Some(true);
     // 申报过的家：只有「访客排除」一种情况会让它的账号落到范围外
     // （其余排除条件都是网关侧的内置特判，申报家不会走到）
-    if let Some(declared) = crate::server::core::plugin_host::checkin_of(&provider) {
+    if let Some(declared) = declared {
         if declared.exclude_guest && guest {
             return "访客账号没有积分体系";
         }
@@ -118,7 +121,7 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
     if account.get("edition").and_then(Value::as_str) == Some("intl") {
         return "国际版账号没有签到活动";
     }
-    if crate::server::core::account_store::is_accio_family(&provider) {
+    if crate::server::core::account_store::is_accio_family(provider) {
         return "未接入签到链路";
     }
     "没有签到链路"
@@ -127,18 +130,30 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
 /// 签到中心的聚合快照（不发任何上游请求 —— 资格类状态由前端按需惰性查询）
 pub async fn get_center(State(state): State<ServerState>, Query(params): Query<BTreeMap<String, String>>) -> Response {
     let summary_only = params.get("view").is_some_and(|view| view == "summary");
+    match crate::server::core::blocking::run(move || build_center(&state, summary_only)).await {
+        Ok(data) => ok_json(data),
+        Err(error) => crate::server::errors::management_error(error.status_code, error.message),
+    }
+}
+
+fn build_center(state: &ServerState, summary_only: bool) -> Value {
+    let booting = crate::server::core::plugin_host::startup::booting();
+    let chatglm_id = kind_id(ProviderKind::Chatglm);
+    let snapshot = state.store().routing_snapshot();
     // 界面视图：插件不在的家不出现（账号仍在库里，装上插件原样回来）
-    let accounts: Vec<Value> = state
-        .store()
-        .list_visible_accounts()
-        .get("accounts")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
+    let accounts: Vec<&Value> = snapshot
+        .public_accounts
+        .iter()
+        .map(std::sync::Arc::as_ref)
         .filter(|account| {
-            account.get("provider").and_then(Value::as_str) != Some(kind_id(ProviderKind::Chatglm))
-                || account.get("isGuest").and_then(Value::as_bool) != Some(true)
+            let provider = account
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|provider| !provider.is_empty())
+                .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
+            crate::server::core::account_store::store_view::account_list_visible(provider, booting)
+                && (provider != chatglm_id
+                    || account.get("isGuest").and_then(Value::as_bool) != Some(true))
         })
         .collect();
 
@@ -152,14 +167,33 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
     // 这家，或库里已有它的账号」—— 见 `providers::serves_or_has_accounts`。
     let checkin_providers = auto_checkin::available_checkin_providers(state.store());
     if summary_only {
-        let eligible: Vec<_> = accounts.iter().filter(|account| {
-            let provider = account.get("provider").and_then(Value::as_str).filter(|provider| !provider.is_empty())
+        let mut eligible = 0usize;
+        let mut done = 0usize;
+        for account in accounts {
+            let provider = account
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|provider| !provider.is_empty())
                 .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
-            checkin_providers.iter().any(|id| id == provider) && checkin::supports_checkin(account)
-        }).collect();
-        let done = eligible.iter().filter(|account| checked_in_today(account)).count();
-        return ok_json(json!({ "daily": { "todayDone": done, "todayEligible": eligible.len() } }));
+            if checkin_providers.iter().any(|id| id == provider) && checkin::supports_checkin(account) {
+                eligible += 1;
+                if checked_in_today(account) {
+                    done += 1;
+                }
+            }
+        }
+        return json!({ "daily": { "todayDone": done, "todayEligible": eligible } });
     }
+    let metadata = crate::server::core::plugin_host::checkin_provider_metadata();
+    let mut label_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut label_of = |provider: &str| -> String {
+        if let Some(label) = label_cache.get(provider) {
+            return label.clone();
+        }
+        let label = crate::server::core::providers::label_of(provider);
+        label_cache.insert(provider.to_string(), label.clone());
+        label
+    };
     let mut buckets: Vec<Vec<Value>> = vec![Vec::new(); checkin_providers.len()];
     let mut out_of_scope: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
     for account in &accounts {
@@ -190,8 +224,12 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
                 "streakDays": account.get("streakDays").cloned().unwrap_or(Value::from(0)),
             }));
         } else {
-            let label = crate::server::core::providers::label_of(&provider);
-            let reason = out_of_scope_reason(account);
+            let label = label_of(&provider);
+            let reason = out_of_scope_reason(
+                account,
+                &provider,
+                metadata.checkin_by_provider.get(&provider),
+            );
             let entry = out_of_scope
                 .entry(format!("{provider}|{reason}"))
                 .or_insert_with(|| (label, reason.to_string(), 0));
@@ -209,11 +247,11 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
                 .count();
             // 插件申报的链路信息（说明 / 执行档位 / 附加 UI 钩子）。
             // 没申报的旧插件不带这几个键，界面走自己的兜底（与申报前一致）。
-            let declared = crate::server::core::plugin_host::checkin_of(id);
-            let manual_plans = declared.as_ref().is_some_and(|declared| declared.daily && declared.plans);
+            let declared = metadata.checkin_by_provider.get(id);
+            let manual_plans = declared.is_some_and(|declared| declared.daily && declared.plans);
             let mut row = json!({
                 "id": id,
-                "label": auto_checkin::provider_label(id),
+                "label": label_of(id),
                 "accounts": rows,
                 "doneCount": done,
                 "totalCount": rows.len(),
@@ -223,7 +261,7 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
                 if let Some(object) = row.as_object_mut() {
                     object.insert(
                         "description".to_string(),
-                        declared.description.map(Value::String).unwrap_or(Value::Null),
+                        declared.description.clone().map(Value::String).unwrap_or(Value::Null),
                     );
                     object.insert(
                         "modes".to_string(),
@@ -262,7 +300,7 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
     let mut onboarding_rows: Vec<Value> = Vec::new();
     for account in &accounts {
         let provider = account_text(account, "provider");
-        let Some(declared) = crate::server::core::plugin_host::checkin_of(&provider) else {
+        let Some(declared) = metadata.checkin_by_provider.get(&provider) else {
             continue;
         };
         if !declared.onboarding {
@@ -279,7 +317,10 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
             // `settled` 是**一次性福利的结算记忆**（已结清才非空）：本地事实、
             // 零上游请求，界面据此直接渲染「已领取」并在进页面 / 签到后跳过
             // 自动查询，不必为一条早就领完的福利反复问上游。
-            "settled": super::onboarding::settled_view(state.store(), &id)
+            "settled": snapshot
+                .onboarding_settled
+                .get(&id)
+                .map(|value| value.as_ref().clone())
                 .unwrap_or(Value::Null),
         }));
     }
@@ -290,7 +331,9 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
     let plan_rows: Vec<Value> = accounts
         .iter()
         .filter(|account| {
-            crate::server::core::plugin_host::checkin_of(&account_text(account, "provider"))
+            metadata
+                .checkin_by_provider
+                .get(&account_text(account, "provider"))
                 .is_some_and(|declared| declared.plans)
         })
         .map(|account| {
@@ -315,7 +358,9 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
     let growth_rows: Vec<Value> = accounts
         .iter()
         .filter(|account| {
-            crate::server::core::plugin_host::checkin_of(&account_text(account, "provider"))
+            metadata
+                .checkin_by_provider
+                .get(&account_text(account, "provider"))
                 .is_some_and(|declared| declared.growth)
                 && crate::server::api::growth::supports_growth(account)
         })
@@ -329,7 +374,7 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
         .collect();
 
     let campaign_rows: Vec<Value> = accounts.iter().filter(|account| {
-        crate::server::core::plugin_host::has_campaign_rewards(&account_text(account, "provider"))
+        metadata.campaign_providers.contains(&account_text(account, "provider"))
     }).map(|account| json!({
         "id": account_text(account, "id"),
         "name": account_display_name(account),
@@ -337,7 +382,11 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
         "available": account.get("available").and_then(Value::as_bool).unwrap_or(true),
     })).collect();
 
-    ok_json(json!({
+    let task_records = crate::server::core::task_state::read_all();
+    let travel = crate::server::core::growth_scheduler::state_with_task_records(&task_records);
+    let plugin_tasks = crate::server::core::plugin_host::wasm::tasks::checkin_snapshot_with(&task_records);
+
+    json!({
         "daily": {
             "providers": provider_rows,
             "outOfScope": out_rows,
@@ -355,16 +404,17 @@ pub async fn get_center(State(state): State<ServerState>, Query(params): Query<B
         "keepalive": crate::server::core::billing::keepalive::state(),
         // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
         // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
-        "travel": crate::server::core::growth_scheduler::state(),
-        "pluginTasks": crate::server::core::plugin_host::wasm::tasks::checkin_snapshot(),
+        "travel": travel,
+        "pluginTasks": plugin_tasks,
         "history": checkin_history::list(),
+        "recordsTotal": crate::server::core::checkin_records::count_all(),
         // 插件申报的管理面板：界面据此决定「猫猫旅行」「保活模型链」这两块
         // 显不显示。它们的能力由 WorkBuddy 插件的不同地区版本提供（国内版
         // 有成长任务、国际版有每日保活），没装插件时两块都不该出现。
-        "adminPanels": crate::server::core::plugin_host::admin_panels(),
+        "adminPanels": metadata.admin_panels,
         // 各家申报的签到链路信息（说明 / 执行档位 / UI 钩子），按 provider id 索引。
         // `daily.providers[]` 里也带了一份（按组取用更方便）；这里再给一份完整的，
         // 供界面对「还没出现分组」的家也拿到说明（例如没账号时的占位行）。
-        "checkinFeatures": crate::server::core::plugin_host::checkin_features(),
-    }))
+        "checkinFeatures": metadata.checkin_features,
+    })
 }

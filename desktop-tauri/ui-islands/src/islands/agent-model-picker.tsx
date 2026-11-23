@@ -1,6 +1,7 @@
 import * as React from 'react'
-import { Badge, Button, Checkbox, Empty, Input, InputGroup, InputGroupAddon, InputGroupInput, Popover, PopoverContent, PopoverTrigger } from '@ui'
+import { Button, Checkbox, Empty, InputGroup, InputGroupAddon, InputGroupInput } from '@ui'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import type { CatalogModel } from './agent-catalog'
 
 export const AGENT_MODEL_LIMIT = 200
@@ -63,27 +64,8 @@ export function AgentModelPicker({ catalog, selected, onChange, disabled, locked
 export function SearchableModelSelect({ label, value, options, onChange, disabled }: {
   label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void; disabled?: boolean
 }) {
-  const [open, setOpen] = React.useState(false)
-  const [search, setSearch] = React.useState('')
   const text = options.find(option => option.value === value)?.label || value || t('请选择模型')
-  const query = search.trim().toLowerCase()
-  const matches = options.filter(option => `${option.value} ${option.label}`.toLowerCase().includes(query))
-  return <Popover open={open && !disabled} onOpenChange={open => { setOpen(open); if (open) setSearch('') }}>
-    <PopoverTrigger render={<Button variant='outline' disabled={disabled} />} className='w-full min-w-0 justify-between font-normal'
-      aria-label={label} title={text}>
-      <span className='min-w-0 truncate'>{text}</span><span aria-hidden='true'>⌄</span>
-    </PopoverTrigger>
-    <PopoverContent className='agent-model-select-popover' sideOffset={4}>
-      <Input type='search' autoFocus autoComplete='off' disabled={disabled} value={search} placeholder={t('搜索模型')}
-        aria-label={t('搜索模型')} onChange={event => setSearch(event.currentTarget.value)} />
-      <div className='agent-model-select-options'>
-        {matches.map(option => <Button key={option.value} variant='ghost' className='h-auto w-full justify-start whitespace-normal text-left font-normal'
-          aria-pressed={value === option.value} disabled={disabled} onClick={() => { onChange(option.value); setOpen(false) }}>
-          <span className='min-w-0 flex-1 break-all'>{option.label}</span>
-          {value === option.value && <Badge variant='brand' shape='tag'>{t('已选择')}</Badge>}
-        </Button>)}
-        {!matches.length && <Empty>{t('没有匹配的模型')}</Empty>}
-      </div>
-    </PopoverContent>
-  </Popover>
+  return <SearchableSelect value={value} options={options} onValueChange={onChange} disabled={disabled}
+    className='w-full' aria-label={label} displayValue={text}
+    searchPlaceholder={t('搜索模型')} emptyHint={t('没有匹配的模型')} />
 }

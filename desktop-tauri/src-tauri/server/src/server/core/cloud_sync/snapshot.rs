@@ -68,6 +68,8 @@ const EXCLUDED_CONFIG_KEYS: &[&str] = &[
     "githubToken",
     // 登录校验绑定本机域名及独立密钥，不随账号同步切换。
     crate::server::config::captcha::KEY_PANEL_CAPTCHA,
+    crate::server::core::notifications::KEY_NOTIFICATIONS,
+    crate::server::core::panel_oauth::KEY_PANEL_OAUTH,
     // 代理内核的下载出网线路：绑本机网络环境
     "kernelProxy",
     crate::server::config::KEY_INSTALLED_UPDATE_VERSION,
@@ -309,10 +311,19 @@ pub(crate) fn apply(
         let applied = apply_conn(conn, snapshot, key);
         db.invalidate_accounts();
         applied
-    }))
-        .ok_or_else(|| "数据库连接不可用，无法应用同步快照".to_string())?;
+    }));
     db.invalidate_accounts();
-    applied
+    match applied {
+        Some(Ok(result)) => Ok(result),
+        Some(Err(error)) => {
+            crate::server::config::try_reload_from_db();
+            Err(error)
+        }
+        None => {
+            crate::server::config::try_reload_from_db();
+            Err("数据库连接不可用，无法应用同步快照".to_string())
+        }
+    }
 }
 
 fn apply_conn(

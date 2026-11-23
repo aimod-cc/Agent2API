@@ -32,14 +32,13 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
   const keyword = search.trim().toLocaleLowerCase()
   const providers = pack.providers.filter(provider => !keyword
     || `${t(provider.label)} ${provider.id}`.toLocaleLowerCase().includes(keyword))
-  const close = () => { if (!locked) onClose() }
-  const diagnostics = () => { if (!locked) { onClose(); requestPluginDiagnostics(pack.id) } }
+  const diagnostics = () => { onClose(); requestPluginDiagnostics(pack.id) }
 
   return <PluginDetailsDialog name={pluginName(pack.id, store?.name || pack.name)} version={pack.version} sourceLabel={t('社区插件')}
     description={pluginDescription(pack.id, store?.description || pack.description)} icon={pack.icon || store?.icon}
     artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'} initialPane={initialPane ?? 'settings'}
-    closeDisabled={locked} onClose={close} t={t}
-    more={<PluginDiagnosticsMenu disabled={locked} onDiagnostics={diagnostics} t={t} />}
+    onClose={onClose} t={t}
+    more={<PluginDiagnosticsMenu onDiagnostics={diagnostics} t={t} />}
     settingsActions={<Button variant='destructive' size='sm' disabled={locked} onClick={onRemove}>{t('卸载插件')}</Button>}
     settings={<>
       <DialogSection>
@@ -49,7 +48,7 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
         {pack.unavailableReason ? <Alert>{t(pack.unavailableReason)}</Alert> : null}
         <PluginStartupSummary id={pack.id} status={startup} enabled={pack.enabled}
           running={pack.host?.running && pack.entryPresent && !pack.updateRequired} error={pack.host?.lastError}
-          disabled={locked} diagnosticsDisabled={locked} onDiagnostics={diagnostics} retry={onReload} t={t} />
+          disabled={locked} onDiagnostics={diagnostics} retry={onReload} t={t} />
         <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-muted-foreground'>
           <span className={pack.signed ? undefined : 'text-warning'}>{pack.signed ? t('已签名') : t('未签名')}</span>
           <span aria-hidden='true'>·</span><span>{t('协议版本')} {pack.protocol}</span>

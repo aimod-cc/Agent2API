@@ -185,16 +185,9 @@ else
   echo "    Release 将不含 Windows 服务端包，Windows Server 用户只能自己编译"
 fi
 
-# ── 手机端安装包：默认**不挂** Release ────────────────────────
-# `INCLUDE_MOBILE=1` 才把 APK / IPA 挂上去。
-#
-# 为什么默认关：手机端还在收尾（2026-10 用户明确要求先不发布）。构建照常
-# 产出 artifact，需要时在 Actions 页面下载；只是不挂到公开 Release 上 ——
-# 挂上去就等于对外承诺「这个包能用」，而现在还不能。
-#
-# 恢复发布时：`INCLUDE_MOBILE=1 bash scripts/release.sh vX.Y.Z`，或把默认值
-# 改成 1。安装文档里关于 APK / IPA 的段落也要跟着恢复。
-INCLUDE_MOBILE="${INCLUDE_MOBILE:-0}"
+# ── 手机端安装包：自 3.5.0-beta.8 起默认一并挂到 Release ────────────
+# 设 `INCLUDE_MOBILE=0` 可跳过 APK / IPA（例如紧急补早期无移动端包的版本）。
+INCLUDE_MOBILE="${INCLUDE_MOBILE:-1}"
 
 if [ "$INCLUDE_MOBILE" = "1" ]; then
   # Android APK（build 工作流的 android job 上传，含 .sha256）。
@@ -301,10 +294,13 @@ echo "      agent2api-server-linux-{amd64,arm64}.tar.gz 与各自的 .sha256 都
 echo "  [6] 服务端包（无 GUI）：Release 里还有 windows-server-amd64.zip（含 .sha256）。"
 echo "      两个平台的包解包后都应看到安装脚本 —— Linux: install.sh / agent2api.service"
 echo "      / agent2api.env.example；Windows: install-service.ps1"
-echo "  [7] 手机端：Release 里有 Agent2API-${TAG#v}.apk 与 .sha256；装到 Android 上"
-echo "      能启动、能添加网关并登录（版本号看系统「应用信息」页，手机端界面不显示）"
-echo "  [8] iOS：Release 里有 Agent2API-${TAG#v}.ipa 与 .sha256；未签名包需用"
-echo "      AltStore / SideStore 重签后安装，已签名包可直接走 TestFlight / 描述文件"
+echo "  [7] 手机端 Android：Release 与官网下载页（agent2api.dev/downloads）中均有"
+echo "      Agent2API-${TAG#v}.apk（含 .sha256）；装上后能连接网关，设置页与「应用信息」"
+echo "      版本号一致，且支持应用内从官网下载与校验更新"
+echo "  [8] 手机端 iOS：Release 与官网下载页中均有 Agent2API-${TAG#v}.ipa（含 .sha256），"
+echo "      设置页可检查更新并跳转下载 IPA / 打开官网下载页（未签名包需自行重签）"
+echo "  [9] 官网与 CDN 更新源：确认 cdn.agent2api.dev/agent2api/feeds/updates/releases.json"
+echo "      与 agent2api.dev 接口已同步出 $TAG 且下载链接可访问"
 if [ "$PRERELEASE" = true ]; then
-  echo "  [9] Docker 镜像：只出 $TAG 那个版本 tag（beta tag 不移动 :latest）"
+  echo "  [10] Docker 镜像：产出 $TAG 与滚动 :beta 标签，latest 不跟随移动"
 fi

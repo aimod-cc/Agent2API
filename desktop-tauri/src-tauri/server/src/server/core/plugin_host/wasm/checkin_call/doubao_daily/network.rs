@@ -9,7 +9,49 @@ use serde_json::{json, Value};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
-use super::{gate, json_text, DailyError, Owner, ReadIdentity, MAX_RESPONSE, V3_GROUP};
+use super::{gate, json_text, parse, DailyError, Owner, ReadIdentity, SubmitRejection, MAX_RESPONSE, V3_GROUP};
+
+pub(super) enum SubmitOutcome {
+    Accepted(Value),
+    Rejected(SubmitRejection),
+}
+
+fn rejection_code(value: &Value, http_status: u16) -> Option<i64> {
+    let from_obj = |obj: &Value| {
+        ["code", "error_code", "status_code"].iter().find_map(|key| {
+            obj.get(*key).and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+            })
+            .filter(|code| !matches!(code, 0 | 200))
+        })
+    };
+    from_obj(value)
+        .or_else(|| value.get("biz_error").and_then(from_obj))
+        .or_else(|| value.get("error_detail").and_then(from_obj))
+        .or_else(|| (!matches!(http_status, 200..300)).then_some(i64::from(http_status)))
+}
+
+fn rejection_message(value: &Value, owner: &Owner) -> String {
+    let clean = |text: &str| {
+        let trimmed = text.trim();
+        (!trimmed.is_empty()
+            && trimmed.chars().count() <= 160
+            && !trimmed.chars().any(char::is_control)
+            && !trimmed.contains("://")
+            && !owner.credentials.protected(trimmed))
+        .then(|| trimmed.to_string())
+    };
+    let from_obj = |obj: &Value| {
+        ["msg", "message", "error_msg", "error_message"]
+            .iter()
+            .find_map(|key| obj.get(*key).and_then(Value::as_str).and_then(clean))
+    };
+    from_obj(value)
+        .or_else(|| value.get("biz_error").and_then(from_obj))
+        .or_else(|| value.get("error_detail").and_then(from_obj))
+        .unwrap_or_else(|| "官方活动接口拒绝了本次签到".to_string())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Route { Launch, V3, List }
@@ -43,7 +85,7 @@ impl ReadReceipt {
     }
 }
 
-pub(super) async fn submit_checkin(owner: &Owner, scene: &str) -> Result<Value, DailyError> {
+pub(super) async fn submit_checkin(owner: &Owner, scene: &str) -> Result<SubmitOutcome, DailyError> {
     owner.clock()?;
     let url = owner.credentials.url("/alice/ug/campaign/landing/checkin");
     let request = owner.egress.client().client().map_err(|_| DailyError::SourceUnavailable)?
@@ -51,23 +93,48 @@ pub(super) async fn submit_checkin(owner: &Owner, scene: &str) -> Result<Value, 
         .build().map_err(|_| DailyError::CredentialsInvalid)?;
     gate::checkpoint(owner, Some((5, 6))).await?;
     let deadline = owner.deadline.min(Instant::now() + Duration::from_secs(25));
-    let value = tokio::time::timeout_at(deadline, async {
+    let (status, value) = tokio::time::timeout_at(deadline, async {
         let mut response = owner.egress.client().client().map_err(|_| DailyError::QueryUnknown)?
             .execute(request).await.map_err(|_| DailyError::QueryUnknown)?;
-        if !response.status().is_success() || response.headers().contains_key(LOCATION)
-            || response.url().as_str() != url || response.content_length().is_some_and(|size| size > MAX_RESPONSE as u64) {
+        if response.status().is_redirection() || response.headers().contains_key(LOCATION)
+            || response.url().as_str() != url {
             return Err(DailyError::ResponseRejected);
         }
+        if response.content_length().is_some_and(|size| size > MAX_RESPONSE as u64) {
+            return Err(DailyError::ResponseInvalid);
+        }
+        let status = response.status();
         let mut bytes = Zeroizing::new(Vec::new());
         while let Some(chunk) = response.chunk().await.map_err(|_| DailyError::QueryUnknown)? {
             if bytes.len().checked_add(chunk.len()).is_none_or(|size| size > MAX_RESPONSE) { return Err(DailyError::ResponseInvalid); }
             bytes.extend_from_slice(&chunk);
         }
-        json_text::parse(&bytes, MAX_RESPONSE)
+        let value = match json_text::parse(&bytes, MAX_RESPONSE) {
+            Ok(value) => value,
+            Err(_) if !status.is_success() => Value::Null,
+            Err(error) => return Err(error),
+        };
+        Ok((status.as_u16(), value))
     }).await.map_err(|_| DailyError::Deadline)??;
     owner.clock()?;
     gate::checkpoint(owner, Some((6, 7))).await?;
-    Ok(value)
+    if (200..300).contains(&status) {
+        return match parse::successful(&value, true, true) {
+            Ok(()) => Ok(SubmitOutcome::Accepted(value)),
+            Err(DailyError::ResponseRejected) => Ok(SubmitOutcome::Rejected(SubmitRejection {
+                code: rejection_code(&value, status),
+                message: rejection_message(&value, owner),
+            })),
+            Err(error) => Err(error),
+        };
+    }
+    if (400..500).contains(&status) && status != 408 {
+        return Ok(SubmitOutcome::Rejected(SubmitRejection {
+            code: rejection_code(&value, status),
+            message: rejection_message(&value, owner),
+        }));
+    }
+    Err(DailyError::QueryUnknown)
 }
 
 pub(super) async fn read(

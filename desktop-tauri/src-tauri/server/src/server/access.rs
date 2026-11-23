@@ -597,6 +597,7 @@ fn persist_refresh_tokens(table: &mut Vec<RefreshRecord>) {
 /// 一次登录的产出：**一条** Set-Cookie 值交给 handler 下发（一枚装两段，
 /// 见 `ACCESS_COOKIE` 的说明）；裸令牌同时进响应体，供 cookie 走不通的环境
 /// 存 localStorage 后走请求头（见 `session_valid` 的头回退说明）。
+#[derive(Clone)]
 pub struct IssuedSession {
     pub session_cookie: String,
     pub access_token: String,

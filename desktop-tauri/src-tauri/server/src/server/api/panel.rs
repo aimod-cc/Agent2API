@@ -262,6 +262,8 @@ pub async fn panel_status(State(state): State<ServerState>) -> Response {
     let mut payload = config::captcha::CaptchaSettings::from_config(&config)
         .public_json(config.captcha_enabled(state.local_panel));
     payload["registered"] = serde_json::json!(access::admin_registered());
+    payload["oauth"] = crate::server::core::panel_oauth::PanelOauthSettings::from_raw(config.raw())
+        .public_status_json();
     let mut response = ok_json(payload);
     response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
     response
@@ -330,15 +332,22 @@ pub async fn panel_login(
     if !access::admin_registered() {
         return management_error(400, "尚未注册管理员账号：请先在登录页完成首次注册");
     }
+    let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
+    let username = body_str(&payload, "username");
+    let ip_text = addr.ip().to_string();
     if access::login_locked(addr.ip()) {
         logging::log("[Security]", &format!("❌ 面板登录已锁定（{}）", addr.ip()));
+        crate::server::core::notifications::notify_login_failure(
+            "账号密码",
+            &username,
+            &ip_text,
+            "登录失败次数过多，处于 5 分钟临时锁定中",
+        );
         return management_error(429, "登录失败次数过多，请 5 分钟后再试");
     }
-    let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
     if let Err(response) = check_captcha(&payload, state.local_panel).await {
         return response;
     }
-    let username = body_str(&payload, "username");
     let password = payload
         .get("password")
         .and_then(serde_json::Value::as_str)
@@ -347,9 +356,21 @@ pub async fn panel_login(
     if !access::verify_login(&username, password) {
         access::record_login_failure(addr.ip());
         logging::log("[Security]", &format!("❌ 面板登录失败（{}）", addr.ip()));
+        let reason = if access::login_locked(addr.ip()) {
+            "账号或密码不正确（连续失败已触发 5 分钟临时锁定）"
+        } else {
+            "账号或密码不正确"
+        };
+        crate::server::core::notifications::notify_login_failure(
+            "账号密码",
+            &username,
+            &ip_text,
+            reason,
+        );
         return management_error(401, "账号或密码不正确");
     }
     access::clear_login_failures(addr.ip());
+    crate::server::core::notifications::notify_login_success("账号密码", &username, &ip_text);
     // 判定依据跟着日志走：中转环境下「令牌到底走没走响应体」是排查
     // 「登录成功却被弹回登录页」的第一个分叉点 —— 标记头有没有穿过来、
     // 两枚探针各回来了几条，一眼定位是中转剥头还是拼 cookie。

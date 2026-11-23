@@ -21,6 +21,10 @@ export function ErrorProtection({ settings, t, onChange }: { settings: ErrorSett
         <ErrorNumber label={t('保护时长')} unit={t('秒')} value={settings.breakerSeconds} min={10} max={600} disabled={!settings.breaker} onChange={breakerSeconds => patch({ breakerSeconds })} />
         <ErrorNumber label={t('恢复所需成功次数')} unit={t('次')} value={settings.breakerSuccesses} min={1} max={10} disabled={!settings.breaker} onChange={breakerSuccesses => patch({ breakerSuccesses })} /></div>
     </CardContent></Card>
+    <Card><CardHeader><CardTitle>{t('限流恢复保护')}</CardTitle></CardHeader><CardContent className='re-time-protection'>
+      <ErrorNumber label={t('最短限流冷却')} unit={t('秒')} value={settings.cooldownFloorSeconds} min={1} max={60} onChange={cooldownFloorSeconds => patch({ cooldownFloorSeconds })} />
+      <p>{t('限流或额度耗尽时至少冷却这么多秒，避免过快重试再次撞限；服务商明确给出的更长恢复时间不会被截短，后续收到真实恢复时间时会自动替换估算值。')}</p>
+    </CardContent></Card>
   </>
 }
 

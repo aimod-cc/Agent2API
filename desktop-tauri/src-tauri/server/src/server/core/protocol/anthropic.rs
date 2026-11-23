@@ -24,8 +24,8 @@
 use serde_json::{json, Map, Value};
 
 use super::{
-    content_parts, content_text, event_frame, is_truthy, json_text, native_tool, random_id,
-    string_field, string_value, tool_plan, SseLineBuffer, TOOL_IMAGE_PLACEHOLDER,
+    content_parts, content_text, event_frame, is_newline_only, is_truthy, json_text, native_tool,
+    random_id, string_field, string_value, tool_plan, SseLineBuffer, TOOL_IMAGE_PLACEHOLDER,
     FIELD_CACHE_CONTROL, FIELD_IS_ERROR,
 };
 use super::responses::ConvertError;
@@ -724,6 +724,8 @@ pub struct AnthropicStream {
     block_arguments: String,
     saw_arguments: bool,
     has_tool: bool,
+    /// 思考块开启期间暂存的纯换行分片，避免保活换行把思考拆成多个 thinking 块
+    pending_leading_newlines: String,
     stop_reason: Option<String>,
     usage: Option<Value>,
     /// 下游请求体的输入 token 估算（`estimate_tokens_for_body`）。
@@ -754,6 +756,7 @@ impl AnthropicStream {
             block_arguments: String::new(),
             saw_arguments: false,
             has_tool: false,
+            pending_leading_newlines: String::new(),
             stop_reason: None,
             usage: None,
             input_estimate,
@@ -793,6 +796,12 @@ impl AnthropicStream {
         self.finished = true;
         out.extend(self.emit_start());
         out.extend(self.close_block());
+        if !self.has_tool && !self.pending_leading_newlines.is_empty() {
+            let prefix = std::mem::take(&mut self.pending_leading_newlines);
+            out.extend(self.ensure_block("text"));
+            out.extend(self.push_text_delta(&prefix));
+            out.extend(self.close_block());
+        }
         let stop_reason = self
             .stop_reason
             .clone()
@@ -860,6 +869,9 @@ impl AnthropicStream {
             if from_field.is_empty() { string_field(delta, "reasoning") } else { from_field }
         };
         if !reasoning.is_empty() {
+            if self.block_open && self.block_type == "thinking" {
+                self.pending_leading_newlines.clear();
+            }
             out.extend(self.ensure_block("thinking"));
             self.block_text.push_str(&reasoning);
             out.push(self.event(
@@ -870,17 +882,18 @@ impl AnthropicStream {
                 }),
             ));
         }
-        // 正文增量 → text 块
+        // 正文增量 → text 块（思考期间先到的纯换行暂存，待真正转入正文再吐出）
         if let Some(text) = delta.get("content").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-            out.extend(self.ensure_block("text"));
-            self.block_text.push_str(text);
-            out.push(self.event(
-                "content_block_delta",
-                json!({
-                    "index": self.block_index,
-                    "delta": { "type": "text_delta", "text": text },
-                }),
-            ));
+            if self.block_open && self.block_type == "thinking" && is_newline_only(text) {
+                self.pending_leading_newlines.push_str(text);
+            } else {
+                let prefix = std::mem::take(&mut self.pending_leading_newlines);
+                out.extend(self.ensure_block("text"));
+                if !prefix.is_empty() {
+                    out.extend(self.push_text_delta(&prefix));
+                }
+                out.extend(self.push_text_delta(text));
+            }
         }
         // 工具调用 → tool_use 块
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -893,6 +906,7 @@ impl AnthropicStream {
 
     fn consume_tool(&mut self, call: &Value) -> Vec<bytes::Bytes> {
         let mut out = Vec::new();
+        self.pending_leading_newlines.clear();
         let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
         let id = call.get("id").and_then(Value::as_str).unwrap_or("");
         // 新的工具调用（带 id/name 且与当前块不同）：关掉旧块、开新块
@@ -960,6 +974,17 @@ impl AnthropicStream {
             ));
         }
         out
+    }
+
+    fn push_text_delta(&mut self, text: &str) -> Vec<bytes::Bytes> {
+        self.block_text.push_str(text);
+        vec![self.event(
+            "content_block_delta",
+            json!({
+                "index": self.block_index,
+                "delta": { "type": "text_delta", "text": text },
+            }),
+        )]
     }
 
     /// 确保当前打开的是指定类型的块（类型不同则先关旧的）

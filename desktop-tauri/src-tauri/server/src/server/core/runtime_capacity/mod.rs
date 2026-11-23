@@ -81,13 +81,9 @@ fn effective(settings: &CapacitySettings, resources: monitor::Resources) -> Limi
         else { settings.memory_mib.saturating_mul(MIB).min((resources.total_bytes * 3 / 4) as usize).max(16 * MIB) };
     let process_ceiling = resources.total_bytes.saturating_mul(4) / 5;
     let memory_ceiling = resources.container_bytes.unwrap_or(resources.process_bytes) >= process_ceiling;
-    // macOS 优先以内核压力等级为准（1 正常 / 2 警告 / 4 危险）：
-    // 2 级在正常桌面使用中就会触发，只有 4（critical）才代表真正紧张；
-    // 其它平台或取不到内核等级时沿用可用内存比例判据。进程/容器超总内存 4/5 的硬上限不变。
-    let host_memory_pressure = match resources.os_pressure_level {
-        Some(level) => level >= 4,
-        None => resources.available_bytes < resources.total_bytes / 10,
-    };
+    // 仅在 macOS 内核压力达到 4 级（critical）或本进程/容器占用 ≥ 总内存 4/5 时判为内存紧张；
+    // 不再看「系统可用内存 < 总内存 10%」，避免其它程序吃内存或文件缓存误伤网关。
+    let host_memory_pressure = resources.os_pressure_level.is_some_and(|level| level >= 4);
     let memory_pressure = host_memory_pressure || memory_ceiling;
     let cpu_pressure = resources.cpu_percent >= 90.0;
     let automatic = settings.mode == CapacityMode::Auto;
@@ -183,7 +179,7 @@ impl RejectReason {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::MemoryPressure => "系统或容器内存紧张",
+            Self::MemoryPressure => "系统内存压力过大",
             Self::MemoryCeiling => "进程或容器内存已达上限",
             Self::CpuPressure => "系统CPU负载过高",
             Self::ConcurrencyLimit => "并发数已达上限",
@@ -197,7 +193,7 @@ impl RejectReason {
 
     pub fn client_message(self, class: Class) -> &'static str {
         match self {
-            Self::MemoryPressure => "系统或容器可用内存紧张，暂缓接收后台或图片任务，请稍后重试",
+            Self::MemoryPressure => "系统内存压力过大，暂缓接收后台或图片任务，请稍后重试",
             Self::MemoryCeiling => "网关进程或容器内存占用已接近上限，排队等待已结束，请稍后重试",
             Self::CpuPressure => "系统 CPU 负载过高，暂缓接收后台或图片任务，请稍后重试",
             Self::ConcurrencyLimit => {

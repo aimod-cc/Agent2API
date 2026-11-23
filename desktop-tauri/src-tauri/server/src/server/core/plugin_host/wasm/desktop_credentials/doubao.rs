@@ -202,19 +202,19 @@ mod windows {
                 value[key] = field.clone();
             }
         }
-        if let Some(device) = state["aha"]["device"]["device_id"]
-            .as_str()
-            .filter(|device| {
-                !device.is_empty()
-                    && device.len() <= 64
-                    && device
+        for (source_key, target_key) in [("device_id", "deviceId"), ("install_id", "iid")] {
+            let entry = &state["aha"]["device"][source_key];
+            if let Some(text) = entry.as_str().filter(|text| {
+                !text.is_empty()
+                    && text.len() <= 64
+                    && text
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
-            })
-        {
-            value["deviceId"] = json!(device);
-        } else if let Some(device) = state["aha"]["device"]["device_id"].as_u64() {
-            value["deviceId"] = json!(device.to_string());
+            }) {
+                value[target_key] = json!(text);
+            } else if let Some(number) = entry.as_u64() {
+                value[target_key] = json!(number.to_string());
+            }
         }
         if value.to_string().len() > 256 * 1024 {
             return Err(invalid());

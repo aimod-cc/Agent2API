@@ -219,7 +219,7 @@ pub async fn create_key(State(state): State<ServerState>, body: Bytes) -> Respon
     };
     match api_keys::add(name, key, allowed_providers, allowed_models) {
         Ok(entry) => {
-            logging::log("[Config]", &format!("✅ 新增 API Key「{}」，客户端需带 Authorization: Bearer <key>", entry.name));
+            logging::log_with_level("[Config]", &format!("✅ 新增 API Key「{}」，客户端需带 Authorization: Bearer <key>", entry.name), "info");
             let mut payload = list_json(&state);
             if let Some(map) = payload.as_object_mut() {
                 map.insert("created".to_string(), entry.public_json());
@@ -256,9 +256,10 @@ pub async fn update_key(State(state): State<ServerState>, Path(id): Path<String>
     }
     match api_keys::update(&id, name, enabled, allowed_providers, allowed_models) {
         Ok(entry) => {
-            logging::log(
+            logging::log_with_level(
                 "[Config]",
                 &format!("API Key「{}」已更新（{}）", entry.name, if entry.enabled { "启用" } else { "停用" }),
+                "info",
             );
             ok_json(list_json(&state))
         }

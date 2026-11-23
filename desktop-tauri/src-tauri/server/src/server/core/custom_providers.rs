@@ -508,6 +508,16 @@ fn model_entries_of(value: Option<&Value>) -> Vec<Value> {
                 MAX_REASONING_CHARS,
             ),
         });
+        if let Some(protocol) = object
+            .get("protocol")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| valid_protocol(text))
+        {
+            if let Some(map) = entry.as_object_mut() {
+                map.insert("protocol".to_string(), Value::String(protocol.to_string()));
+            }
+        }
         // 能力位覆盖（可选的稀疏表，键名与归一规则见 `core::capability`：
         // 内置家的同一层覆盖在 `modelRules.capabilities`，两处共用该模块的判定）。
         // **空表不落键**：老记录（没有这个键的）读回再写时一个字节都不多，
@@ -653,6 +663,75 @@ pub fn protocol_of(id: &str) -> Option<String> {
             .and_then(Value::as_str)
             .map(str::to_string)
     })
+}
+
+/// 针对已知多协议混合提供商（如 OpenCode Go），按模型 ID 推导默认推荐协议。
+pub fn infer_preset_model_protocol(provider: &Value, model_id: &str) -> Option<&'static str> {
+    let is_opencode_go = provider
+        .get("presetKey")
+        .and_then(Value::as_str)
+        .is_some_and(|key| key.eq_ignore_ascii_case("opencode-go"))
+        || provider
+            .get("baseUrl")
+            .and_then(Value::as_str)
+            .is_some_and(is_opencode_go_endpoint);
+    if !is_opencode_go {
+        return None;
+    }
+    let trimmed = model_id.trim();
+    let bare = trimmed.rsplit('/').next().unwrap_or(trimmed).to_ascii_lowercase();
+    if bare.starts_with("claude") {
+        Some(PROTOCOL_ANTHROPIC)
+    } else if bare.starts_with("gpt-")
+        || bare.starts_with("o1")
+        || bare.starts_with("o3")
+        || bare.starts_with("o4")
+        || bare.starts_with("codex")
+    {
+        Some(PROTOCOL_RESPONSES)
+    } else {
+        None
+    }
+}
+
+/// 解析某个自定义提供商在指定请求模型下的**实际生效协议**：
+/// 优先级：单模型显式配置的 `protocol` > 预置多协议模板（如 OpenCode Go）按模型推导 > 提供商默认 `protocol`。
+pub fn effective_protocol_of_provider(provider: &Value, requested_model: Option<&str>) -> String {
+    let default_protocol = provider
+        .get("protocol")
+        .and_then(Value::as_str)
+        .filter(|text| valid_protocol(text))
+        .unwrap_or(PROTOCOL_CHAT_COMPLETIONS);
+    let Some(requested) = requested_model.map(str::trim).filter(|text| !text.is_empty()) else {
+        return default_protocol.to_string();
+    };
+    let target = bindings::resolve(provider, requested)
+        .map(|(wire, _)| wire)
+        .unwrap_or_else(|| requested.to_string());
+    if let Some(models) = provider.get("models").and_then(Value::as_array) {
+        if let Some(entry) = models
+            .iter()
+            .find(|item| model_id(item).eq_ignore_ascii_case(&target))
+        {
+            if let Some(explicit) = entry
+                .get("protocol")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| valid_protocol(text))
+            {
+                return explicit.to_string();
+            }
+        }
+    }
+    if let Some(inferred) = infer_preset_model_protocol(provider, &target) {
+        return inferred.to_string();
+    }
+    default_protocol.to_string()
+}
+
+/// 按提供商 ID 与请求模型解析实际生效协议；提供商不存在返回 None。
+pub fn effective_protocol_for(id: &str, requested_model: Option<&str>) -> Option<String> {
+    get(id).map(|provider| effective_protocol_of_provider(&provider, requested_model))
 }
 
 /// 新建一个自定义提供商：`{name, protocol, baseUrl}` → 落盘后的完整条目。
@@ -978,10 +1057,11 @@ pub async fn fetch_upstream_models(
     if base_url.is_empty() {
         return Err("该提供商没有配置 baseUrl，无法拉取模型清单".to_string());
     }
-    let url = if protocol == PROTOCOL_ANTHROPIC {
-        format!("{base_url}/v1/models")
+    let base = base_url.trim_end_matches('/');
+    let url = if protocol == PROTOCOL_ANTHROPIC && !base.ends_with("/v1") {
+        format!("{base}/v1/models")
     } else {
-        format!("{base_url}/models")
+        format!("{base}/models")
     };
     let credential = store
         .first_custom_credential(provider_id)
@@ -1065,6 +1145,11 @@ fn validate_model_entries(raw: &[Value]) -> Result<Vec<Value>, String> {
             ));
         }
         let reasoning = validate_reasoning(object.get("reasoning"))?;
+        let model_protocol = match object.get("protocol") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) if text.trim().is_empty() => None,
+            Some(value) => Some(normalize_protocol(Some(value))?),
+        };
         // 能力位覆盖（可选；校验见 validate_capabilities）—— 它是整表替换里
         // **必须原样带回**的字段：前端草稿漏了它，用户填过的能力就会被一次
         // 「切开关」的提交顺手清掉。
@@ -1088,6 +1173,11 @@ fn validate_model_entries(raw: &[Value]) -> Result<Vec<Value>, String> {
             "enabled": enabled,
             "reasoning": reasoning,
         });
+        if let Some(protocol) = model_protocol {
+            if let Some(map) = entry.as_object_mut() {
+                map.insert("protocol".to_string(), Value::String(protocol));
+            }
+        }
         if let Some(capabilities) = capabilities {
             if let Some(map) = entry.as_object_mut() {
                 map.insert("capabilities".to_string(), Value::Object(capabilities));

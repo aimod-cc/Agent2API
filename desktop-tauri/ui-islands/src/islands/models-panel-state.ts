@@ -247,6 +247,7 @@ const COLUMNS: ColumnDecl[] = [
   { key: 'check', label: t('选择'), align: 'center' },
   { key: 'model', label: t('上游模型') },
   { key: 'rate', label: t('倍率') },
+  { key: 'pricing', label: t('计价') },
   // 「可见性」紧挨「来源」：两者回答的是同一类问题（这条记录哪来的 / 上游
   // 认不认它），并排放读起来才连贯。没判据的家显示 `—`（见 models-page 的
   // `visibilityCell`）—— 那是「这家没这个信息」，不是「确认可见」。
@@ -812,13 +813,18 @@ export async function writeRemoveMapping(provider: string, alias: string, target
   return enqueueWrite(() => api.removeModelMapping(alias, target, provider))
 }
 
-export async function writeAddModel(provider: string, id: string): Promise<unknown> {
+export async function writeAddModel(provider: string, id: string, protocol?: string): Promise<unknown> {
   const error = addModelError(provider, id)
   if (error) throw new Error(error)
-  if (customSource.isCustom(provider)) return customSource.addModel(provider, id)
+  if (customSource.isCustom(provider)) return customSource.addModel(provider, id, protocol)
   const api = shared().workbuddyDesktop
   if (!api) throw new Error(t('后端桥不可用'))
   return enqueueWrite(() => api.addCustomModel(provider, id))
+}
+
+export async function writeModelProtocol(provider: string, id: string, protocol: string | null): Promise<unknown> {
+  if (!customSource.isCustom(provider)) throw new Error(t('仅自定义提供商支持按模型设置请求协议'))
+  return customSource.setModelProtocol(provider, id, protocol)
 }
 
 export async function writeRemoveModel(provider: string, id: string): Promise<unknown> {

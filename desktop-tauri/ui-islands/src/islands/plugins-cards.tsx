@@ -3,7 +3,7 @@ import { errorMessage, formatSize, formatTime, pluginDescription, pluginName } f
 import { summarizeNetworkError } from '../../../ui-shared/updates'
 import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
-import { PluginGetButton, PluginSettingsButton, PluginStoreCard, type PluginCardSelection } from '../../../ui-shared/plugins-store'
+import { PluginInstallButton, PluginSettingsButton, PluginStoreCard, type PluginCardSelection } from '../../../ui-shared/plugins-store'
 import { requestPluginDiagnostics, usePluginLoadStatus } from '../../../ui-shared/plugin-startup-view'
 import { pluginFailed } from '../../../ui-shared/plugin-startup'
 
@@ -86,7 +86,7 @@ export function StorePluginCard({ item, target, operation, disabled, selection, 
     status='missing' selection={selection} onDetails={onDetails}
     badges={<>{item.prerelease ? <BetaBadge /> : null}
       {!item.version ? <Badge variant='outline' shape='tag'>{t('暂未发布')}</Badge> : null}</>}
-    actions={<PluginGetButton t={t} disabled={disabled || operation?.active === true || !installable} onClick={onInstall} />}
+    actions={<PluginInstallButton t={t} disabled={disabled || operation?.active === true || !installable} onClick={onInstall} />}
     footerAction={item.version ? <Button variant='link' size='xs' onClick={onNotes}>{t('更新日志')}</Button> : null}
     feedback={<>
       {item.version && !platform ? <p className='m-0 text-[12px] text-warning'>{t('当前平台暂无包')}</p> : null}

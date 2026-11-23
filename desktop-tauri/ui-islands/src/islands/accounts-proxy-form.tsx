@@ -82,7 +82,7 @@ export function readProxyDraft(draft: ProxyDraft): ProxyPayload {
   if (draft.mode === 'none') return null
   if (draft.mode === 'retired') throw new Error(t('原代理来源已下线，请选择已保存的代理、自定义地址或直连'))
   if (draft.mode === 'clash') {
-    if (!draft.listenerUid) throw new Error(t('请先选择 Clash Verge 出口'))
+    if (!draft.listenerUid) throw new Error(t('请先选择 EasyClash 出口'))
     return { source: 'clash', listenerUid: draft.listenerUid }
   }
   if (draft.mode === 'pool') {
@@ -111,7 +111,7 @@ export function readProxyDraft(draft: ProxyDraft): ProxyPayload {
 }
 
 function clashOptionLabel(option: NonNullable<ClashProxySnapshot['options']>[number]): string {
-  return `${option.name || option.uid} :${option.port}${option.profileActive === false ? t('（其他订阅，可能未生效）') : ''}${option.enabled === false ? t('（已在 Clash 中禁用）') : ''}`
+  return `${option.name || option.uid} :${option.port}${option.profileActive === false ? t('（其他订阅，可能未生效）') : ''}${option.enabled === false ? t('（已在 EasyClash 中禁用）') : ''}`
 }
 
 export function ProxyForm({
@@ -337,9 +337,9 @@ export function ProxyForm({
             label: t('轮询（换 IP）'),
             title: t('逐请求轮换出口（换 IP）：OpenCode Zen 免费档按 IP 限流，单个 IP 的额度用完会对它一律 429'),
           }] : []),
-          // Clash Verge 档已下线：只有现存配置还停在它上面时才补出这一项，
+          // EasyClash 档已下线：只有现存配置还停在它上面时才补出这一项，
           // 让用户能看见当前值、并有机会改成别的（补出来就没法切走了）
-          ...(draft.mode === 'clash' ? [{ value: 'clash' as const, label: 'Clash Verge' }] : []),
+          ...(draft.mode === 'clash' ? [{ value: 'clash' as const, label: 'EasyClash' }] : []),
           { value: 'custom', label: t('自定义') },
         ]}
       />
@@ -387,7 +387,7 @@ export function ProxyForm({
                 ? t('正在读取代理列表…')
                 : pool.length
                   ? t('地址与端口由「网络代理」页管理：那边改一次、测一次，所有引用它的账号一起生效')
-                  : t('「网络代理」页还没有出口 —— 去那里添加手动地址或同步 Clash Verge 的端点')}
+                  : t('「网络代理」页还没有出口 —— 去那里添加手动地址或同步 EasyClash 的端点')}
           </div>
         </div>
       ) : null}
@@ -436,7 +436,7 @@ export function ProxyForm({
                 ? t('正在读取代理列表…')
                 : pool.length
                   ? t('每条请求换一个出口（按顺序轮流），上游看到的 IP 因此是变化的；出口的地址与端口由「网络代理」页管理')
-                  : t('「网络代理」页还没有出口 —— 去那里添加手动地址或同步 Clash Verge 的端点')}
+                  : t('「网络代理」页还没有出口 —— 去那里添加手动地址或同步 EasyClash 的端点')}
           </div>
         </div>
       ) : null}
@@ -457,10 +457,10 @@ export function ProxyForm({
           <Button variant='outline' size='sm' onClick={loadClash}>{t('重新读取')}</Button>
         </Field>
         <p className='detail mt-1.5'>{clashError ? t('读取失败：{error}', { error: clashError })
-          : clash === null ? t('正在读取 Clash Verge 配置…')
-            : clash.available === false ? t('不可用：{error}', { error: clash.error || t('未检测到 Clash Verge 配置') })
-              : t('读取自 {dir}；端口由 Clash Verge 管理，这里实时同步', { dir: clash.dir || 'Clash Verge' })}</p>
-        <p className='detail mt-1.5'>{t('既有 Clash Verge 直接引用继续可用；也可在「网络代理」页同步端点，再改选「已保存的代理」。')}</p>
+          : clash === null ? t('正在读取 EasyClash 配置…')
+            : clash.available === false ? t('不可用：{error}', { error: clash.error || t('未检测到 EasyClash 配置') })
+              : t('读取自 {dir}；端口由 EasyClash 管理，这里实时同步', { dir: clash.dir || 'EasyClash' })}</p>
+        <p className='detail mt-1.5'>{t('既有 EasyClash 直接引用继续可用；也可在「网络代理」页同步端点，再改选「已保存的代理」。')}</p>
       </div> : null}
 
       {draft.mode === 'custom' ? (

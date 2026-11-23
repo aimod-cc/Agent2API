@@ -274,8 +274,8 @@ Há três formas — escolha a que precisar:
 | Forma | Como instalar | Indicada para |
 | --- | --- | --- |
 | **Navegador / PWA** | Abra `/m` no navegador do celular; opcionalmente "Adicionar à tela inicial" | Consulta rápida, sem instalar nada, opção mais simples no iPhone |
-| **APK Android** | Instale `Agent2API-<versão>.apk` | Ícone na tela inicial, tela cheia, vários servidores |
-| **IPA iOS** | Instale `Agent2API-<versão>.ipa` (não assinado — você reassina) | Ícone na tela inicial, tela cheia |
+| **APK Android** | Instale `Agent2API-<versão>.apk` pela [página de downloads](https://agent2api.dev/downloads) ou pelo Release | Ícone na tela inicial, tela cheia, vários servidores |
+| **IPA iOS** | Instale `Agent2API-<versão>.ipa` pela [página de downloads](https://agent2api.dev/downloads) ou pelo Release (não assinado — você reassina) | Ícone na tela inicial, tela cheia |
 
 As três rodam o mesmo código de interface. A diferença é quem serve a página: o PWA é servido pelo gateway (então "também expor o painel de gerenciamento web" precisa estar ligado), enquanto o APK / IPA levam a interface dentro do pacote (então conseguem abrir a interface offline e não precisam dessa opção).
 
@@ -329,7 +329,7 @@ Para fazer sideload: arraste o `.ipa` para o AltStore (ou SideStore), reassine c
 
 **Limitações conhecidas do IPA**:
 
-- **Atualização dentro do app só abre um link**: o iOS não permite que um app baixe e instale código executável, então "Atualização de software" nas configurações mostra um botão "Baixar" que abre a página do Release, em vez de baixar como no Android. A forma PWA atualiza pelo Service Worker — basta recarregar.
+- **Atualização dentro do app abre o download**: o iOS não permite que um app baixe e instale código executável diretamente, então "Verificar atualizações" nas configurações exibe o botão "Baixar IPA" (baixando o `.ipa` direto da CDN oficial para reassinar via AltStore / SideStore ou certificado próprio) e o link para a página oficial de downloads, em vez de instalar internamente como no Android. A forma PWA atualiza pelo Service Worker — basta recarregar.
 - Gateways `http://` em texto claro: o `Info.plist` já relaxa o ATS e declara o uso de rede local. Na primeira conexão o sistema pede "permitir acesso à rede local" — é obrigatório aceitar, senão toda requisição falha sem explicação visível.
 - O resto é igual ao APK: a interface segue a versão do pacote e o esquema padrão é http.
 
@@ -357,7 +357,7 @@ Quando há uma nova versão, uma barra "Reiniciar e atualizar" surge na parte de
 | Check-in com um toque, ver histórico de check-in | Resgatar recompensas de integração e planos individualmente |
 | Ativar/desativar modelos, filtrar por provedor | Editar mapeamentos de modelo, níveis de raciocínio, flags de capacidade |
 | Copiar gateway keys, ativar/desativar keys | Criar keys, definir listas de provedores/modelos permitidos |
-| Adicionar, editar e excluir proxies HTTP / SOCKS5 manuais; sincronizar endpoints do Clash Verge; ativar/desativar e testar conectividade | — (assinaturas de proxy e o kernel integrado foram descontinuados) |
+| Adicionar, editar e excluir proxies HTTP / SOCKS5 manuais; sincronizar endpoints do EasyClash; ativar/desativar e testar conectividade | — (assinaturas de proxy e o kernel integrado foram descontinuados) |
 | Ativar/desativar tarefas agendadas, alterar intervalos | Alterar porta, roteamento, retry, timeouts, retenção de dados |
 | Consultas rápidas do assistente (saldos / modelos duplicados / uso de hoje / contas limitadas) | Conversa livre e chamada de ferramentas do assistente |
 | Ver status do takeover de Agent, restaurar | Reescrever configurações de clientes (um celular não lê arquivos locais) |

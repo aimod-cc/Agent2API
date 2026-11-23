@@ -40,15 +40,32 @@ pub(super) async fn authorize(call: &Call, params: &Value, options: &Options) ->
             .header("Accept", "application/json")
             .json(&json!({ "source_id": "autoclaw", "device_id": device, "navigate_uri": callback,
                 "ali_captcha_verify_param": captcha })).send().await.map_err(|_| unavailable())?;
-        if !response.status().is_success() || response.url().as_str() != url { return Err(unavailable()); }
+        if response.url().as_str() != url { return Err(unavailable()); }
+        let status = response.status();
         let mut bytes = zeroize::Zeroizing::new(Vec::new());
         while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
             if bytes.len().saturating_add(chunk.len()) > 128 * 1024 { return Err(unavailable()); }
             bytes.extend_from_slice(&chunk);
         }
+        if !status.is_success() {
+            let detail = String::from_utf8_lossy(&bytes).trim().chars().take(2048).collect::<String>();
+            let message = if detail.is_empty() {
+                format!("获取国际授权地址返回 HTTP {}", status.as_u16())
+            } else {
+                format!("获取国际授权地址返回 HTTP {}：{detail}", status.as_u16())
+            };
+            return Err(GatewayError::with_status(502, message));
+        }
         let value: Value = crate::server::core::plugin_host::wasm::managed_task::declaration::parse_object(&bytes, 128 * 1024)
             .map_err(|_| unavailable())?;
-        if value["code"] != 0 { return Err(GatewayError::with_status(502, "国际授权地址未取得，请重新完成官方验证")); }
+        if value["code"] != 0 {
+            let code_text = value["code"].as_i64().map(|c| c.to_string()).unwrap_or_else(|| value["code"].to_string());
+            let detail = ["msg", "message", "detail", "error_msg", "error_description", "reason"].iter()
+                .find_map(|key| value[*key].as_str().map(str::trim).filter(|s| !s.is_empty()))
+                .map(|s| s.chars().take(2048).collect::<String>())
+                .unwrap_or_else(|| value.to_string().chars().take(2048).collect::<String>());
+            return Err(GatewayError::with_status(502, format!("国际授权地址未取得（业务码 {code_text}）：{detail}")));
+        }
         let raw = value["data"]["oauth_url"].as_str().filter(|raw| raw.len() <= 16 * 1024).ok_or_else(unavailable)?;
         let parsed = url::Url::parse(raw).map_err(|_| unavailable())?;
         if parsed.scheme() != "https" || parsed.port_or_known_default() != Some(443)

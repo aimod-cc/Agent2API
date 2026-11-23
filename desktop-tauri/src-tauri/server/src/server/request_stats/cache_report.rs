@@ -65,6 +65,8 @@ pub(super) fn cache_trend_24h(entries: &[SummaryRow], now: i64) -> Vec<Value> {
             cache_read_tokens: item.cache_read_tokens,
             token_details_requests: 1,
             last_used_at: Some(item.ts),
+            cost_usd: 0.0,
+            unpriced_requests: 0,
         };
         let slot = buckets.entry(hour_key(ms_to_local(item.ts))).or_default();
         slot.usage.merge(&usage);

@@ -128,6 +128,9 @@ export function RecordsTab(): React.ReactElement {
   }, [columnRetry])
 
   React.useLayoutEffect(() => { repaintRecordColumns() })
+  React.useEffect(() => {
+    if (!store.recordsLoaded || store.recordsStale) void loadRecords()
+  }, [store.recordsLoaded, store.recordsStale])
   React.useEffect(() => () => { closeRecordColumns() }, [])
   React.useLayoutEffect(() => {
     if (store.recordsLoading || previousPage.current === pageKey) return

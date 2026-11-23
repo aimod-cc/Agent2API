@@ -274,8 +274,8 @@ There are three forms — pick what you need:
 | Form | How to install | Good for |
 | --- | --- | --- |
 | **Browser / PWA** | Open `/m` in a phone browser; optionally "Add to Home Screen" | Quick look, nothing to install, the easiest option on iPhone |
-| **Android APK** | Install `Agent2API-<version>.apk` | Home-screen icon, full screen, multiple servers |
-| **iOS IPA** | Install `Agent2API-<version>.ipa` (unsigned — you re-sign it) | Home-screen icon, full screen |
+| **Android APK** | Install `Agent2API-<version>.apk` from [Downloads](https://agent2api.dev/downloads) or Release | Home-screen icon, full screen, multiple servers |
+| **iOS IPA** | Install `Agent2API-<version>.ipa` from [Downloads](https://agent2api.dev/downloads) or Release (unsigned — you re-sign it) | Home-screen icon, full screen |
 
 All three run the same UI code. The difference is who serves the page: the PWA is served by the gateway (so "also expose the web management panel" must be on), while the APK / IPA ship the UI inside the package (so they can start the UI offline and do not need that switch).
 
@@ -329,7 +329,7 @@ To sideload: drop the `.ipa` into AltStore (or SideStore), re-sign with your App
 
 **Known limitations of the IPA**:
 
-- **In-app updates can only link out**: iOS does not allow an app to download and install executable code, so "Software update" in settings shows a "Get it" button that opens the Release page instead of downloading like Android does. The PWA form updates through the Service Worker — just refresh.
+- **In-app updates link to download**: iOS does not allow an app to download and install executable code directly, so checking for updates in settings offers a "Download IPA" button (fetching the `.ipa` from the official CDN for re-signing with AltStore / SideStore or your own certificate) and a link to the official downloads page, instead of installing in-place like Android does. The PWA form updates through the Service Worker — just refresh.
 - Cleartext `http://` gateways: `Info.plist` already relaxes ATS and declares the local-network usage. The first connection triggers an "allow local network" prompt — you must accept it, otherwise every request fails with no visible explanation.
 - Everything else matches the APK: the UI follows the package version, and http is the default scheme.
 
@@ -357,7 +357,7 @@ When a new version is available, a "Restart & update" bar floats at the bottom: 
 | One-tap check-in, view check-in history | Claim onboarding rewards and plans one by one |
 | Enable/disable models, filter by provider | Edit model mappings, reasoning levels, capability flags |
 | Copy gateway keys, enable/disable keys | Create keys, set provider/model allowlists |
-| Add, edit and delete manual HTTP / SOCKS5 proxies; sync Clash Verge endpoints; enable/disable and test connectivity | — (proxy subscriptions and the built-in kernel have been discontinued) |
+| Add, edit and delete manual HTTP / SOCKS5 proxies; sync EasyClash endpoints; enable/disable and test connectivity | — (proxy subscriptions and the built-in kernel have been discontinued) |
 | Enable/disable scheduled tasks, change intervals | Change port, routing, retry, timeouts, data retention |
 | Assistant quick queries (balances / duplicate models / today's usage / rate-limited accounts) | Free-form assistant chat and tool calling |
 | View Agent takeover status, restore | Rewrite client configs (a phone cannot read local files) |

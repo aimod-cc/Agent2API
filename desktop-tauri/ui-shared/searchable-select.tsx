@@ -37,6 +37,7 @@ export function SearchableSelect({
   const [search, setSearch] = React.useState('')
   const selected = options.find(option => option.value === value) ?? null
   const label = displayValue ?? selected?.label ?? (value || placeholder)
+  const isPlaceholder = displayValue === undefined && !selected && !value
 
   if (!searchable) return <Select value={value} disabled={disabled}
     onValueChange={next => { if (typeof next === 'string') onValueChange(next) }}>
@@ -48,19 +49,19 @@ export function SearchableSelect({
     </SelectItem>)}</SelectContent>
   </Select>
 
-  return <Combobox items={options} value={selected} disabled={disabled} autoHighlight
+  return <Combobox items={options} value={selected} disabled={disabled}
     inputValue={search} onInputValueChange={setSearch} onOpenChange={() => setSearch('')}
     itemToStringLabel={item => item.label} itemToStringValue={item => item.value}
     isItemEqualToValue={(item, current) => item.value === current.value}
     filter={(item, query) => `${item.label} ${item.value} ${item.searchText || ''}`.toLowerCase().includes(query.trim().toLowerCase())}
     onValueChange={item => { if (item && !item.disabled) onValueChange(item.value) }}>
     <ComboboxTrigger id={id} className={className} title={title ?? label} aria-label={props['aria-label']}>
-      <ComboboxValue>{label}</ComboboxValue>
+      <ComboboxValue>
+        <span data-placeholder={isPlaceholder ? '' : undefined}>{label}</span>
+      </ComboboxValue>
     </ComboboxTrigger>
     <ComboboxContent>
-      <div className='shrink-0 border-b border-hairline p-2'>
-        <ComboboxInput placeholder={searchPlaceholder} aria-label={searchPlaceholder} autoComplete='off' />
-      </div>
+      <ComboboxInput placeholder={searchPlaceholder} aria-label={searchPlaceholder} autoComplete='off' />
       <ComboboxEmpty>{emptyHint}</ComboboxEmpty>
       <ComboboxList>
         {(item: SearchableSelectOption) => <ComboboxItem key={item.value} value={item} disabled={item.disabled} title={item.label}>

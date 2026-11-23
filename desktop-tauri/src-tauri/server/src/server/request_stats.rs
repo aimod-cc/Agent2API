@@ -119,7 +119,7 @@ use retention::RetentionBounds;
 pub use retention::Retention;
 // 拆到子模块的三样，这里引回：record / usage_summary 的折算入口、
 // remap 的库操作体、报表装配（均为 `pub(super)`，见 aggregate.rs 的模块头）
-use aggregate::{fold_into_daily, remap_model_days, summarize};
+use aggregate::{backfill_pricing_once, fold_into_daily, remap_model_days, reprice_intact_days, summarize};
 use report::{entry_json, list_entry_json, provider_label, CACHE_WINDOWS};
 
 // CompactStart 在此 re-export：api::stats_api 的 compact 路由按它分派响应。
@@ -481,6 +481,13 @@ impl RequestStats {
                 if let Some(key) = entry { row["label"] = json!(key.name); }
             }
         }
+        let pricing = crate::server::core::model_pricing::settings();
+        let fx_snap = crate::server::core::model_pricing::fx::current_rate_soon();
+        if let Some(target) = summary.as_object_mut() {
+            target.insert("currency".to_string(), json!(pricing.currency));
+            target.insert("exchangeRate".to_string(), json!(fx_snap.rate));
+            target.insert("fx".to_string(), fx_snap.to_json(now));
+        }
         if let (Some(target), Some(sources)) = (summary.as_object_mut(), sources.as_object()) {
             target.extend(sources.clone());
         }
@@ -541,15 +548,19 @@ impl RequestStats {
             })
         };
         let (total, matched, running, page_rows) = loaded.unwrap_or((0, 0, 0, PageRows::Full(Vec::new())));
+        let pricing = crate::server::core::model_pricing::settings();
+        let fx_snap = crate::server::core::model_pricing::fx::current_rate_soon();
         let rows: Vec<Value> = match page_rows {
-            PageRows::List(entries) => entries.iter().map(list_entry_json).collect(),
-            PageRows::Full(entries) => entries.iter().map(entry_json).collect(),
+            PageRows::List(entries) => entries.iter().map(|row| list_entry_json(row, &pricing)).collect(),
+            PageRows::Full(entries) => entries.iter().map(|entry| entry_json(entry, &pricing)).collect(),
         };
         json!({
             "entries": rows,
             "total": total,
             "matched": matched,
             "running": running,
+            "currency": pricing.currency,
+            "exchangeRate": fx_snap.rate,
         })
     }
 
@@ -566,7 +577,8 @@ impl RequestStats {
             })
         }?;
         let (row_id, entry) = loaded?;
-        let mut value = entry_json(&entry);
+        let pricing = crate::server::core::model_pricing::settings();
+        let mut value = entry_json(&entry, &pricing);
         if let Some(object) = value.as_object_mut() {
             object.insert("rowId".to_string(), json!(row_id));
             object.insert("detailsLoaded".to_string(), Value::Bool(true));
@@ -768,6 +780,28 @@ impl RequestStats {
             // Err（已由 with_conn_mut 打控制台日志）与库不可用都在这一支：
             // 标记没写，下次启动自然再试，订正不会因此丢
             None => {}
+        }
+    }
+
+    pub fn backfill_pricing_once(&self) {
+        let outcome = {
+            let guard = self.guard();
+            self.with_conn_mut(&guard, backfill_pricing_once)
+        };
+        if outcome.is_some() {
+            crate::server::core::panel_events::notify_requests();
+        }
+    }
+
+    pub fn reprice_recent_days(&self) {
+        let outcome = {
+            let guard = self.guard();
+            self.with_conn_mut(&guard, reprice_intact_days)
+        };
+        if let Some(updated) = outcome {
+            if !updated.is_empty() {
+                crate::server::core::panel_events::notify_requests();
+            }
         }
     }
 }

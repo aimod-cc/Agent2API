@@ -137,7 +137,7 @@ pub async fn get_selection() -> Response {
     ok_json(tool_services::provider_selection())
 }
 
-/// PUT /api/tools/provider-selection `{search_providers?, fetch_provider?}`
+/// PUT /api/tools/provider-selection `{search_providers?, fetch_provider?, max_global_sources?, long_query_policy?}`
 pub async fn put_selection(body: Bytes) -> Response {
     let payload = match parse_body(&body) {
         Ok(value) => value,
@@ -146,20 +146,35 @@ pub async fn put_selection(body: Bytes) -> Response {
     let Some(object) = payload.as_object() else {
         return errors::management_error(400, "请求体必须是 JSON 对象");
     };
-    let search = object.get("search_providers").map(|value| {
-        value
-            .as_array()
-            .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
-            .unwrap_or_default()
-    });
-    let fetch = object.get("fetch_provider").and_then(Value::as_str).map(str::to_string);
-    match tool_services::update_selection(search, fetch) {
+    let search = match object.get("search_providers") {
+        None => None,
+        Some(Value::Array(items)) => Some(items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()),
+        Some(_) => return errors::management_error(400, "search_providers 必须是数组"),
+    };
+    let fetch = match object.get("fetch_provider") {
+        None => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return errors::management_error(400, "fetch_provider 必须是字符串"),
+    };
+    let max_global_sources = match object.get("max_global_sources") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64().and_then(|v| usize::try_from(v).ok()) {
+            Some(n) => Some(n),
+            None => return errors::management_error(400, "max_global_sources 必须是正整数"),
+        },
+    };
+    let long_query_policy = match object.get("long_query_policy") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return errors::management_error(400, "long_query_policy 必须是字符串"),
+    };
+    match tool_services::update_selection(search, fetch, max_global_sources, long_query_policy) {
         Ok(value) => ok_json(value),
         Err(error) => errors::management_error(400, error),
     }
 }
 
-/// PUT /api/tools/providers/{provider} `{api_key?, account_id?, enabled?}`
+/// PUT /api/tools/providers/{provider} `{api_key?, account_id?, enabled?, max_results?}`
 pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path<String>, body: Bytes) -> Response {
     if !tool_services::is_search_provider(&provider) {
         return errors::management_error(400, "未知的搜索提供商");
@@ -187,6 +202,14 @@ pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path
         Some(Value::String(value)) => Some(value.as_str()),
         Some(_) => return errors::management_error(400, "account_id 必须是字符串或 null"),
     };
+    let max_results = match object.get("max_results") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => match value.as_u64().and_then(|v| usize::try_from(v).ok()).filter(|v| *v >= 1) {
+            Some(n) => Some(Some(n)),
+            None => return errors::management_error(400, "max_results 必须是正整数或 null"),
+        },
+    };
     let keys = match object.get("keys") {
         None => None,
         Some(Value::Array(items)) if items.len() <= tool_services::MAX_PROVIDER_KEYS => {
@@ -198,7 +221,7 @@ pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path
         Some(Value::Array(_)) => return errors::management_error(400, "每家提供商最多保存 100 个密钥"),
         Some(_) => return errors::management_error(400, "keys 必须是数组"),
     };
-    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id, keys) {
+    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id, keys, max_results) {
         Ok(value) => ok_json(value),
         Err(error) => errors::management_error(400, error),
     }

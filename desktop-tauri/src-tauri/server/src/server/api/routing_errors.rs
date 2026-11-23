@@ -33,7 +33,9 @@ fn view(_state: &ServerState, snapshot: &error_policy::ErrorPolicySnapshot) -> V
             providers.push(json!({ "id": id, "label": item["name"].as_str().unwrap_or(id) }));
         }
     }
+    let provider_rules = crate::server::core::plugin_host::error_rules::all_provider_rules();
     json!({ "settings": snapshot.settings, "defaults": ErrorSettings::default(),
         "revision": error_policy::revision(snapshot), "configured": snapshot.configured, "legacy": snapshot.legacy,
-        "providers": providers.into_iter().map(|item| json!({ "id": item["id"], "label": item["label"] })).collect::<Vec<_>>() })
+        "providers": providers.into_iter().map(|item| json!({ "id": item["id"], "label": item["label"] })).collect::<Vec<_>>(),
+        "providerRules": provider_rules })
 }

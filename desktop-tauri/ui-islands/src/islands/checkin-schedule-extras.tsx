@@ -178,7 +178,7 @@ function KeepalivePanel({ center }: { center: CheckinCenter }): React.ReactEleme
                 </div>
               ))}
               {models.length === 0
-                ? <Empty className="ck-chain-empty">清单为空 —— 保存后恢复缺省链</Empty>
+                ? <Empty className="ck-chain-empty">{defaults.length ? '清单为空 —— 保存后恢复缺省链' : '清单为空 —— 当前无默认模型，保活需至少添加一个可用对话模型'}</Empty>
                 : null}
             </div>
             <div className="ck-chain-add">
@@ -204,8 +204,9 @@ function KeepalivePanel({ center }: { center: CheckinCenter }): React.ReactEleme
         </div>
         <div className="ck-note">
           「保活模型链」是 WorkBuddy 国际版领日活时用来保活的免费模型，按顺序逐个尝试、
-          第一个成功即止；清空清单并保存 = 恢复缺省链（当前缺省：
-          {defaults.length ? defaults.join('、') : '（无）'}）。
+          第一个成功即止；{defaults.length
+            ? `清空清单并保存 = 恢复缺省链（当前缺省：${defaults.join('、')}）。`
+            : '当前不设默认模型，请手动添加（建议优先使用非推理型免费对话模型，如 deepseek-v4.1-flash-sg）。'}
           当天去重 + 幂等领取：重复执行只会拿到「已领取」，不会重复加分。
         </div>
       </div>

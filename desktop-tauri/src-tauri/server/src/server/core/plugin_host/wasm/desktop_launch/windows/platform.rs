@@ -11,8 +11,11 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, LPARAM, WPARAM};
-use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, LPARAM, WAIT_OBJECT_0, WPARAM};
+use windows::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE};
 
 use super::super::declaration::HotSwitch;
@@ -182,12 +185,16 @@ fn verified_processes(system: &sysinfo::System, pids: &HashSet<u32>, root_dir: &
     for (pid, process) in system.processes() {
         let pid_u32 = pid.as_u32();
         if !pids.contains(&pid_u32) { continue; }
-        let path = process.exe().ok_or("无法核对客户端进程路径，未关闭程序")?;
-        let path = paths::checked(path, false)?;
-        if !path.starts_with(root_dir) { return Err("客户端子进程不属于原安装目录".into()); }
-        let (actual, started) = process_identity(pid_u32)?;
+        let Some((actual, started)) = process_identity(pid_u32)? else { continue; };
+        let path = match process.exe() {
+            Some(path) => paths::checked(path, false)?,
+            None => actual.clone(),
+        };
+        if !path.starts_with(root_dir) || !actual.starts_with(root_dir) {
+            return Err("客户端子进程不属于原安装目录".into());
+        }
         if !paths::same(&actual, &path) { return Err("客户端进程路径已变化，未结束程序".into()); }
-        result.push((pid_u32, path, started));
+        result.push((pid_u32, actual, started));
     }
     Ok(result)
 }
@@ -241,14 +248,16 @@ pub fn stop_hot_services(executable: &Path, targets: &HotSwitchTargets) -> Resul
     let executable = paths::checked(executable, false)?;
     let root_dir = executable.parent().ok_or("客户端安装目录不可用")?;
     for root in &targets.roots {
-        let (actual, started) = process_identity(root.pid).map_err(|_| "客户端进程已变化，未重载后台服务".to_string())?;
+        let Some((actual, started)) = process_identity(root.pid).map_err(|_| "客户端进程已变化，未重载后台服务".to_string())? else {
+            return Err("客户端进程已退出，请重新启动客户端".into());
+        };
         if started != root.started || !paths::same(&actual, &root.path) {
             return Err("客户端进程已变化，未重载后台服务".into());
         }
     }
     for service in &targets.services {
         if !service.path.starts_with(root_dir) { return Err("客户端子进程不属于原安装目录".into()); }
-        if let Ok((actual, started)) = process_identity(service.pid) {
+        if let Ok(Some((actual, started))) = process_identity(service.pid) {
             if started == service.started && paths::same(&actual, &service.path) {
                 terminate(service.pid, &service.path, service.started)?;
             }
@@ -257,11 +266,11 @@ pub fn stop_hot_services(executable: &Path, targets: &HotSwitchTargets) -> Resul
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let any_alive = targets.services.iter().any(|service| {
-            process_identity(service.pid).is_ok_and(|(actual, started)| started == service.started && paths::same(&actual, &service.path))
+            process_identity(service.pid).is_ok_and(|item| item.is_some_and(|(actual, started)| started == service.started && paths::same(&actual, &service.path)))
         });
         if !any_alive {
             let roots_alive = targets.roots.iter().all(|root| {
-                process_identity(root.pid).is_ok_and(|(actual, started)| started == root.started && paths::same(&actual, &root.path))
+                process_identity(root.pid).is_ok_and(|item| item.is_some_and(|(actual, started)| started == root.started && paths::same(&actual, &root.path)))
             });
             return if roots_alive { Ok(()) } else { Err("客户端进程已退出，请重新启动客户端".into()) };
         }
@@ -281,7 +290,7 @@ pub fn wait_hot_services_respawn(executable: &Path, hot_switch: &HotSwitch, prev
         if cancel.is_cancelled() { return Ok(HotSwitchRespawn::Canceled); }
         let system = system();
         let surviving_roots: HashSet<u32> = previous.roots.iter().filter(|root| {
-            process_identity(root.pid).is_ok_and(|(actual, started)| started == root.started && paths::same(&actual, &root.path))
+            process_identity(root.pid).is_ok_and(|item| item.is_some_and(|(actual, started)| started == root.started && paths::same(&actual, &root.path)))
         }).map(|root| root.pid).collect();
         if surviving_roots.is_empty() { return Ok(HotSwitchRespawn::ClientClosed); }
         let descendants = expand_descendants(&system, &surviving_roots, root_dir);
@@ -319,6 +328,18 @@ unsafe extern "system" fn close_window(window: windows::Win32::Foundation::HWND,
 struct Handle(HANDLE);
 impl Drop for Handle { fn drop(&mut self) { unsafe { let _ = CloseHandle(self.0); } } }
 
+fn process_exited(handle: HANDLE) -> bool {
+    unsafe { WaitForSingleObject(handle, 0) == WAIT_OBJECT_0 }
+}
+
+fn open_query(pid: u32, extra: PROCESS_ACCESS_RIGHTS, deny_message: &str) -> Result<Option<Handle>, String> {
+    match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | extra, false, pid) } {
+        Ok(handle) => Ok(Some(Handle(handle))),
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => Ok(None),
+        Err(_) => Err(deny_message.into()),
+    }
+}
+
 fn created(handle: HANDLE) -> Result<u64, String> {
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
@@ -329,10 +350,20 @@ fn created(handle: HANDLE) -> Result<u64, String> {
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
 
-fn process_identity(pid: u32) -> Result<(PathBuf, u64), String> {
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
-        .map(Handle).map_err(|_| "无法核对客户端进程路径，未关闭程序")?;
-    Ok((process_path(handle.0)?, created(handle.0)?))
+fn inspect_handle(handle: HANDLE) -> Result<Option<(PathBuf, u64)>, String> {
+    if process_exited(handle) { return Ok(None); }
+    match (process_path(handle), created(handle)) {
+        (Ok(path), Ok(started)) => Ok(Some((path, started))),
+        _ if process_exited(handle) => Ok(None),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+fn process_identity(pid: u32) -> Result<Option<(PathBuf, u64)>, String> {
+    let Some(handle) = open_query(pid, PROCESS_ACCESS_RIGHTS(0), "无法核对客户端进程路径，未关闭程序")? else {
+        return Ok(None);
+    };
+    inspect_handle(handle.0)
 }
 
 fn process_path(handle: HANDLE) -> Result<PathBuf, String> {
@@ -344,18 +375,21 @@ fn process_path(handle: HANDLE) -> Result<PathBuf, String> {
 }
 
 fn terminate(pid: u32, expected: &Path, started: u64) -> Result<(), String> {
-    let system = system();
-    let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) else { return Ok(()); };
-    if !process.exe().is_some_and(|path| paths::same(path, expected)) {
-        return Err("客户端进程已变化，未结束新进程".into());
-    }
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, false, pid) }
-        .map(Handle).map_err(|_| "无法结束客户端，请先手动关闭程序")?;
-    if created(handle.0)? != started { return Err("客户端进程已变化，未结束新进程".into()); }
-    if !paths::same(&process_path(handle.0)?, expected) {
+    let Some(handle) = open_query(pid, PROCESS_TERMINATE, "无法结束客户端，请先手动关闭程序")? else {
+        return Ok(());
+    };
+    let Some((actual, creation)) = inspect_handle(handle.0)? else {
+        return Ok(());
+    };
+    if creation != started { return Err("客户端进程已变化，未结束新进程".into()); }
+    if !paths::same(&actual, expected) {
         return Err("客户端进程路径已变化，未结束程序".into());
     }
-    unsafe { TerminateProcess(handle.0, 0) }.map_err(|_| "客户端未能关闭，请手动关闭后重试".into())
+    match unsafe { TerminateProcess(handle.0, 0) } {
+        Ok(()) => Ok(()),
+        Err(_) if process_exited(handle.0) => Ok(()),
+        Err(_) => Err("客户端未能关闭，请手动关闭后重试".into()),
+    }
 }
 
 fn remaining(executable: &Path, original: &[(u32, PathBuf, u64)]) -> Result<Vec<(u32, PathBuf, u64)>, String> {
@@ -364,14 +398,32 @@ fn remaining(executable: &Path, original: &[(u32, PathBuf, u64)]) -> Result<Vec<
     for (id, path, started) in original {
         if current.iter().any(|(current_id, _, _)| current_id == id) { continue; }
         if let Some(process) = system.process(sysinfo::Pid::from_u32(*id)) {
-            let (actual, creation) = process_identity(*id)?;
+            let Some((actual, creation)) = process_identity(*id)? else { continue; };
             if creation != *started { continue; }
-            let observed = process.exe().ok_or("无法核对客户端进程路径，未关闭程序")?;
-            if !paths::same(&actual, path) || !paths::same(observed, path) { return Err("客户端进程路径已变化，未结束程序".into()); }
+            if let Some(observed) = process.exe() {
+                if !paths::same(observed, path) { return Err("客户端进程路径已变化，未结束程序".into()); }
+            }
+            if !paths::same(&actual, path) { return Err("客户端进程路径已变化，未结束程序".into()); }
             current.push((*id, path.clone(), *started));
         }
     }
     Ok(current)
+}
+
+fn spawned_from_known(system: &sysinfo::System, pid: u32, known: &HashMap<u32, (PathBuf, u64)>, root_dir: &Path) -> bool {
+    let mut current = system.process(sysinfo::Pid::from_u32(pid));
+    let mut seen = HashSet::from([pid]);
+    while let Some(process) = current {
+        let Some(parent_pid) = process.parent().map(|id| id.as_u32()) else { return false; };
+        if !seen.insert(parent_pid) { return false; }
+        let Some(parent) = system.process(sysinfo::Pid::from_u32(parent_pid)) else { return false; };
+        if parent.start_time() > process.start_time() { return false; }
+        if known.contains_key(&parent_pid) {
+            return process.exe().is_some_and(|exe| paths::checked(exe, false).is_ok_and(|checked| checked.starts_with(root_dir)));
+        }
+        current = Some(parent);
+    }
+    false
 }
 
 pub fn close(executable: &Path) -> Result<(), String> {
@@ -385,11 +437,24 @@ pub fn close(executable: &Path) -> Result<(), String> {
         if remaining(executable, &original)?.is_empty() { return Ok(()); }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let known: HashMap<_, _> = original.iter().map(|(id, path, started)| (*id, (path, *started))).collect();
-    for (id, path, started) in remaining(executable, &original)?.into_iter().rev() {
-        if known.get(&id).is_none_or(|(before, at)| !paths::same(before, &path) || *at != started) {
+    let root_dir = executable.parent().ok_or("客户端安装目录不可用")?;
+    let known: HashMap<_, _> = original.iter().map(|(id, path, started)| (*id, (path.clone(), *started))).collect();
+    let mut active = remaining(executable, &original)?;
+    let snapshot = system();
+    for (id, path, started) in &active {
+        let matches_known = known.get(id).is_some_and(|(before, at)| paths::same(before, path) && *at == *started);
+        if !matches_known && !spawned_from_known(&snapshot, *id, &known, root_dir) {
             return Err("客户端在关闭期间产生了新进程，请手动关闭后重试".into());
         }
+    }
+    let active_ids: HashSet<u32> = active.iter().map(|(id, _, _)| *id).collect();
+    active.sort_by_key(|(id, path, _)| {
+        let has_active_parent = snapshot.process(sysinfo::Pid::from_u32(*id))
+            .and_then(|process| process.parent())
+            .is_some_and(|parent| active_ids.contains(&parent.as_u32()));
+        (usize::from(has_active_parent), usize::from(!paths::same(path, executable)))
+    });
+    for (id, path, started) in active {
         terminate(id, &path, started)?;
     }
     drop(known);
@@ -401,13 +466,25 @@ pub fn close(executable: &Path) -> Result<(), String> {
     Err("客户端进程尚未全部退出，未写入凭证".into())
 }
 
-pub fn start(executable: &Path) -> Result<(), String> {
+pub fn start(executable: &Path, proxy: Option<&super::super::proxy::LaunchProxy>) -> Result<(), String> {
     paths::checked(executable, false)?;
     if running(executable)? { return Err("客户端已经运行，未再次启动".into()); }
-    let mut child = std::process::Command::new(executable)
+    let mut command = std::process::Command::new(executable);
+    command
         .current_dir(executable.parent().ok_or("客户端安装目录不可用")?)
-        .creation_flags(0x08000000)
-        .spawn().map_err(|_| "凭证已切换，但客户端未能启动")?;
+        .creation_flags(0x08000000);
+    if let Some(proxy) = proxy {
+        for key in ["http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+            command.env_remove(key);
+        }
+        command
+            .env("HTTP_PROXY", &proxy.url)
+            .env("HTTPS_PROXY", &proxy.url)
+            .env("ALL_PROXY", &proxy.url)
+            .env("NO_PROXY", "localhost,127.0.0.1,::1")
+            .arg(format!("--proxy-server={}", proxy.url));
+    }
+    let mut child = command.spawn().map_err(|_| "凭证已切换，但客户端未能启动")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if running(executable)? { return Ok(()); }

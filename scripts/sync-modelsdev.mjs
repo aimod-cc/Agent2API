@@ -33,6 +33,10 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+const CDN_METADATA_URL = 'https://cdn.agent2api.dev/agent2api/feeds/providers/models-metadata.json'
+const API_METADATA_URL = 'https://agent2api.dev/api/providers/models-metadata'
+const CDN_CATALOG_URL = 'https://cdn.agent2api.dev/agent2api/feeds/providers/models-catalog.json'
+const API_CATALOG_URL = 'https://agent2api.dev/api/providers/models-catalog'
 const API_URL = 'https://models.dev/api.json'
 const MODELS_URL = 'https://models.dev/models.json'
 const OUT = fileURLToPath(new URL(
@@ -102,8 +106,141 @@ function levelsOf(entry) {
   return values.length ? { levels: values } : null
 }
 
+function priceNum(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function costOf(entry, idOrCanonical) {
+  const raw = entry?.cost
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const input = priceNum(raw.input)
+  const output = priceNum(raw.output)
+  const cacheRead = priceNum(raw.cache_read ?? raw.cacheRead)
+  const cacheWrite = priceNum(raw.cache_write ?? raw.cacheWrite)
+  let cacheWrite1h = priceNum(raw.cache_write_1h ?? raw.cacheWrite1h)
+  if (input === undefined && output === undefined && cacheRead === undefined && cacheWrite === undefined) {
+    return undefined
+  }
+  const baseInput = input ?? 0
+  const baseOutput = output ?? 0
+  const baseRead = cacheRead ?? 0
+  const baseWrite = cacheWrite ?? 0
+  const isClaude = String(idOrCanonical ?? '').toLowerCase().includes('claude')
+  if (isClaude && baseWrite > 0 && !(cacheWrite1h && cacheWrite1h > 0)) {
+    cacheWrite1h = baseInput * 2
+  }
+  const tiers = []
+  for (const item of Array.isArray(raw.tiers) ? raw.tiers : []) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const meta = (item.tier && typeof item.tier === 'object' && !Array.isArray(item.tier)) ? item.tier : undefined
+    if (meta && typeof meta.type === 'string' && meta.type !== '' && meta.type !== 'context') continue
+    const above = limitOf(meta?.size ?? item.above)
+    if (!above) continue
+    const tInput = priceNum(item.input) ?? baseInput
+    const tWrite = priceNum(item.cache_write ?? item.cacheWrite) ?? baseWrite
+    let tWrite1h = priceNum(item.cache_write_1h ?? item.cacheWrite1h)
+    if (isClaude && tWrite > 0 && !(tWrite1h && tWrite1h > 0)) tWrite1h = tInput * 2
+    const tRead = priceNum(item.cache_read ?? item.cacheRead) ?? baseRead
+    tiers.push({
+      above,
+      input: tInput,
+      output: priceNum(item.output) ?? baseOutput,
+      ...(tRead > 0 ? { cacheRead: tRead } : {}),
+      ...(tWrite > 0 ? { cacheWrite: tWrite } : {}),
+      ...(tWrite1h && tWrite1h > 0 ? { cacheWrite1h: tWrite1h } : {}),
+    })
+  }
+  if (tiers.length === 0 && raw.context_over_200k && typeof raw.context_over_200k === 'object') {
+    const over = raw.context_over_200k
+    const tInput = priceNum(over.input) ?? baseInput
+    const tWrite = priceNum(over.cache_write ?? over.cacheWrite) ?? baseWrite
+    let tWrite1h = priceNum(over.cache_write_1h ?? over.cacheWrite1h)
+    if (isClaude && tWrite > 0 && !(tWrite1h && tWrite1h > 0)) tWrite1h = tInput * 2
+    const tRead = priceNum(over.cache_read ?? over.cacheRead) ?? baseRead
+    tiers.push({
+      above: 200_000,
+      input: tInput,
+      output: priceNum(over.output) ?? baseOutput,
+      ...(tRead > 0 ? { cacheRead: tRead } : {}),
+      ...(tWrite > 0 ? { cacheWrite: tWrite } : {}),
+      ...(tWrite1h && tWrite1h > 0 ? { cacheWrite1h: tWrite1h } : {}),
+    })
+  }
+  tiers.sort((a, b) => a.above - b.above)
+  return {
+    input: baseInput,
+    output: baseOutput,
+    ...(baseRead > 0 ? { cacheRead: baseRead } : {}),
+    ...(baseWrite > 0 ? { cacheWrite: baseWrite } : {}),
+    ...(cacheWrite1h && cacheWrite1h > 0 ? { cacheWrite1h } : {}),
+    ...(tiers.length > 0 ? { tiers } : {}),
+  }
+}
+
+async function tryFetchOfficialMetadata() {
+  for (const url of [CDN_METADATA_URL, API_METADATA_URL]) {
+    try {
+      const payload = await getJson(url)
+      const list = payload?.models && typeof payload.models === 'object' ? Object.values(payload.models) : []
+      if (list.length > 0 && list.some((item) => item && typeof item === 'object' && item.cost)) {
+        return { url, payload }
+      }
+    } catch {
+      // 官网尚未上线该 feed 或暂不可达时，继续尝试兜底源
+    }
+  }
+  return null
+}
+
+async function fetchApiAndModels() {
+  try {
+    return await Promise.all([getJson(API_URL), getJson(MODELS_URL)])
+  } catch {
+    for (const url of [CDN_CATALOG_URL, API_CATALOG_URL]) {
+      try {
+        const api = await getJson(url)
+        const models = {}
+        for (const [providerId, provider] of Object.entries(api ?? {})) {
+          for (const entry of Object.values(provider?.models ?? {})) {
+            const canonical = typeof entry?.canonical_model_id === 'string' && entry.canonical_model_id
+              ? entry.canonical_model_id
+              : (entry?.id ? `${providerId}/${entry.id}` : '')
+            if (canonical && !models[canonical]) models[canonical] = entry
+          }
+        }
+        if (Object.keys(models).length > 0) return [api, models]
+      } catch {
+        // try next fallback
+      }
+    }
+    return await Promise.all([getJson(API_URL), getJson(MODELS_URL)])
+  }
+}
+
 async function main() {
-  const [api, models] = await Promise.all([getJson(API_URL), getJson(MODELS_URL)])
+  const official = await tryFetchOfficialMetadata()
+  if (official) {
+    const sorted = {}
+    for (const key of Object.keys(official.payload.models).sort()) {
+      sorted[key] = official.payload.models[key]
+    }
+    const payload = {
+      generatedAt: typeof official.payload.generatedAt === 'number' ? official.payload.generatedAt : Date.now(),
+      source: 'https://models.dev',
+      models: sorted,
+    }
+    const text = `${JSON.stringify(payload, null, 0)}\n`
+    mkdirSync(dirname(OUT), { recursive: true })
+    writeFileSync(OUT, text, 'utf8')
+    const count = Object.keys(sorted).length
+    const withLevels = Object.values(sorted).filter((item) => item?.levels).length
+    const bytes = Buffer.byteLength(text, 'utf8')
+    console.log(`写出 ${OUT}（来自官网 ${official.url}）`)
+    console.log(`  条目 ${count}，带命名档位 ${withLevels}，体积 ${(bytes / 1024).toFixed(1)} KB`)
+    return
+  }
+
+  const [api, models] = await fetchApiAndModels()
   const index = new Map()
   const collisions = []
 
@@ -125,9 +262,10 @@ async function main() {
   }
   const canonicalCount = index.size
 
-  // ── 第二遍：api.json 的档位（lab 家优先，其次 provider id 字典序）──
+  // ── 第二遍：api.json 的档位与价格（lab 家优先，其次 provider id 字典序）──
   const providers = Object.entries(api ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   const picked = new Map()
+  const pickedCosts = new Map()
   for (const [providerId, provider] of providers) {
     for (const entry of Object.values(provider?.models ?? {})) {
       const canonical = typeof entry?.canonical_model_id === 'string' && entry.canonical_model_id
@@ -135,23 +273,36 @@ async function main() {
         : entry?.id
       const key = keyOf(canonical)
       if (!key) continue
-      const levels = levelsOf(entry)
-      if (!levels) continue
       const isLab = labOf(canonical) === providerId
-      const previous = picked.get(key)
-      // 优先实验室自述的那条；两条都不是 lab 时按 provider 名序取第一条（稳定）。
-      // lab 只声明 toggle、别的家声明了 effort 时**取那家的** —— 我们转发的是这些
-      // 中转通道，它们能收命名档位时就有档位可绑（网关侧还会按家归一/回退）。
-      if (previous?.isLab) continue
-      if (previous && !isLab) continue
-      if (previous && isLab && !previous.isLab) collisions.push(key)
-      picked.set(key, { ...levels, isLab, providerId })
+      const levels = levelsOf(entry)
+      if (levels) {
+        const previous = picked.get(key)
+        // 优先实验室自述的那条；两条都不是 lab 时按 provider 名序取第一条（稳定）。
+        // lab 只声明 toggle、别的家声明了 effort 时**取那家的** —— 我们转发的是这些
+        // 中转通道，它们能收命名档位时就有档位可绑（网关侧还会按家归一/回退）。
+        if (!previous?.isLab && (!previous || isLab)) {
+          if (previous && isLab && !previous.isLab) collisions.push(key)
+          picked.set(key, { ...levels, isLab, providerId })
+        }
+      }
+      const cost = costOf(entry, canonical || key)
+      if (cost) {
+        const prevCost = pickedCosts.get(key)
+        if (!prevCost?.isLab && (!prevCost || isLab)) {
+          pickedCosts.set(key, { cost, isLab })
+        }
+      }
     }
   }
   for (const [key, value] of picked) {
     const record = index.get(key)
     if (!record) continue // 档位有、canonical 条目没有（生图/下架等）：不收录
     record.levels = value.levels
+  }
+  for (const [key, value] of pickedCosts) {
+    const record = index.get(key)
+    if (!record) continue
+    record.cost = value.cost
   }
 
   // ── 输出：键排序（同一份数据两次生成逐字节相同，便于 diff 与核对）──

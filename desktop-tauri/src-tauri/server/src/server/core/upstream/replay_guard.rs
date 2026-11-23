@@ -30,8 +30,11 @@ pub(crate) struct ReplayGuard {
 
 struct State {
     blocked: bool,
+    permanent_block: bool,
     last_generation: u64,
     active_generation: Option<u64>,
+    frozen_generation: Option<u64>,
+    rejection_verified_generation: Option<u64>,
 }
 
 impl ReplayGuard {
@@ -40,8 +43,11 @@ impl ReplayGuard {
         Self {
             state: Mutex::new(State {
                 blocked: false,
+                permanent_block: false,
                 last_generation: 0,
                 active_generation: None,
+                frozen_generation: None,
+                rejection_verified_generation: None,
             }),
         }
     }
@@ -50,7 +56,7 @@ impl ReplayGuard {
     /// 安全锁异常一律按已禁止处理，与可容忍丢失的用量统计锁不同。
     pub(crate) fn blocked(&self) -> bool {
         match self.lock() {
-            Ok(state) => state.blocked,
+            Ok(state) => state.blocked || state.permanent_block,
             Err(_) => true,
         }
     }
@@ -59,7 +65,7 @@ impl ReplayGuard {
     /// 调用所有者必须先 close/drop，下一轮才能取得新的、不可复用的代次。
     pub(crate) fn open_call(self: &Arc<Self>) -> Result<CallLease, ReplayError> {
         let mut state = self.lock()?;
-        if state.blocked {
+        if state.blocked || state.permanent_block {
             return Err(ReplayError::Blocked);
         }
         if state.active_generation.is_some() {
@@ -67,11 +73,14 @@ impl ReplayGuard {
         }
         let Some(generation) = state.last_generation.checked_add(1) else {
             state.blocked = true;
+            state.permanent_block = true;
             state.active_generation = None;
             return Err(ReplayError::Unavailable);
         };
         state.last_generation = generation;
         state.active_generation = Some(generation);
+        state.frozen_generation = None;
+        state.rejection_verified_generation = None;
         Ok(CallLease { request: Arc::clone(self), generation })
     }
 
@@ -80,7 +89,17 @@ impl ReplayGuard {
             if state.active_generation == Some(generation) {
                 state.active_generation = None;
             }
-            // 无论是否已进入 Preparing，都不改 blocked，也不回退代次。
+            if state.frozen_generation == Some(generation) {
+                // 仅在宿主 HTTP 栈亲眼收到「未执行即拒绝」的状态码且无其他不安全事件时放行下一轮尝试；
+                // 否则保持永久禁止重放，不从插件侧恢复发送资格。
+                if !state.permanent_block && state.rejection_verified_generation == Some(generation) {
+                    state.blocked = false;
+                } else {
+                    state.permanent_block = true;
+                }
+                state.frozen_generation = None;
+                state.rejection_verified_generation = None;
+            }
         }
     }
 
@@ -90,7 +109,9 @@ impl ReplayGuard {
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();
                 state.blocked = true;
+                state.permanent_block = true;
                 state.active_generation = None;
+                state.rejection_verified_generation = None;
                 // 不清除中毒标记，不把可能不完整的状态重新当成有效权限。
                 Err(ReplayError::Unavailable)
             }
@@ -143,10 +164,39 @@ impl PreparationRef {
     pub(crate) fn freeze(&self) -> Result<(), ReplayError> {
         let mut state = self.request.lock()?;
         // 必须先核对代次，不能因为 blocked 已为 true 就放行被撤销的旧引用。
-        if state.active_generation != Some(self.generation) {
+        if state.active_generation != Some(self.generation) || state.permanent_block {
             return Err(ReplayError::Revoked);
         }
+        if state.frozen_generation == Some(self.generation) {
+            // 同一代次里重复冻结会锁死重放保护（但同代消费票重检不该用 freeze 重复触发）。
+            state.blocked = true;
+            return Ok(());
+        }
         state.blocked = true;
+        state.frozen_generation = Some(self.generation);
+        state.rejection_verified_generation = None;
         Ok(())
+    }
+
+    /// 仅供宿主 HTTP 层调用：当单次出站明确收到「未开始流、未受理任务」的 HTTP 拒绝状态码时标记，
+    /// 允许本轮租约撤销后释放跨账号/重试资格。
+    pub(crate) fn confirm_unsubmitted_http_rejection(&self) {
+        if let Ok(mut state) = self.request.lock() {
+            if !state.permanent_block
+                && state.active_generation == Some(self.generation)
+                && state.frozen_generation == Some(self.generation)
+            {
+                state.rejection_verified_generation = Some(self.generation);
+            }
+        }
+    }
+
+    /// 永久锁死当前请求的重放资格（收到 2xx、流已开始、或发生结果未确认的网络异常）。
+    pub(crate) fn lock_permanent_replay_block(&self) {
+        if let Ok(mut state) = self.request.lock() {
+            state.blocked = true;
+            state.permanent_block = true;
+            state.rejection_verified_generation = None;
+        }
     }
 }

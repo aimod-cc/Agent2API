@@ -87,6 +87,10 @@ pub(super) struct UsageAccum {
     pub token_details_requests: i64,
     #[serde(rename = "lastUsedAt", default)]
     pub last_used_at: Option<i64>,
+    #[serde(rename = "costUsd", default)]
+    pub cost_usd: f64,
+    #[serde(rename = "unpricedRequests", default)]
+    pub unpriced_requests: i64,
 }
 
 impl UsageAccum {
@@ -99,6 +103,8 @@ impl UsageAccum {
         self.cache_read_tokens += other.cache_read_tokens;
         self.token_details_requests += other.token_details_requests;
         self.last_used_at = self.last_used_at.max(other.last_used_at);
+        self.cost_usd += other.cost_usd;
+        self.unpriced_requests += other.unpriced_requests;
     }
 }
 

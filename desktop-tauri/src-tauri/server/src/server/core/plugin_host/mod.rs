@@ -33,6 +33,7 @@ mod bootstrap;
 mod callbacks;
 pub mod catalog;
 mod compatibility;
+pub(crate) mod error_rules;
 mod errors;
 mod gemini_signatures;
 mod install;
@@ -105,15 +106,7 @@ pub fn host_target() -> String {
 /// provider 摘要（一次 `/api/session` 调一次、只对「有账号但没在跑」的家
 /// 问），量级可以忽略；真要优化再加缓存，别在这里提前做。
 pub fn provider_label(id: &str) -> Option<String> {
-    for pack in install::list_packs() {
-        if !pack.enabled {
-            continue;
-        }
-        if let Some(found) = pack.providers.iter().find(|item| item.id == id) {
-            return Some(found.label.clone());
-        }
-    }
-    script::registered_label(id)
+    pack_view::provider_label(id).or_else(|| script::registered_label(id))
 }
 
 /// 插件目录的展示路径（界面显示「装到哪儿了」用）。
@@ -159,19 +152,22 @@ use runtime::provider_info;
 /// 一屏「读取失败」。改为按这里的申报渲染：没装插件 → 空表 → 不画面板。
 ///
 /// 宿主没起（没装包 / 崩溃中）时返回空表，与「一个面板都没有」同义。
-pub fn admin_panels() -> Vec<proto::AdminPanel> {
-    let providers = runtime::provider_infos();
+fn collect_admin_panels(providers: &[proto::ProviderInfo]) -> Vec<proto::AdminPanel> {
     let mut panels: Vec<proto::AdminPanel> = Vec::new();
     for info in providers {
-        for panel in info.admin_panels {
+        for panel in &info.admin_panels {
             // `Unknown` 是「新插件配旧网关」的降级位，界面不认识它，
             // 别让它出现在清单里
-            if panel != proto::AdminPanel::Unknown && !panels.contains(&panel) {
-                panels.push(panel);
+            if *panel != proto::AdminPanel::Unknown && !panels.contains(panel) {
+                panels.push(panel.clone());
             }
         }
     }
     panels
+}
+
+pub fn admin_panels() -> Vec<proto::AdminPanel> {
+    collect_admin_panels(&runtime::provider_infos())
 }
 
 /// 某一家是否申报了某个管理面板（面板要按 provider 定位时用）。
@@ -226,18 +222,52 @@ pub fn has_campaign_rewards(provider: &str) -> bool {
 ///
 /// 只收申报过的家 —— 旧插件不申报时不在表里，调用方走内置兜底
 /// （`Capabilities::checkin`），升级因此是渐进的。
-pub fn checkin_features() -> serde_json::Map<String, serde_json::Value> {
+fn collect_checkin_features(providers: &[proto::ProviderInfo]) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
-    let providers = runtime::provider_infos();
     for info in providers {
-        let Some(checkin) = info.checkin else {
+        let Some(checkin) = &info.checkin else {
             continue;
         };
-        if let Ok(value) = serde_json::to_value(&checkin) {
+        if let Ok(value) = serde_json::to_value(checkin) {
             map.insert(info.id.as_str().to_string(), value);
         }
     }
     map
+}
+
+pub fn checkin_features() -> serde_json::Map<String, serde_json::Value> {
+    collect_checkin_features(&runtime::provider_infos())
+}
+
+/// 签到中心单次构建所需的插件申报快照（只锁并读取一次已加载提供商信息）。
+pub struct CheckinProviderMetadata {
+    pub admin_panels: Vec<proto::AdminPanel>,
+    pub checkin_features: serde_json::Map<String, serde_json::Value>,
+    pub checkin_by_provider: HashMap<String, proto::CheckinInfo>,
+    pub campaign_providers: std::collections::HashSet<String>,
+}
+
+pub fn checkin_provider_metadata() -> CheckinProviderMetadata {
+    let providers = runtime::provider_infos();
+    let admin_panels = collect_admin_panels(&providers);
+    let checkin_features = collect_checkin_features(&providers);
+    let mut checkin_by_provider = HashMap::new();
+    let mut campaign_providers = std::collections::HashSet::new();
+    for info in providers {
+        let id = info.id.as_str().to_string();
+        if let Some(checkin) = info.checkin {
+            if info.capabilities.claims && !checkin.onboarding && !checkin.plans {
+                campaign_providers.insert(id.clone());
+            }
+            checkin_by_provider.insert(id, checkin);
+        }
+    }
+    CheckinProviderMetadata {
+        admin_panels,
+        checkin_features,
+        checkin_by_provider,
+        campaign_providers,
+    }
 }
 
 /// 这次写失败是不是「帧太大」（issue #379）。
@@ -314,6 +344,7 @@ pub struct Host {
     /// 已加载的 provider（`init` 之后填）。
     providers: StdMutex<Vec<proto::ProviderInfo>>,
     provider_settings: StdMutex<std::collections::BTreeMap<String, provider_settings::Schema>>,
+    error_rules: StdMutex<std::collections::BTreeMap<String, crate::server::config::error_policy::DeclaredErrorPolicy>>,
     /// 回调处理器（网关侧实现，见 [`GatewayCallbacks`]）。
     callbacks: Arc<dyn GatewayCallbacks>,
 }
@@ -399,6 +430,7 @@ impl Host {
             last_error: StdMutex::new(None),
             providers: StdMutex::new(Vec::new()),
             provider_settings: StdMutex::new(std::collections::BTreeMap::new()),
+            error_rules: StdMutex::new(std::collections::BTreeMap::new()),
             callbacks,
         }
     }

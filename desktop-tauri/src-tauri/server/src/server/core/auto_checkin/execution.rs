@@ -201,6 +201,11 @@ impl AutoCheckin {
                 Some(summary)
             }
             Err(error) => {
+                crate::server::core::notifications::notify_checkin_failure(
+                    source,
+                    reason,
+                    std::slice::from_ref(&error.message),
+                );
                 // 失败也写 lastResult（failed 里放错误文案），与 Node 的 catch 分支一致
                 let failure = json!({
                     "at": logging::now_ms(),

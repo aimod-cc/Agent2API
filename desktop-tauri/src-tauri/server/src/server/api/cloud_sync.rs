@@ -206,6 +206,7 @@ fn parse_save_input(payload: &Value) -> Result<settings::SaveInput, String> {
         s3_access_key_id: text("s3AccessKeyId"),
         s3_secret_access_key: text("s3SecretAccessKey"),
         s3_endpoint: text("s3Endpoint"),
+        s3_url_style: text("s3UrlStyle"),
         s3_user_agent: text("s3UserAgent"),
         sync_password: text("syncPassword"),
         enabled: flag("enabled"),

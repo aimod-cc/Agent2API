@@ -11,19 +11,21 @@ import type { LimiterCondition, LimiterGroup } from './accounts-limiter-types'
 import { conditionText, expressionText, groupsOf, readingText, statesOf } from './accounts-limiter-model'
 import { blankCondition, LimiterConditionDialog } from './accounts-limiter-condition'
 
-export function LimiterSection({ account, draft, onChange, allowBalance = true }: {
+export function LimiterSection({ account, provider, draft, onChange, allowBalance = true }: {
   account?: AccountRecord
+  provider?: string
   draft: LimiterGroup[]
   onChange: (next: LimiterGroup[]) => void
   allowBalance?: boolean
 }) {
   const [editor, setEditor] = React.useState<{ group: number; condition: number; value: LimiterCondition } | null>(null)
   const [loading, setLoading] = React.useState(false)
-  React.useEffect(() => { void syncBalancesSnapshot() }, [account?.id])
+  const providerId = account ? providerOf(account) : String(provider || '')
+  React.useEffect(() => { void syncBalancesSnapshot() }, [account?.id, providerId])
   const updateGroup = (index: number, patch: Partial<LimiterGroup>) => {
     onChange(draft.map((group, i) => i === index ? { ...group, ...patch } : group))
   }
-  const newCondition = (): LimiterCondition => providerOf(account) === 'codearts'
+  const newCondition = (): LimiterCondition => providerId === 'codearts'
     ? { join: 'or', sourceId: 'account', models: [], metric: 'remaining', comparison: 'lt', threshold: 1 }
     : blankCondition()
   const addGroup = () => setEditor({ group: -1, condition: -1, value: newCondition() })
@@ -78,7 +80,7 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
             <SelectContent><SelectItem value='and'>{t('与')}</SelectItem><SelectItem value='or'>{t('或')}</SelectItem></SelectContent>
           </Select> : <span className='text-xs text-muted-foreground'>{t('当')}</span>}
           <div className='min-w-0 flex-1 text-xs'>
-            <div className='break-words'>{conditionText(condition, account)}</div>
+            <div className='break-words'>{conditionText(condition, account, providerId)}</div>
             {state ? <div className='text-muted-foreground mt-1'>{t('当前：{value}', { value: readingText(state.conditions[ci], condition, account) })}</div> : null}
           </div>
           <Button variant='ghost' size='xs' onClick={() => setEditor({ group: index, condition: ci, value: condition })}>{t('编辑')}</Button>
@@ -98,11 +100,13 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
             <SelectContent><SelectItem value='models'>{t('命中条件的模型')}</SelectItem><SelectItem value='account'>{t('整个账号')}</SelectItem></SelectContent>
           </Select> : null}
         </FieldGroup>
-        <p className='detail break-words acct-limiter-expression'>{expressionText(group.conditions, account)}</p>
+        <p className='detail break-words acct-limiter-expression'>{expressionText(group.conditions, account, providerId)}</p>
       </div>
     })}
-    {!account ? <p className='detail'>{t('跨账号批量配置仅支持通用条件；套餐实例不能直接复制到其他账号。')}</p> : null}
-    {editor ? <LimiterConditionDialog key={`${editor.group}:${editor.condition}`} account={account}
+    {!account ? <p className='detail'>{providerId
+      ? t('新建账号时可先配置通用余额或本地用量条件；创建并查出套餐后可在账号设置中按套餐细化。')
+      : t('跨账号批量配置仅支持通用条件；套餐实例不能直接复制到其他账号。')}</p> : null}
+    {editor ? <LimiterConditionDialog key={`${editor.group}:${editor.condition}`} account={account} provider={providerId}
       value={editor.value} allowBalance={allowBalance} onSave={saveCondition} onClose={() => setEditor(null)} /> : null}
   </div>
 }

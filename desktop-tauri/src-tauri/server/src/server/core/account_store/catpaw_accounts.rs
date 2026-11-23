@@ -246,9 +246,10 @@ impl AccountStore {
         self.with_conn(&_guard, |conn| {
             crate::server::core::account_store::sql::update_in_place(conn, &record)
         })?;
-        crate::server::logging::log(
+        crate::server::logging::log_with_level(
             "[Accounts]",
             &format!("✏️  CatPaw 账号已更新: {name}（{}）", changes.join("，")),
+            "info",
         );
         Ok(changes)
     }

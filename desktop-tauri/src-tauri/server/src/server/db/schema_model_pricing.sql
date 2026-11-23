@@ -1,0 +1,5 @@
+ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN cost_usd REAL;
+ALTER TABLE request_daily ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE request_daily ADD COLUMN unpriced_requests INTEGER NOT NULL DEFAULT 0;

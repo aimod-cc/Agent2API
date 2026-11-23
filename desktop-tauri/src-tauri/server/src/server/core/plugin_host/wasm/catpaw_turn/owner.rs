@@ -141,7 +141,20 @@ impl Owner {
         let round_request = network::prepare(self.cleanup.client().ok_or_else(error::unavailable)?, self.cleanup.account(), network::Route::Round, &self.input.round)?;
         // 构造先于原Call/原行最终门，门内仅freeze与CAS，无锁内网络。
         source::submit(&self.source, self.cleanup.account(), record).await?;
-        let round = network::short(self.cleanup.client().ok_or_else(error::unknown)?, round_request, network::Route::Round, &record.ids.conversation).await?;
+        let round = match network::short(self.cleanup.client().ok_or_else(error::unknown)?, round_request, network::Route::Round, &record.ids.conversation).await {
+            Ok(round) => {
+                self.source.lock_permanent_replay();
+                round
+            }
+            Err(err) => {
+                if err.code.as_deref() == Some("catpaw_turn_upstream_rejected") {
+                    self.source.confirm_unsubmitted_rejection();
+                } else {
+                    self.source.lock_permanent_replay();
+                }
+                return Err(err);
+            }
+        };
         // 原HTTP明确受理产生回执；保存到封闭清理Owner先于任何后续可失败记录。
         self.cleanup.accept_round(round);
         record.round_accepted(&self.receipt)?;

@@ -14,6 +14,7 @@ export type AccountsBodyProps = {
   collapsed: ReadonlySet<string>
   columns: number
   continuous: boolean
+  loading?: boolean
   total: number
   scrollRef: React.RefObject<HTMLDivElement | null>
   loadMore: () => Promise<void>
@@ -26,7 +27,7 @@ type Item = { key: string; group: AccountGroup; account?: AccountRecord; rank?: 
 type VisibleItem = { key: string | number | bigint; index: number; start: number; end: number; size: number }
 
 export function AccountsListBody(props: AccountsBodyProps) {
-  const { groups, accounts, collapsed, columns, continuous, total, scrollRef, loadMore, renderRow, groupLocked, groupLockTitle } = props
+  const { groups, accounts, collapsed, columns, continuous, loading = false, total, scrollRef, loadMore, renderRow, groupLocked, groupLockTitle } = props
   const byProvider = React.useMemo(() => {
     const map = new Map<string, AccountRecord[]>()
     for (const account of accounts) {
@@ -130,8 +131,8 @@ export function AccountsListBody(props: AccountsBodyProps) {
     virtualizer.measure()
   }, [groups.map(group => group.provider).join('|'), collapsed, columns])
   React.useEffect(() => {
-    if (continuous && accounts.length < total && (!virtual || !last || last.index >= items.length - 12)) void loadMore()
-  }, [continuous, accounts.length, total, virtual, last?.index, items.length, loadMore])
+    if (!loading && continuous && accounts.length < total && (!virtual || !last || last.index >= items.length - 12)) void loadMore()
+  }, [loading, continuous, accounts.length, total, virtual, last?.index, items.length, loadMore])
   React.useLayoutEffect(() => {
     const ids: string[] = []
     for (const item of visible) {

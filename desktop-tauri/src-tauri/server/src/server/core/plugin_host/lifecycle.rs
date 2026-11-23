@@ -210,12 +210,13 @@ impl Host {
             .and_then(|result| result.map_err(|error| format!("插件握手失败：{}", error.message)))
             .and_then(|value| {
                 let settings = super::provider_settings::parse(self, &value)?;
+                let error_rules = super::error_rules::parse(&value);
                 let providers = serde_json::from_value::<Vec<proto::ProviderInfo>>(value)
                     .map_err(|error| format!("插件返回的 provider 列表无法解析：{error}"))?;
-                Ok((providers, settings))
+                Ok((providers, settings, error_rules))
             });
         match result {
-            Ok((providers, settings)) => {
+            Ok((providers, settings, error_rules)) => {
                 let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
                 if !self.is_current_run(&run) || run.failed.load(Ordering::Acquire)
                     || !self.running.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire)
@@ -224,6 +225,7 @@ impl Host {
                 }
                 if let Ok(mut current) = self.providers.lock() { *current = providers.clone(); }
                 if let Ok(mut current) = self.provider_settings.lock() { *current = settings; }
+                if let Ok(mut current) = self.error_rules.lock() { *current = error_rules; }
                 if let Ok(mut crashes) = self.crashes.lock() { *crashes = 0; }
                 if let Ok(mut retry) = self.retry_after.lock() { *retry = None; }
                 let previous = self.last_error.lock().ok().and_then(|mut last| last.take());

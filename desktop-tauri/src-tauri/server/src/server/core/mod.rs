@@ -9,7 +9,7 @@
 //!   auth_http.rs         上游请求发送与解包、鉴权错误   （workbuddy-auth.mjs 的 api/unwrap）
 //!   auth.rs              会话、getStatus、鉴权头、刷新（workbuddy-auth.mjs 会话部分）
 //!   login.rs             无头登录与登录任务表          （auth.mjs 登录部分 + server.mjs 任务表）
-//!   clash.rs             Clash Verge 配置读取与快照缓存（workbuddy-proxy.mjs 的 Clash 部分）
+//!   clash.rs             EasyClash 配置读取与快照缓存
 //!   proxies.rs           账号级代理归一/解析/描述       （workbuddy-proxy.mjs 的代理部分）
 //!   egress.rs            出网点（按出口缓存 Client）+ 连通性（workbuddy-proxy.mjs 的 dispatch 部分）
 //!   billing/             积分 / 签到 / 运营活动         （workbuddy-billing.mjs）
@@ -107,8 +107,11 @@ pub mod limiter;
 pub mod login;
 pub mod maintenance;
 pub mod model_meta;
+pub mod model_pricing;
 pub mod model_rules;
 pub mod models;
+pub mod notifications;
+pub mod panel_oauth;
 /// 提供商插件宿主：子进程监管 + RPC 客户端 + 包安装。
 ///
 /// 这是「提供商实现外置到用户安装的插件包」那条路在网关侧的入口，见模块头。

@@ -25,7 +25,21 @@ pub struct Client {
     pub identity: Identity,
     #[serde(default)]
     pub hot_switch: Option<HotSwitch>,
+    #[serde(default)]
+    pub proxy_launch: Option<ProxyLaunch>,
     pub resources: Vec<Resource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyLaunch {
+    pub kind: ProxyLaunchKind,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyLaunchKind {
+    ChromiumEnv,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -148,10 +148,18 @@ impl Context {
             material.url = url;
             let Material { params, bytes, headers, url } = material;
             let expected_bytes = bytes.clone();
+            let prep = ticket.binding.preparation.clone();
             // 原Download接管整个Frozen包装与实际发送；此后不以外层select丢弃原等待。
             let result = script::open_frozen_once(&params, bytes, frozen, execution, deadline, headers_deadline, move |request| {
                 ticket.consume(request, &url, &headers, &expected_bytes)
-            }).await?;
+            }).await;
+            match &result {
+                Ok((value, _)) if value["status"].as_u64().is_some_and(|status| crate::server::core::plugin_host::wasm::conversation::ordinary_http::is_safe_http_rejection(status as u16)) => {
+                    prep.confirm_unsubmitted_http_rejection();
+                }
+                _ => prep.lock_permanent_replay_block(),
+            }
+            let result = result?;
             Ok(Some(result))
         }
     }

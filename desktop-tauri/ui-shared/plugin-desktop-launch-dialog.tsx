@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Alert, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner } from '@ui'
+import { Alert, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, Switch } from '@ui'
 import { launchMessage, launchPending, launchPhaseText, readLaunchResult, readLaunchSettings, type LaunchClient, type LaunchRequest, type LaunchResult, type LaunchSelection, type LaunchSettings, type LaunchTranslate } from './plugin-desktop-launch'
 
 const BASE = '/api/plugins/desktop-launch'
@@ -31,6 +31,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   const generation = React.useRef(0)
   const session = React.useRef(managementGeneration)
   const resultRef = React.useRef<LaunchResult | null>(null)
+  const useProxyRef = React.useRef<boolean | undefined>(undefined)
   const pending = React.useRef(false)
   const [restoreConfirm, setRestoreConfirm] = React.useState(false)
   const [restartConfirm, setRestartConfirm] = React.useState(false)
@@ -92,18 +93,27 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
     }
   }
 
-  async function load() {
-    setSettings(null)
+  async function cancelPending(clearView: boolean) {
     const previous = resultRef.current
     if (previous?.phase === 'awaiting_confirmation') {
       await request('POST', `${BASE}/cancel`, { intent: previous.intent }, { retry: 'never' })
     }
-    setResult(null)
+    if (clearView) setResult(null)
     resultRef.current = null
     sent.current.clear()
     setUnknown(false)
     setRestoreConfirm(false)
     setRestartConfirm(false)
+  }
+
+  async function prepareLaunch(nextUseProxy = useProxyRef.current) {
+    const payload = nextUseProxy === undefined ? selection : { ...selection, useProxy: nextUseProxy }
+    accept(await request('POST', `${BASE}/prepare`, payload, { retry: 'never' }))
+  }
+
+  async function load() {
+    setSettings(null)
+    await cancelPending(true)
     setShowPath(false)
     if (recoveryBackup) {
       accept(await request('POST', `${BASE}/recovery-prepare`, { backup: recoveryBackup }, { retry: 'never' }))
@@ -115,7 +125,21 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
     setPath(value.path || value.detected || '')
     setShowPath(!value.detected || !!value.error)
     if (!value.detected || value.error) return
-    accept(await request('POST', `${BASE}/prepare`, selection, { retry: 'never' }))
+    await prepareLaunch()
+  }
+
+  async function toggleProxy(nextEnabled: boolean) {
+    if (!result || result.phase !== 'awaiting_confirmation' || locked) return
+    useProxyRef.current = nextEnabled
+    await action(async () => {
+      try {
+        await cancelPending(false)
+        await prepareLaunch(nextEnabled)
+      } catch (error) {
+        if (alive.current) setResult(null)
+        throw error
+      }
+    })
   }
 
   React.useEffect(() => { if (client) void action(load) }, [client])
@@ -196,7 +220,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
       <DialogHeader className='py-4'><DialogTitle>{recoveryBackup ? t('恢复原凭证') : result?.hotSwitch ? t('切换客户端账号') : t('启动客户端')}</DialogTitle></DialogHeader>
       <DialogBody className='gap-4 py-4'>
         <DialogDescription>{recoveryBackup ? t('关闭客户端并恢复上次切换前的登录凭证') : result?.hotSwitch ? t('在线切换当前客户端的登录账号，无需重启') : t('将本机客户端切换到此账号后启动')}</DialogDescription>
-        <dl className='grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm'>
+        <dl className='grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm'>
           <dt className='text-muted-foreground'>{t('账号')}</dt><dd className='break-words'>{name}</dd>
           <dt className='text-muted-foreground'>{t('客户端')}</dt><dd>
             {clients.length > 1 && !locked && !result?.committed ? <Select value={client} onValueChange={value => {
@@ -206,6 +230,18 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
               <SelectContent>{clients.map(item => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}</SelectContent>
             </Select> : activeClient}
           </dd>
+          {result?.proxy.supported && result.proxy.configured && !recoveryBackup ? <>
+            <dt className='self-center text-muted-foreground'>{t('账号代理')}</dt>
+            <dd className='flex min-w-0 items-center justify-between gap-3'>
+              <span className='flex min-w-0 items-center gap-1.5'>
+                <span className='truncate' title={result.proxy.address ? `${result.proxy.label} (${result.proxy.address})` : result.proxy.label}>{launchMessage(result.proxy.label, t)}</span>
+                {result.proxy.address && !result.proxy.label.includes(result.proxy.address)
+                  ? <span className='shrink-0 text-xs text-muted-foreground'>{result.proxy.address}</span> : null}
+              </span>
+              <Switch checked={result.proxy.enabled} disabled={locked || result.phase !== 'awaiting_confirmation'}
+                aria-label={t('使用账号代理启动')} onCheckedChange={checked => void toggleProxy(checked === true)} />
+            </dd>
+          </> : null}
         </dl>
         {settings && (showPath || !result) ? <div className='flex flex-col gap-2'>
           <Label htmlFor={pathInput}>{t('程序位置')}</Label>
@@ -240,6 +276,8 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
               : result.hotSwitch
                 ? t('确认后将备份并替换上述登录凭证，仅重载后台服务，已打开的窗口与内容保持不变')
                 : t('确认后将备份并替换上述登录凭证；不会改变反代优先级')}</p>
+            {result.proxy.enabled && !result.proxy.available && result.proxy.error && !recoveryBackup
+              ? <Alert variant='warning'>{launchMessage(result.proxy.error, t)}</Alert> : null}
             {result.requiresRestart && !result.hotSwitch && !recoveryBackup ? <Alert variant='warning'>{t('客户端正在运行，继续会关闭并重启，请先保存未完成的内容')}</Alert> : null}
             {result.pendingBackup && !recoveryBackup ? <Alert variant='warning'>{t('上次切换未完整结束，请先恢复原凭证')}</Alert> : null}
           </> : <div role='status' className='flex flex-col gap-2'>
@@ -270,7 +308,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
         {restartConfirm && !locked && !unknown ? <Button onClick={() => { setRestartConfirm(false); void execute('retry-start') }}>
           {t('确认关闭并重启')}</Button> : null}
         {result?.phase === 'awaiting_confirmation' && !result.pendingBackup && !showPath && !restoreConfirm && !restartConfirm ? <Button
-          disabled={locked || unknown || sent.current.has(`confirm:${result.intent}`) || result.remainingMs === 0}
+          disabled={locked || unknown || sent.current.has(`confirm:${result.intent}`) || result.remainingMs === 0 || (result.proxy.enabled && !result.proxy.available)}
           onClick={() => void execute('confirm')}>{result.hotSwitch ? t('立即切换') : result.requiresRestart ? t('切换并重启') : t('切换并启动')}</Button> : null}
       </DialogFooter>
     </DialogContent>

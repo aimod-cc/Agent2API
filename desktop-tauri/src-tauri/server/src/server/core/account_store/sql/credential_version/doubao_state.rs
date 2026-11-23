@@ -138,6 +138,18 @@ impl RetainedValues {
         Self::prepared(snapshot, Memory::from_official(&snapshot.reserved, fact)?)
     }
 
+    pub(in crate::server::core::account_store) fn for_clear(snapshot: &Snapshot) -> Result<Self, StateError> {
+        let Some(memory) = &snapshot.memory else {
+            return Err(state_error(StateFailure::CandidateChanged));
+        };
+        if !snapshot.present || memory.official.is_some() || memory.day != snapshot.reserved.day {
+            return Err(state_error(StateFailure::CandidateChanged));
+        }
+        let mut retained = Self::for_read();
+        retained.output.reserve_write();
+        Ok(retained)
+    }
+
     fn prepared(snapshot: &Snapshot, memory: Memory) -> Result<Self, StateError> {
         let revision = snapshot.revision.checked_add(1).ok_or_else(|| state_error(StateFailure::RevisionExhausted))?;
         let mut retained = Self::for_read();
@@ -196,7 +208,14 @@ pub(in crate::server::core::account_store) fn save_official(
     write(conn, key, stamp, snapshot, retained, attempt, WriteKind::Official(fact))
 }
 
-enum WriteKind<'a> { Unknown, Official(&'a OfficialDailyFact) }
+pub(in crate::server::core::account_store) fn clear(
+    conn: &mut Connection, key: &[u8; 32], stamp: &RowStamp, snapshot: &Snapshot,
+    retained: &mut RetainedValues, attempt: &CommitAttempt,
+) -> Outcome<u64> {
+    write(conn, key, stamp, snapshot, retained, attempt, WriteKind::Clear)
+}
+
+enum WriteKind<'a> { Unknown, Official(&'a OfficialDailyFact), Clear }
 
 fn write(
     conn: &mut Connection, key: &[u8; 32], stamp: &RowStamp, snapshot: &Snapshot,
@@ -215,34 +234,62 @@ fn write(
             || fixed.revision != snapshot.revision || fixed.memory != snapshot.memory {
             return Err(state_error(StateFailure::StateChanged));
         }
-        let desired = retained.desired.as_ref().ok_or_else(|| state_error(StateFailure::CandidateChanged))?;
-        match kind {
-            WriteKind::Unknown => {
-                if fixed.memory.as_ref().is_some_and(|memory| memory.day == snapshot.reserved.day && memory.official.is_some())
-                    || desired.official.is_some() { return Err(state_error(StateFailure::OfficialAlreadyConfirmed)); }
-                if desired != &snapshot.reserved { return Err(state_error(StateFailure::CandidateChanged)); }
-            }
-            WriteKind::Official(fact) => {
-                if !desired.matches_official(fact) || desired.receipt_id != snapshot.reserved.receipt_id
-                    || desired.snapshot_at != snapshot.reserved.snapshot_at || desired.day != snapshot.reserved.day {
+        let revision = match kind {
+            WriteKind::Clear => {
+                let expected = snapshot.reserved.local_copy();
+                if !fixed.present
+                    || fixed.memory.as_ref() != Some(&expected)
+                    || expected.day != snapshot.reserved.day
+                    || expected.official.is_some()
+                {
                     return Err(state_error(StateFailure::CandidateChanged));
                 }
+                let raw = &mut retained.raw.value;
+                record::clear_fixed(raw, &mut retained.displaced, &mut retained.displaced_container)?;
+                record::update_raw(&tx, key, stamp, raw, &mut retained.output)?;
+                record::load_raw_into(&tx, key, stamp, &mut retained.written)?;
+                if &retained.written.value != raw { return Err(Error::Storage(StorageFailure::Write).into()); }
+                retained.written.verify(&tx, stamp)?;
+                retained.after = Some(record::fixed_state(&retained.written.value)?);
+                let after = retained.after.as_ref().ok_or_else(|| state_error(StateFailure::Unavailable))?;
+                if after.present || after.memory.is_some() {
+                    return Err(Error::Storage(StorageFailure::Write).into());
+                }
+                snapshot.revision
             }
-        }
-        let revision = snapshot.revision.checked_add(1).ok_or_else(|| state_error(StateFailure::RevisionExhausted))?;
-        // desired只借这个字段，其它工作槽分别借用，不能通过整个retained丢弃原快照/事实。
-        let raw = &mut retained.raw.value;
-        record::put_fixed(raw, &mut retained.entry, &mut retained.displaced, &mut retained.displaced_container)?;
-        record::update_raw(&tx, key, stamp, raw, &mut retained.output)?;
-        record::load_raw_into(&tx, key, stamp, &mut retained.written)?;
-        if &retained.written.value != raw { return Err(Error::Storage(StorageFailure::Write).into()); }
-        retained.written.verify(&tx, stamp)?;
-        retained.after = Some(record::fixed_state(&retained.written.value)?);
-        let after = retained.after.as_ref().ok_or_else(|| state_error(StateFailure::Unavailable))?;
-        if !after.present || after.schema != SCHEMA || after.revision != revision
-            || after.memory.as_ref() != Some(desired) {
-            return Err(Error::Storage(StorageFailure::Write).into());
-        }
+            WriteKind::Unknown | WriteKind::Official(_) => {
+                let desired = retained.desired.as_ref().ok_or_else(|| state_error(StateFailure::CandidateChanged))?;
+                match kind {
+                    WriteKind::Unknown => {
+                        if fixed.memory.as_ref().is_some_and(|memory| memory.day == snapshot.reserved.day && memory.official.is_some())
+                            || desired.official.is_some() { return Err(state_error(StateFailure::OfficialAlreadyConfirmed)); }
+                        if desired != &snapshot.reserved { return Err(state_error(StateFailure::CandidateChanged)); }
+                    }
+                    WriteKind::Official(fact) => {
+                        if !desired.matches_official(fact) || desired.receipt_id != snapshot.reserved.receipt_id
+                            || desired.snapshot_at != snapshot.reserved.snapshot_at || desired.day != snapshot.reserved.day {
+                            return Err(state_error(StateFailure::CandidateChanged));
+                        }
+                    }
+                    WriteKind::Clear => unreachable!(),
+                }
+                let revision = snapshot.revision.checked_add(1).ok_or_else(|| state_error(StateFailure::RevisionExhausted))?;
+                // desired只借这个字段，其它工作槽分别借用，不能通过整个retained丢弃原快照/事实。
+                let raw = &mut retained.raw.value;
+                record::put_fixed(raw, &mut retained.entry, &mut retained.displaced, &mut retained.displaced_container)?;
+                record::update_raw(&tx, key, stamp, raw, &mut retained.output)?;
+                record::load_raw_into(&tx, key, stamp, &mut retained.written)?;
+                if &retained.written.value != raw { return Err(Error::Storage(StorageFailure::Write).into()); }
+                retained.written.verify(&tx, stamp)?;
+                retained.after = Some(record::fixed_state(&retained.written.value)?);
+                let after = retained.after.as_ref().ok_or_else(|| state_error(StateFailure::Unavailable))?;
+                if !after.present || after.schema != SCHEMA || after.revision != revision
+                    || after.memory.as_ref() != Some(desired) {
+                    return Err(Error::Storage(StorageFailure::Write).into());
+                }
+                revision
+            }
+        };
         Ok(revision)
     })();
     transaction::finish(tx, result, attempt)

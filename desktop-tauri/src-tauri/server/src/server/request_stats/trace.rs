@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 use super::{entry_json, sql, RequestEntry, RequestStats};
 
 fn trace_json(entry: &RequestEntry, trace_key: String) -> Value {
-    let mut value = entry_json(entry);
+    let pricing = crate::server::core::model_pricing::settings();
+    let mut value = entry_json(entry, &pricing);
     value["traceKey"] = Value::String(trace_key);
     value
 }

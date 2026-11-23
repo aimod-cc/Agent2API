@@ -181,6 +181,7 @@
   "检查失败": "Check failed",
   "检查更新": "Check for updates",
   "检查更新与下载安装包使用所选线路；未选择代理时先直连，失败后尝试 Clash Verge 混合端口；指定代理不可用时不会自动改走直连。": "Update checks and installer downloads use the selected route. Without a proxy selection, a direct connection is tried first, followed by the Clash Verge mixed port if it fails. An unavailable specified proxy never falls back to a direct connection.",
+  "检查更新与下载安装包使用所选线路；未选择代理时先直连，失败后尝试 EasyClash 混合端口；指定代理不可用时不会自动改走直连。": "Update checks and installer downloads use the selected route. Without a proxy selection, a direct connection is tried first, followed by the EasyClash mixed port if it fails. An unavailable specified proxy never falls back to a direct connection.",
   "检查更新与下载安装包使用所选线路；未选择代理时直连，指定代理不可用时不会自动改走直连。": "Update checks and installer downloads use the selected route. With no proxy selected, connections are direct; an unavailable selected proxy will not automatically fall back to direct connections.",
   "检查更新与下载安装包走哪条线路（当前：{current}）；选择即保存。选项来自「网络代理」页；直连失败时会自动借 Clash 混合端口重试一次，选定指定代理后只走它": "Which route update checks and installer downloads use (current: {current}); your choice is saved immediately. Options come from the Network proxy page; if a direct connection fails, it automatically retries once through Clash's mixed port, and once a specific proxy is selected only that route is used",
   "检查更新失败：{error}": "Update check failed: {error}",

@@ -4,7 +4,12 @@ mod settings;
 mod travel;
 
 pub(crate) use category::Category;
-pub(crate) use travel::{configure as configure_travel, run as run_travel, state as travel_state};
+pub(crate) use travel::{
+    configure as configure_travel,
+    run as run_travel,
+    state as travel_state,
+    state_with as travel_state_with,
+};
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -97,18 +102,24 @@ fn definition(provider: &str, id: &str) -> Option<Definition> {
 
 fn current(provider: &str, task: &Definition) -> Definition { settings::current(provider, task) }
 
-pub(crate) fn snapshot() -> Value {
+fn build_snapshot(
+    checkin_only: bool,
+    records: &Result<HashMap<String, task_state::TaskState>, String>,
+) -> Value {
     let table = definitions().lock().map(|table| table.clone()).unwrap_or_default();
-    let records = task_state::read_all();
     let unavailable = if !settings::readable() {
         Some("任务配置暂不可读，请刷新状态；不会发送任务")
     } else if records.is_err() {
         Some("任务记录暂不可读，请刷新状态；不会发送任务")
     } else { None };
-    let states = records.unwrap_or_default();
+    let empty_states = HashMap::new();
+    let states = records.as_ref().unwrap_or(&empty_states);
     let mut rows: Vec<_> = table.into_iter().filter(|(provider, _)| registry::serves(provider)).flat_map(|(provider, tasks)| {
-        let states = &states;
-        tasks.into_iter().filter(|task| !task.checkin).map(move |task| {
+        let mut provider_label: Option<String> = None;
+        tasks.into_iter().filter(|task| !task.checkin && (!checkin_only || task.category.belongs_to_checkin())).map(move |task| {
+            let label = provider_label
+                .get_or_insert_with(|| crate::server::core::providers::label_of(&provider))
+                .clone();
             let task = current(&provider, &task);
             let prefix = format!("pluginTask:{provider}:{}:", task.id);
             let mut runs: Vec<_> = states.iter().filter(|(key, _)| key.starts_with(&prefix))
@@ -122,7 +133,7 @@ pub(crate) fn snapshot() -> Value {
                         "result": if interrupted { None } else { state.last_result.as_deref() } })
                 }).collect();
             runs.sort_by(|left, right| left["account"].as_str().cmp(&right["account"].as_str()));
-            json!({ "provider": provider, "providerLabel": crate::server::core::providers::label_of(&provider),
+            json!({ "provider": provider, "providerLabel": label,
                 "category": task.category, "unavailable": unavailable,
                 "operation": execution::snapshot(states.get(&execution::key(&provider, &task.id))),
                 "task": task, "runs": runs })
@@ -132,11 +143,15 @@ pub(crate) fn snapshot() -> Value {
     json!(rows)
 }
 
-pub(crate) fn checkin_snapshot() -> Value {
-    let snapshot = snapshot();
-    json!(snapshot.as_array().into_iter().flatten().filter(|row| {
-        serde_json::from_value::<Category>(row["category"].clone()).is_ok_and(Category::belongs_to_checkin)
-    }).cloned().collect::<Vec<_>>())
+pub(crate) fn snapshot() -> Value {
+    let records = task_state::read_all();
+    build_snapshot(false, &records)
+}
+
+pub(crate) fn checkin_snapshot_with(
+    records: &Result<HashMap<String, task_state::TaskState>, String>,
+) -> Value {
+    build_snapshot(true, records)
 }
 
 pub(crate) fn configure(provider: &str, id: &str, patch: &Value) -> Result<(), String> {

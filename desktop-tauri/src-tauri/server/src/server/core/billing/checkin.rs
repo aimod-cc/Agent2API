@@ -191,48 +191,16 @@ fn is_available(account: &Value) -> bool {
         .unwrap_or(true)
 }
 
-/// 账号列表快照（`store.listAccounts().accounts`）
-fn accounts_of(store: &AccountStore) -> Vec<Value> {
-    store
-        .list_accounts()
-        .get("accounts")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-/// 签到目标集合。
-///
-/// 批量（`id` 为空）：可用账号 ∩ **提供商在 `providers` 范围内** ∩ 非国际版，
-/// `skipped` = 可用总数 − 可签到数。范围由配置给出（WorkBuddy / 小浣熊 / AutoClaw
-/// 可勾选），定时签到与账号页批量签到共用同一份口径。**禁用账号照常参与** ——
-/// 签到与转发是两件事（见模块头「签到不看 enabled」）。
-///
-/// 指定 id：命中即用（**不过滤 available，也不过滤 provider**），
-/// 国际版直接报 400 —— 用户点的是谁就签谁，与「显式指定就执行」的既有语义一致；
-/// 批量路径必须过滤 available 与 provider，否则会把范围外的账号也签一遍。
-///
-/// ── 两条路径的「不满足条件」为什么语义不同（有意如此）──────────
-///   批量路径 → **静默跳过**（计入 `skipped`）：定时任务会一次扫过几十个账号，
-///     用户没在看着，为一个「国际版没有签到活动」把整轮任务报错没有意义。
-///   单账号路径 → **明确 400 + 原因**：用户显式点了某个账号的按钮，
-///     他需要知道为什么不行。静默成功或静默跳过都会让他以为签到了。
-/// 所以 `supports_checkin` 在单账号路径报错、在批量路径过滤掉 ——
-/// **不要为了「统一」把其中一处改掉**。
 pub fn resolve_checkin_targets(
     store: &AccountStore,
     providers: &[String],
     id: Option<&str>,
 ) -> Result<(Vec<Value>, usize), CheckinError> {
-    let all = accounts_of(store);
+    let snapshot = store.routing_snapshot();
     if let Some(id) = id.filter(|value| !value.is_empty()) {
-        let found: Vec<Value> = all
-            .into_iter()
-            .filter(|account| account.get("id").and_then(Value::as_str) == Some(id))
-            .collect();
-        if found.is_empty() {
+        let Some(found) = snapshot.public_by_id.get(id) else {
             return Err(CheckinError::new("账号不存在", 404));
-        }
+        };
         // 唯一的拒绝理由：上游这一站根本没有签到/活跃任务（Qoder 等的国际版）。
         // 文案与签到中心「范围外」分组那句同义 —— 两处说法不一致会让用户以为
         // 遇到的是两个不同的问题。WorkBuddy 国际版已由活跃任务分支放行。
@@ -240,8 +208,8 @@ pub fn resolve_checkin_targets(
         // 访客单独给一句：它「不支持签到」的原因与别家不同（不是这一站没接链
         // 路，而是访客本来就没有积分体系），用户看到「该账号暂不支持签到」
         // 会去翻设置找原因。文案与签到中心的范围外原因同义。
-        if !supports_checkin(&found[0]) {
-            if found[0].get("isGuest").and_then(Value::as_bool) == Some(true) {
+        if !supports_checkin(found) {
+            if found.get("isGuest").and_then(Value::as_bool) == Some(true) {
                 return Err(CheckinError::new(
                     "访客账号没有积分体系，仅登录账号可签到",
                     400,
@@ -249,14 +217,20 @@ pub fn resolve_checkin_targets(
             }
             return Err(CheckinError::new("该账号暂不支持签到或每日活跃任务", 400));
         }
-        return Ok((found, 0));
+        return Ok((vec![found.as_ref().clone()], 0));
     }
-    let available: Vec<Value> = all.into_iter().filter(is_available).collect();
+    let available: Vec<&Value> = snapshot
+        .public_accounts
+        .iter()
+        .map(std::sync::Arc::as_ref)
+        .filter(|account| is_available(account))
+        .collect();
     let total = available.len();
     let eligible: Vec<Value> = available
         .into_iter()
-        .filter(supports_checkin)
+        .filter(|account| supports_checkin(account))
         .filter(|account| matches_provider_filter(account, providers))
+        .cloned()
         .collect();
     let skipped = total - eligible.len();
     Ok((eligible, skipped))
@@ -372,16 +346,24 @@ pub async fn checkin_for(
                 .unwrap_or_else(|| json!({ "success": false, "code": -1, "msg": "活跃任务未返回领取结果" }));
             let claim_success = claim.get("success").and_then(Value::as_bool).unwrap_or(false);
             let message = claim.get("msg").and_then(Value::as_str).unwrap_or("");
+            let activity_node = activity.get("activity").cloned().unwrap_or(Value::Null);
+            let detail = crate::server::core::billing::keepalive::activity_failure_detail(&activity_node);
             if claim_success {
-                logging::log("[Accounts]", &format!("账号 {display}: 签到成功"));
+                match detail.as_deref() {
+                    Some(detail) => logging::log("[Accounts]", &format!("账号 {display}: 签到成功（保活未全过：{detail}）")),
+                    None => logging::log("[Accounts]", &format!("账号 {display}: 签到成功")),
+                }
             } else {
-                logging::log("[Accounts]", &format!("账号 {display}: WorkBuddy 国际版 {message}"));
+                match detail.as_deref() {
+                    Some(detail) if !message.contains(detail) => logging::log("[Accounts]", &format!("账号 {display}: WorkBuddy 国际版 {message}（{detail}）")),
+                    _ => logging::log("[Accounts]", &format!("账号 {display}: WorkBuddy 国际版 {message}")),
+                }
             }
             json!({
                 "id": id,
                 "name": name,
                 "claim": claim,
-                "activity": activity.get("activity").cloned().unwrap_or(Value::Null),
+                "activity": activity_node,
                 "error": Value::Null,
             })
         }
@@ -699,6 +681,24 @@ pub(crate) async fn run_checkin_selected(
         })
         .count();
     let failures: Vec<String> = results.iter().filter_map(failure_of).collect();
+    if !manual {
+        let detailed_failures: Vec<String> = targets
+            .iter()
+            .zip(results.iter())
+            .filter_map(|(account, item)| {
+                let detail = failure_of(item)?;
+                let label = crate::server::core::providers::label_of(provider_of(account));
+                Some(format!("[{label}] {detail}"))
+            })
+            .collect();
+        if !detailed_failures.is_empty() {
+            crate::server::core::notifications::notify_checkin_failure(
+                source,
+                reason,
+                &detailed_failures,
+            );
+        }
+    }
     if skipped > 0 {
         logging::log(
             "[Accounts]",

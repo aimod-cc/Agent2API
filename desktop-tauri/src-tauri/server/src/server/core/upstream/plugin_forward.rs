@@ -28,27 +28,35 @@ pub(super) async fn forward(
         if telemetry.replay_guard().blocked() { return Err(last_error.unwrap_or_else(super::replay_guard::blocked_error)); }
         let result = adapter.forward_conversation(store, account, body, headers, proxy.clone(), stream, telemetry).await;
         let Err(mut error) = result else { return result; };
-        if telemetry.replay_guard().blocked() || telemetry.response_started() { return Err(error); }
         if telemetry.is_cancelled() { return Err(super::cancellation::cancelled_error()); }
+        let blocked_or_started = telemetry.replay_guard().blocked() || telemetry.response_started();
         let status = u16::try_from(error.status_code).unwrap_or(502);
         let class = adapter.classify_conversation_error(&error);
         let detail = error_policy::detail(&error);
         let policy = adapter.error_policy_async(status, &detail).await;
         let stop = error_policy::plugin_stops(adapter.provider_id(), &policy, &class, status, &detail);
-        let decision = error_policy::decide_with(&budget.policy, adapter.provider_id(), model, &class, status, &detail,
+        let mut decision = error_policy::decide_with(&budget.policy, adapter.provider_id(), model, &class, status, &detail,
             error.conversation_class.is_none() && error.native_response.is_none(), stop);
-        error_policy::attach(&mut error, &decision);
-        error_policy::note(telemetry, &decision, None);
-        if policy.suspend_account && !account.is_empty() {
-            crate::server::core::blocking::in_place(|| store.suspend_upstream_account(account, &policy.reason));
-        } else if decision.hard_stop && !account.is_empty() {
-            if let Some(until) = policy.account_cooldown_until {
-                crate::server::core::blocking::in_place(|| store.cooldown_upstream_account(account, until, &policy.reason));
+        if let Some(until) = policy.account_cooldown_until {
+            let now = crate::server::logging::now_ms();
+            if until > now {
+                decision.reset_at = Some(decision.reset_at.unwrap_or(until).max(until));
             }
         }
-        if decision.hard_stop || policy.suspend_account { return Err(error); }
-        // 私有持久会话由上游控制续接，不在宿主里从头重复会话。
-        if adapter.is_stateful() || !adapter.forwards_response() { return Err(error); }
+        error_policy::attach(&mut error, &decision);
+        error_policy::note(telemetry, &decision, blocked_or_started.then_some("已进入不可重放状态，只记录账号状态，不重发不换号"));
+        if policy.suspend_account && !account.is_empty() {
+            crate::server::core::blocking::in_place(|| store.suspend_upstream_account(account, &policy.reason));
+        }
+        if blocked_or_started || decision.hard_stop {
+            if decision.hard_stop && !account.is_empty() {
+                if let Some(until) = policy.account_cooldown_until {
+                    crate::server::core::blocking::in_place(|| store.cooldown_upstream_account(account, until, &policy.reason));
+                }
+            }
+            return Err(error);
+        }
+        if !adapter.forwards_response() { return Err(error); }
         if decision.refreshes() {
             if refreshed || !adapter.supports_refresh() || account.is_empty() || !budget.can_wait(decision.retry_delay(0)) { return Err(error); }
             let refresh = adapter.refresh_access_token(store, account);
@@ -70,10 +78,7 @@ pub(super) async fn forward(
         let suggested = adapter.retry_decision_async(status, &detail, budget.used(), budget.total).await;
         let (delay, reason) = match suggested {
             RetryDecision::Retry { delay_ms, reason } => (decision.retry_delay(delay_ms), reason),
-            RetryDecision::Default => (decision.retry_delay(0), "按统一错误规则在原账号重发".to_string()),
-            RetryDecision::Stop { reason } => {
-                error_policy::note(telemetry, &decision, Some(&reason)); return Err(error);
-            }
+            RetryDecision::Default | RetryDecision::Stop { .. } => (decision.retry_delay(0), "按统一错误规则在原账号重发".to_string()),
         };
         if !budget.take_retry(delay) {
             error_policy::note(telemetry, &decision, Some("重发次数或累计等待已用尽，不缩短上游恢复时间"));

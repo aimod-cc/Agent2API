@@ -56,7 +56,8 @@ pub struct FlowQuery {
 fn value_at(conn: &Connection, row_id: i64) -> rusqlite::Result<Value> {
     conn.query_row(&format!("SELECT {}, row_id AS trace_key FROM requests WHERE row_id = ?1", sql::REQUEST_COLUMNS),
         params![row_id], |row| {
-            let mut value = entry_json(&sql::decode_request(row)?);
+            let pricing = crate::server::core::model_pricing::settings();
+            let mut value = entry_json(&sql::decode_request(row)?, &pricing);
             value["traceKey"] = row_id.to_string().into();
             Ok(value)
         })

@@ -1,11 +1,13 @@
 {
   "name": "agent2api",
-  "version": "3.5.0-beta.7",
+  "version": "3.5.0-beta.8",
   "description": "Agent2API - AI 路由网关与 Agent 客户端接管：统一模型接口、账号路由、网关密钥与请求报表，提供商能力通过独立插件扩展",
   "type": "module",
   "private": true,
   "scripts": {
     "prepare": "git config core.hooksPath .githooks || exit 0",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release:plugins": "node scripts/release-plugins.mjs",
     "test:rust": "node scripts/cargo-test.mjs",
     "test:rust:plugins": "node scripts/cargo-test.mjs --plugins",
     "test:rust:coverage": "node scripts/cargo-test.mjs --coverage",

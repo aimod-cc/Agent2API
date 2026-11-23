@@ -473,7 +473,7 @@ export function buildProxyPick(selection: ProxySelection): {
   if (current === PROXY_OTHER_CURRENT) {
     // 现在没有对应的可选项（出口统一走池），但仍要显示出来 —— 它们照原样
     // 转发，用户想改就在这里选一条池条目或切回直连
-    const prefix = source === 'clash' ? t('Clash 出口：') : source === 'custom' ? t('自定义：') : ''
+    const prefix = source === 'clash' ? t('EasyClash 出口：') : source === 'custom' ? t('自定义：') : ''
     items.push({ value: PROXY_OTHER_CURRENT, label: `${prefix}${label}${broken ? t('（不可用）') : ''}` })
   } else if (source === 'pool' && !poolItems.some(item => `${POOL_VALUE_PREFIX}${item.id}` === current)) {
     // 后端解析失败的原因在 title 里
@@ -486,6 +486,6 @@ export function buildProxyPick(selection: ProxySelection): {
     broken,
     title: broken
       ? t('当前线路不可用：{error}；请重新选择代理或切回直连', { error: String(proxy?.error || '') })
-      : t('检查更新与下载安装包使用所选线路；未选择代理时先直连，失败后尝试 Clash Verge 混合端口；指定代理不可用时不会自动改走直连。'),
+      : t('检查更新与下载安装包使用所选线路；未选择代理时先直连，失败后尝试 EasyClash 混合端口；指定代理不可用时不会自动改走直连。'),
   }
 }

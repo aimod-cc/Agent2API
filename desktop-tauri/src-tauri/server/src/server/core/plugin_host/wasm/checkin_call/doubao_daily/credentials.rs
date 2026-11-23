@@ -14,8 +14,8 @@ const MAX_COOKIES: usize = 512;
 const MAX_COOKIE_BYTES: usize = 64 * 1024;
 const MAX_SECRET: usize = 256 * 1024;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
-const CONTROL_VERSION: &str = "2.34.12";
-const META_KEYS: &[&str] = &["name", "userId", "enterpriseType", "email", "avatar", "deviceId", "webId", "fingerprint",
+const CONTROL_VERSION: &str = "2.36.11";
+const META_KEYS: &[&str] = &["name", "userId", "enterpriseType", "email", "avatar", "deviceId", "iid", "webId", "fingerprint",
     "clientVersion", "channel", "userAgent", "chromiumVersion", "teaUuid", "webTabId", "source", "desktop", "edition",
     "baseUrl", "provider", "id", "schema", "identity", "pluginIdentity", "tokenTail", "hasCredentials", "validation", "validatedAt"];
 
@@ -44,10 +44,10 @@ pub(in crate::server::core::plugin_host::wasm) fn from_original(row: &RowSource,
         return Err(DailyError::CredentialsInvalid);
     }
     let mut metadata = BTreeMap::new();
-    for (field, cookies) in [("deviceId", &["device_id"][..]), ("webId", &["web_id"][..]), ("fingerprint", &["s_v_web_id", "fp"][..])] {
+    for (field, cookies) in [("deviceId", &["device_id"][..]), ("iid", &["iid"][..]), ("webId", &["web_id"][..]), ("fingerprint", &["s_v_web_id", "fp"][..])] {
         if let Some(value) = cookies.iter().find_map(|key| pairs.get(*key)) { metadata.insert(field.to_string(), value.clone()); }
     }
-    for key in ["deviceId", "webId", "fingerprint", "clientVersion", "channel", "userAgent", "chromiumVersion", "teaUuid", "webTabId"] {
+    for key in ["deviceId", "iid", "webId", "fingerprint", "clientVersion", "channel", "userAgent", "chromiumVersion", "teaUuid", "webTabId"] {
         if let Some(value) = secret.get(key).filter(|value| !value.is_null()) {
             let raw = value.as_str().ok_or(DailyError::CredentialsInvalid)?;
             if raw.len() > 1024 || raw.chars().any(char::is_control) { return Err(DailyError::CredentialsInvalid); }
@@ -90,7 +90,7 @@ impl Credentials {
         let device = self.metadata.get("deviceId").map(|value| value.as_str()).unwrap_or("");
         if device.is_empty() { return Err(DailyError::CredentialsInvalid); }
         let query: Vec<_> = url.query_pairs().collect();
-        for (wire, field) in [("device_id", "deviceId"), ("web_id", "webId"),
+        for (wire, field) in [("device_id", "deviceId"), ("iid", "iid"), ("web_id", "webId"),
             ("channel", "channel"), ("chromium_version", "chromiumVersion"),
             ("tea_uuid", "teaUuid"), ("web_tab_id", "webTabId")] {
             let mut values = query.iter().filter(|(key, _)| key == wire);
@@ -114,7 +114,7 @@ impl Credentials {
         text.contains(self.cookie.as_str()) || self.pairs.iter().any(|(name, value)|
             !value.is_empty() && (matches!(name.as_str(), "sessionid" | "sessionid_ss") || value.len() >= 8)
                 && text.contains(value.as_str()))
-            || ["deviceId", "webId", "fingerprint", "teaUuid", "webTabId"].iter().any(|key|
+            || ["deviceId", "iid", "webId", "fingerprint", "teaUuid", "webTabId"].iter().any(|key|
                 self.metadata.get(*key).is_some_and(|value| !value.is_empty() && text.contains(value.as_str())))
     }
 
@@ -124,15 +124,15 @@ impl Credentials {
         let mut query = vec![("aid", "1044603".to_string()), ("real_aid", "1044603".into()),
             ("device_platform", "web".into()), ("version_code", "20800".into()), ("samantha_web", "1".into()),
             ("web_platform", "desktop".into()), ("doubao_device_platform", "desktop".into()), ("client_platform", "pc_client".into()),
-            ("pkg_type", "release_version".into()), ("runtime", "local_web".into()), ("runtime_version", "3.42.2".into()),
+            ("pkg_type", "release_version".into()), ("runtime", "web".into()), ("runtime_version", "3.45.3".into()),
             ("pc_version", version.into()), ("doubao_pc_version", version.into()), ("use-olympus-account", "1".into()),
             ("language", "zh".into()), ("region", "CN".into()), ("sys_region", "CN".into())];
-        for (wire, key) in [("device_id", "deviceId"), ("web_id", "webId"), ("channel", "channel"),
+        for (wire, key) in [("device_id", "deviceId"), ("iid", "iid"), ("web_id", "webId"), ("channel", "channel"),
             ("chromium_version", "chromiumVersion"), ("tea_uuid", "teaUuid"), ("web_tab_id", "webTabId")] {
             if !field(key).is_empty() { query.push((wire, field(key).to_string())); }
         }
-        if !field("fingerprint").is_empty() { query.push(("fp", field("fingerprint").to_string())); }
-        else if !field("deviceId").is_empty() { query.push(("fp", format!("verify_{}", field("deviceId")))); }
+        if !field("deviceId").is_empty() { query.push(("fp", format!("verify_{}", field("deviceId")))); }
+        else if !field("fingerprint").is_empty() { query.push(("fp", field("fingerprint").to_string())); }
         let encoded = query.into_iter().map(|(key, value)| format!("{key}={}", encode(&value))).collect::<Vec<_>>().join("&");
         format!("{ORIGIN}{path}?{encoded}")
     }

@@ -12,7 +12,10 @@ use url::Url;
 pub const MAX_TITLE_LENGTH: usize = 300;
 pub const MAX_CONTENT_LENGTH: usize = 2000;
 pub const MAX_FETCHED_CONTENT_LENGTH: usize = 100_000;
-pub const MAX_GLOBAL_SOURCES: usize = 100;
+pub const DEFAULT_MAX_GLOBAL_SOURCES: usize = 200;
+pub const MIN_GLOBAL_SOURCES: usize = 20;
+pub const MAX_GLOBAL_SOURCES_LIMIT: usize = 1000;
+pub const MAX_QUERY_RESULT_LIMIT: usize = 100;
 pub const MAX_BATCH_ITEMS: usize = 10;
 
 /// 面向模型的 notice：结果不可信、需引用来源编号（模型侧可见，使用英文）
@@ -46,6 +49,30 @@ pub fn clip(value: &str, max_chars: usize) -> String {
         return value.to_string();
     }
     value.chars().take(max_chars).collect()
+}
+
+/// 按提供商字数上限安全截断搜索词；若尾端切在英文词中间且附近有空白，尽量回退到词边界。
+pub fn truncate_query(query: &str, max_chars: usize) -> String {
+    let trimmed = query.trim();
+    if max_chars == 0 {
+        return String::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let cut: String = trimmed.chars().take(max_chars).collect();
+    if let Some((pos, _)) = cut.char_indices().rev().find(|(_, ch)| ch.is_whitespace()) {
+        let candidate = cut[..pos].trim_end();
+        if candidate.chars().count() >= (max_chars * 4) / 5 && !candidate.is_empty() {
+            return candidate.to_string();
+        }
+    }
+    let fallback = cut.trim_end();
+    if fallback.is_empty() {
+        cut
+    } else {
+        fallback.to_string()
+    }
 }
 
 fn is_web_url(value: &str) -> bool {

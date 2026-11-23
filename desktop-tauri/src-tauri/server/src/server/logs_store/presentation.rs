@@ -86,6 +86,22 @@ fn string_field<'a>(data: &'a Map<String, Value>, key: &str) -> Option<&'a str> 
         .filter(|value| !value.is_empty())
 }
 
+/// 历史库里已写入的账号配置变更曾因文案含「失败重试 / 失败后换号」被误判为 error，
+/// 读出时按 info 还原（真正带有失败数量的批量修改除外）。
+fn is_legacy_false_error_account_event(text: &str) -> bool {
+    if let Some(rest) = text.strip_prefix("✏️").map(str::trim_start) {
+        if rest.starts_with("账号已更新:") || rest.starts_with("CatPaw 账号已更新:") {
+            return true;
+        }
+    }
+    if text.starts_with("🔀 批量修改 ") {
+        if let Some((_, tail)) = text.rsplit_once("）: 成功 ") {
+            return !tail.contains("失败");
+        }
+    }
+    false
+}
+
 // 旧插件把 verbose 写成了 info；只识别已知的过程消息，不降低警告和错误。
 pub fn prepare(mut entry: LogEntry) -> LogEntry {
     // `entry.data` 已经在本条记录里独占，直接取走 map 即可；原先用
@@ -119,14 +135,27 @@ pub fn prepare(mut entry: LogEntry) -> LogEntry {
             "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
         ) && (url.starts_with("https://") || url.starts_with("http://"))
     });
-    let legacy_detail = plugin
+    // 历史库里已写入的正常 Wasm 沙盒资源统计按调试详情还原，避免继续留在重要事件里。
+    let wasm_compute_usage = entry.category == "plugin"
+        && text == "Wasm 插件计算用量"
+        && data.contains_key("compute")
+        && data.get("reason").is_none_or(Value::is_null);
+    let legacy_detail = (plugin
         && (http_request.is_some()
             || text.contains("出站归一：")
-            || text.starts_with("首条消息非 system，已注入系统消息："));
+            || text.starts_with("首条消息非 system，已注入系统消息：")))
+        || wasm_compute_usage;
     if legacy_detail && entry.level == "info" {
         data.entry("originalLevel")
             .or_insert_with(|| json!(entry.level));
         entry.level = "debug".to_string();
+    } else if entry.category == "account"
+        && entry.level == "error"
+        && is_legacy_false_error_account_event(text)
+    {
+        data.entry("originalLevel")
+            .or_insert_with(|| json!(entry.level));
+        entry.level = "info".to_string();
     }
     let summary = if http_request.is_some() {
         if tags.contains(&"Billing") {
@@ -138,12 +167,18 @@ pub fn prepare(mut entry: LogEntry) -> LogEntry {
         "出站参数归一"
     } else if text.starts_with("首条消息非 system，已注入系统消息：") {
         "补充系统消息"
+    } else if wasm_compute_usage {
+        "Wasm 插件沙盒资源统计"
     } else {
         text
     };
-    data.entry("summary").or_insert_with(|| json!(summary));
-    if summary != text {
-        data.entry("detail").or_insert_with(|| json!(text));
+    if wasm_compute_usage {
+        data.insert("summary".into(), json!(summary));
+    } else {
+        data.entry("summary").or_insert_with(|| json!(summary));
+        if summary != text {
+            data.entry("detail").or_insert_with(|| json!(text));
+        }
     }
     if let Some((method, _)) = http_request {
         data.entry("httpMethod").or_insert_with(|| json!(method));

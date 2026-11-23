@@ -131,15 +131,18 @@ pub(crate) mod model_access;
 // models.dev 模型元数据（开关 / 状态 / 立即刷新）：与「逐家上游目录」的
 // /api/models/refresh 分开，理由见该文件模块头
 pub mod model_meta;
+pub mod model_pricing;
 // 模型测试（模型管理页操作列的「测试」）：挂管理面、走真实转发链路，
 // 只把候选收窄到「这一家 × 这一个账号」并把流量标成测试，见该文件模块头
 pub mod model_test;
 pub mod models;
+pub mod notifications;
 // Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
 pub mod onboarding;
 mod officeace_subscription;
 pub mod panel;
 pub mod panel_events;
+pub mod panel_oauth;
 pub mod pipeline;
 mod live_progress;
 mod record_persist;

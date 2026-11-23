@@ -81,9 +81,12 @@ pub(super) async fn refresh(job:&Job,old:&Value)->Result<Value,proto::WireError>
         return Ok(next);
     }
     let (status,value)=request(job,"https://api.cline.bot/api/v1/auth/refresh",json!({"Content-Type":"application/json","Accept":"application/json"}),json!({"refreshToken":refresh,"grantType":"refresh_token"}).to_string().into_bytes()).await?;
+    if matches!(status, 401 | 403) {
+        return Err(proto::WireError::with_code("Cline 本机续期凭据已被拒绝，请在官方客户端重新登录", "refresh_token_expired"));
+    }
     if !(200..300).contains(&status){return Err(invalid());}
     let raw=serde_json::to_vec(&value).map_err(|_|invalid())?;
     let account=text(old,&["account"]);
-    let (next, _) = super::cline::replacement(&raw, &account, &json!({"name": account}))?;
+    let (next, _) = super::cline::replacement(&raw, &account, &json!({"name": account}), Some(&refresh))?;
     Ok(next.0.clone())
 }

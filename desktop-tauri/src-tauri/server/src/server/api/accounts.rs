@@ -164,10 +164,12 @@ async fn add_plugin_account(
         // 新 runtime 的手动归一器只吃自身凭证/方法参数，不把网关代理配置混入
         // RAW 认证输入。旧插件仍收到原 payload，保留历史归一合同。
         let mut manual_payload = payload.clone();
-        // `userAgent` 是**账号属性**而不是该家的凭证：它由网关在创建后单独落库
-        // （见调用处），不能混进 account.normalize 的输入 —— 插件会把不认识的
-        // 键当成凭证字段校验，报出的错误与「UA 填错了」毫无关系。
-        if let Some(fields) = manual_payload.as_object_mut() { fields.remove("userAgent"); }
+        // `userAgent` / 转发行为 / 查询设置 / 限制器都是**账号属性**而不是该家的凭证：
+        // 由网关在创建后单独落库（见调用处），不能混进 account.normalize 的输入 ——
+        // 插件会把不认识的键当成凭证字段校验，报出的错误与「账号设置填错了」毫无关系。
+        if let Some(fields) = manual_payload.as_object_mut() {
+            crate::server::core::account_store::AccountStore::strip_initial_settings_keys(fields);
+        }
         if crate::server::core::providers::is_scoped_runtime_provider(provider) {
             if let Some(fields) = manual_payload.as_object_mut() {
                 if fields.get("methodIndex").is_some() {
@@ -225,22 +227,17 @@ async fn add_plugin_account(
     ) {
         Ok((record, proxy_saved)) => {
             let imported_id = record.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-            // 账号级自定义 User-Agent：与「账号设置」共用同一条 patch 入口
-            // （清除语义与校验只有一处，见 `apply_patch`）。值在 `add_account`
-            // 入口已经验过一遍，这里失败只可能是存储层故障 —— 如实报错，
-            // 不咽成「添加成功但 UA 没存上」。
+            // 账号级设置（自定义 UA / 转发行为 / 查询设置 / 限制器）：与「账号设置」共用
+            // 同一条 patch 入口（见 `apply_patch`）。值在 `add_account` 入口已预校验，
+            // 这里失败只可能是存储层故障 —— 如实报错，不咽成「添加成功但设置没存上」。
             let mut saved_account = record;
-            if let Some(user_agent) = payload.get("userAgent").filter(|_| !imported_id.is_empty()) {
-                match crate::server::core::user_agent::normalize_override(provider, user_agent) {
-                    Ok(value) if !value.is_empty() => {
-                        match state.store().update_account(&imported_id, &json!({ "userAgent": value })) {
-                            Ok((account, _)) => saved_account = account,
-                            Err(error) => return store_error(error),
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => return store_error(error),
-                }
+            match state
+                .store()
+                .apply_initial_account_settings(&imported_id, &payload, true)
+            {
+                Ok(Some(account)) => saved_account = account,
+                Ok(None) => {}
+                Err(error) => return store_error(error),
             }
             let mut result = json!({
                 "account": saved_account,
@@ -658,14 +655,16 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         .and_then(Value::as_str)
         .map(str::to_string);
     let import_name = name.as_deref();
-    // 新增账号随表单带来的自定义 User-Agent（可选）：**先校验再创建**。
-    // 若等落库之后再 patch，非法值会让用户看到「账号已添加，但 UA 没生效」的
-    // 半成功状态；而 UA 又是纯账号属性（不参与该家的账号规范化），拦在这里
-    // 不会误伤任何一家的凭证解析。空串 / null 都按「不设置」放行。
-    if let Some(value) = payload.get("userAgent") {
-        if let Err(error) = crate::server::core::user_agent::normalize_override(provider, value) {
-            return store_error(error);
-        }
+    // 新增账号随表单带来的账号级设置（可选）：**先校验再创建**。
+    // 若等落库之后再 patch，非法值会让用户看到「账号已添加，但设置没生效」的
+    // 半成功状态；这些属性不参与该家的凭证归一化，拦在这里不会误伤凭证解析。
+    if let Err(error) =
+        crate::server::core::account_store::AccountStore::validate_initial_settings_patch(
+            provider,
+            &payload,
+        )
+    {
+        return store_error(error);
     }
     if let Some(response) = super::accounts_export::import_account_file(state, provider, &payload, import_name).await {
         return response;
@@ -696,13 +695,34 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     if crate::server::core::custom_providers::is_custom_provider_id(provider) {
         let result = store.add_custom_account(provider, &payload, import_name);
         return match result {
-            Ok(upsert) => ok_json(json!({
-                "account": upsert.account,
-                // 幂等合并（同 key / 同家无需鉴权）时为 false：前端据此把提示
-                // 说成「已更新」而不是「已添加」，见 CustomAccountUpsert 的说明
-                "created": upsert.created,
-                "list": store.list_visible_accounts(),
-            })),
+            Ok(upsert) => {
+                let account_id = upsert
+                    .account
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let mut account = upsert.account;
+                let applied = match store.apply_initial_account_settings(&account_id, &payload, false)
+                {
+                    Ok(Some(updated)) => {
+                        account = updated;
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(error) => return store_error(error),
+                };
+                if !applied && payload.get("balanceQuery").is_some_and(|v| !v.is_null()) {
+                    crate::server::core::usage_query::refresh_configuration(store);
+                }
+                ok_json(json!({
+                    "account": account,
+                    // 幂等合并（同 key / 同家无需鉴权）时为 false：前端据此把提示
+                    // 说成「已更新」而不是「已添加」，见 CustomAccountUpsert 的说明
+                    "created": upsert.created,
+                    "list": store.list_visible_accounts(),
+                }))
+            }
             Err(error) => store_error(error),
         };
     }

@@ -109,6 +109,8 @@ export type CustomProviderRecord = {
   accountCount?: number
   /** 客户端形态伪装（预置卡写入的记录字段）：'opencode' = 按官方 CLI 形状补齐请求 */
   clientEmulation?: string
+  urlSuffix?: string
+  models?: Array<{ id?: unknown }>
   /**
    * 余额查询方案（预置卡写入的记录字段，见 `custom_providers::BALANCE_SCHEMES`）：
    * 有它 = 这一家能查余额，且账号设置里会出现「查询设置」的凭证字段。
@@ -257,6 +259,20 @@ export type SharedWindow = {
     list?: PresetRecord[]
     presetOf?: (key: string) => PresetRecord | null
     iconOf?: (key: string) => string
+  }
+  wbModelsFetchModal?: {
+    open?: (options: {
+      providerId: string
+      custom?: boolean
+      name?: string
+      autoFetch?: boolean
+      onDone?: () => void
+      onRefreshed?: () => void
+    }) => void
+  }
+  wbModelsPanel?: {
+    load?: (options?: { force?: boolean }) => Promise<unknown> | unknown
+    render?: () => void
   }
   /** 壳的原始 IPC：POST /api/accounts 在桥里没有具名方法，只能直连 */
   __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: unknown) => Promise<unknown> }
@@ -549,13 +565,29 @@ export function closeAddModals(): void {
   shared().wbAddAccountModal?.close?.()
 }
 
-/** 添加成功后统一收尾：关窗、刷新列表、提示 */
-export async function afterAdd(name: string, label: string, result?: unknown): Promise<void> {
+/** 添加成功后统一收尾：关窗、刷新列表、提示；如果是该提供商的首个账号，自动弹出获取模型窗口 */
+export async function afterAdd(name: string, label: string, result?: unknown, providerId?: string): Promise<void> {
+  const resultObj = resultRecord(result)
+  const accountObj = resultRecord(resultObj?.account)
+  const sessionObj = resultRecord(resultObj?.session)
+  const resolvedProvider = providerId
+    || (typeof accountObj?.provider === 'string' ? accountObj.provider : '')
+    || (typeof sessionObj?.provider === 'string' ? sessionObj.provider : '')
+  const wasFirstAccount = Boolean(resolvedProvider) && accountCountOf(resolvedProvider) === 0
   closeAddModals()
   await shared().wbApp?.refresh?.()
   const added = t('✅ {label}账号已添加{name}', { label, name: name ? `：${name}` : '' })
   const notice = accountImportNotice(result)
   toast(notice ? `${added}\n${t(notice.text)}` : added, notice?.warning ? 'warn' : 'ok')
+  if (wasFirstAccount && resolvedProvider) {
+    shared().wbModelsFetchModal?.open?.({
+      providerId: resolvedProvider,
+      custom: false,
+      name: label || resolvedProvider,
+      autoFetch: true,
+      onRefreshed: () => { void shared().wbModelsPanel?.load?.({ force: true }) },
+    })
+  }
 }
 
 /* ─── 表单草稿（非受控输入的「关掉再打开还在」）──────────────

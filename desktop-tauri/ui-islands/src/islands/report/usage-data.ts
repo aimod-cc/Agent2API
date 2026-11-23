@@ -23,5 +23,7 @@ export function sumUsage(rows: StatsUsage[]): StatsUsage {
     promptTokens, completionTokens, cacheReadTokens,
     cacheRate: promptTokens && cacheReadTokens !== null ? cacheReadTokens / promptTokens : null,
     tokenDetailsComplete: promptTokens !== null && completionTokens !== null && cacheReadTokens !== null,
+    costUsd: sum('costUsd'),
+    unpricedRequests: sum('unpricedRequests'),
   }
 }

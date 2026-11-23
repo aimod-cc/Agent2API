@@ -491,12 +491,23 @@ impl BillingService {
                     if let Some(activity) = result.get_mut("activity").and_then(Value::as_object_mut) {
                         activity.insert("error".to_string(), json!(reason));
                         activity.insert("modelCallsSkipped".to_string(), Value::Bool(true));
+                        activity.insert("summary".to_string(), json!(format!("未调用保活模型：{reason}")));
                     }
                 }
                 result
             }
             Err(error) => activity_failure(&error.message),
         }
+    }
+
+    /// 读取最近一次国际版每日活跃运行状态与步骤台账。
+    pub async fn workbuddy_activity_status(&self, session: &Value) -> Result<Value, BillingError> {
+        self.admin(session, "activity.run-status", &Value::Null).await
+    }
+
+    /// 解除国际版每日活跃尚未完成的待确认锁定，允许立即重试。
+    pub async fn workbuddy_activity_reset(&self, session: &Value) -> Result<Value, BillingError> {
+        self.admin(session, "activity.reset", &Value::Null).await
     }
 }
 
@@ -530,6 +541,9 @@ fn activity_failure(reason: &str) -> Value {
             "pokeSucceeded": Value::Null,
             "pokeModel": Value::Null,
             "webConversation": Value::Null,
+            "modelCallsSkipped": true,
+            "error": reason,
+            "summary": reason,
         },
     })
 }

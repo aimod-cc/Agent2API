@@ -43,10 +43,12 @@ import {
   SelectValue,
   Field, FieldLabel,
 } from '@ui'
-import { isCustom, type ManageModel } from './models-custom-source'
+import {
+  CUSTOM_PROTOCOL_OPTIONS, customProtocolLabel, isCustom, type ManageModel,
+} from './models-custom-source'
 import { CUSTOM_LEVEL, POSITIVE_REASONING_LEVELS, commonLevels, modelReasoning } from './models-reasoning'
 import {
-  accept, bindingsOf, errorMessage, getSnapshot, shared, toast, writeBinding, writeRemoveModel, same,
+  accept, bindingsOf, errorMessage, getSnapshot, shared, toast, writeBinding, writeModelProtocol, writeRemoveModel, same,
 } from './models-panel-state'
 import { t } from '../i18n'
 
@@ -55,6 +57,7 @@ const ACTIONS = [
   { value: 'enable', label: t('启用') },
   { value: 'disable', label: t('禁用') },
   { value: 'reasoning', label: t('设置思考等级') },
+  { value: 'protocol', label: t('设置请求协议') },
   { value: 'delete', label: t('删除') },
 ] as const
 
@@ -89,10 +92,13 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
     select: candidates.find(level => !['off', 'none'].includes(level.toLowerCase())) || '',
     custom: '',
   }))
+  const [protocol, setProtocol] = React.useState('__default__')
   const [busy, setBusy] = React.useState(false)
   const [result, setResult] = React.useState<React.ReactNode>('')
   const level = reasoning.select === CUSTOM_LEVEL ? reasoning.custom.trim() : reasoning.select
   const removableCount = models.filter(isRemovable).length
+  const customCount = models.filter(model => isCustom(model.provider)).length
+  const availableActions = customCount > 0 ? ACTIONS : ACTIONS.filter(item => item.value !== 'protocol')
   const label = ACTIONS.find(item => item.value === action)?.label || t('操作')
 
   /** 批量删除不可逆，按数量做二次确认（与账号页批量删除同一口子，原生 confirm 在
@@ -140,6 +146,10 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
         return
       }
     }
+    if (action === 'protocol' && customCount === 0) {
+      setResult(<span className='text-destructive'>{t('选中的模型都不是自定义提供商模型，无法按模型设置请求协议')}</span>)
+      return
+    }
     if (action === 'delete') {
       if (removableCount === 0) {
         setResult(<span className='text-destructive'>{t('选中的模型都不是手动登记，无法删除（开关映射才是它们的手段）')}</span>)
@@ -160,6 +170,9 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
         if (action === 'delete') {
           if (!isRemovable(model)) { skipped += 1; continue }
           accept(await writeRemoveModel(provider, model.id))
+        } else if (action === 'protocol') {
+          if (!isCustom(provider)) { skipped += 1; continue }
+          accept(await writeModelProtocol(provider, model.id, protocol === '__default__' ? null : protocol))
         } else if (action === 'enable' || action === 'disable') {
           const next = action === 'enable'
           for (const binding of bindingsOf(model)) {
@@ -209,12 +222,42 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
             <h3>{t('操作')}</h3>
             <RadioGroup value={action} onValueChange={next => setAction(next as BatchAction)}
               className='flex-row flex-wrap items-center gap-5' aria-label={t('批量动作')}>
-              {ACTIONS.map(item => (
+              {availableActions.map(item => (
                 <Label key={item.value} className='inline-flex cursor-pointer items-center gap-2 font-normal'>
                   <RadioGroupItem value={item.value} />{item.label}
                 </Label>
               ))}
             </RadioGroup>
+            {action === 'protocol' ? (
+              <div className='mt-2.5'>
+                <Field orientation='horizontal' className='field-row'>
+                  <FieldLabel htmlFor='batch-model-protocol'>{t('请求协议')}</FieldLabel>
+                  <Select value={protocol} onValueChange={next => setProtocol(String(next))}>
+                    <SelectTrigger id='batch-model-protocol' className='min-w-[240px]'>
+                      <SelectValue>
+                        {protocol === '__default__'
+                          ? t('跟随提供商默认 / 自动匹配')
+                          : customProtocolLabel(protocol)}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value='__default__'>{t('跟随提供商默认 / 自动匹配')}</SelectItem>
+                      {CUSTOM_PROTOCOL_OPTIONS.map(option => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <p className='detail mt-1.5'>
+                  {models.length > customCount
+                    ? t('将修改 {n} 个自定义提供商模型的请求协议，其余 {rest} 个内置模型将被跳过。', {
+                      n: customCount,
+                      rest: models.length - customCount,
+                    })
+                    : t('单独指定协议后，转发该模型时会优先使用此协议拼接请求地址并转换报文。')}
+                </p>
+              </div>
+            ) : null}
             {action === 'reasoning' ? (
               <div className='mt-2.5'>
                 <Field orientation='horizontal' className='field-row'>

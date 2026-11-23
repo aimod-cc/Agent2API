@@ -6,6 +6,7 @@ import { maskName } from '../accounts-store'
 import { numberText } from '../accounts-shared'
 import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
 import { visionDetail } from '../../../../ui-shared/request-vision-detail'
+import { formatCost, pricingSourceLabel, usePricingDisplay, type ModelPricingInfo } from '../model-pricing'
 
 export type RequestEntry = {
   rowId?: number
@@ -15,6 +16,8 @@ export type RequestEntry = {
   clientReasoning?: string; upstreamReasoning?: string
   durationMs?: number; firstResponseMs?: number | null
   promptTokens?: number; completionTokens?: number; totalTokens?: number; cacheReadTokens?: number
+  cacheCreationTokens?: number; cacheCreation1hTokens?: number
+  costUsd?: number | null; costPriced?: boolean; priceSource?: ModelPricingInfo['source']
   /** 上游按请求上报的积分消耗（后端 `credit`）；null / 缺键 = 这一家没上报，
    *  与 0（确实零消耗）是两件事 —— 前者显示「—」 */
   credit?: number | null
@@ -203,6 +206,7 @@ function runningFirstLine(entry: RequestEntry): React.ReactNode {
  * 这些类名走），空态占位的类名也照旧（重试列空时只有 .req-none，没有 .req-retry）。
  */
 export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntry; column: VisibleColumn; namesHidden: boolean }): React.ReactNode {
+  const pricing = usePricingDisplay()
   const { align, key } = column
   const base = column.sel.slice(1) + (key === 'dur' || key === 'speed' ? ' req-num' : '')
   const className = `${base} ta-${align}`
@@ -410,6 +414,28 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         <span key={key} className={className}
           title={t('本次请求消耗 {credit} 积分', { credit: numberText(value) })}>
           {numberText(value)}
+        </span>
+      )
+    }
+
+    case 'cost': {
+      if (isRunning(entry)) return <span key={key} className={className} />
+      if (!isOk(entry) && entry.visionMode !== 'assist_call' && visionDetail(entry.route)?.mode !== 'assist_call') {
+        return <span key={key} className={`${className} is-empty`} title={t('失败请求不记录用量')}>—</span>
+      }
+      const usd = entry.costUsd
+      if (usd === null || usd === undefined || !Number.isFinite(Number(usd))) {
+        return <span key={key} className={`${className} is-empty`} title={t('未匹配到定价或零用量')}>—</span>
+      }
+      const text = formatCost(Number(usd), pricing.currency, pricing.exchangeRate)
+      const tipParts = [
+        `${t('预估费用')}：${text}`,
+        pricing.currency === 'cny' ? `USD: $${Number(usd).toFixed(5)}` : '',
+        entry.priceSource ? `${t('计价依据')}：${pricingSourceLabel(entry.priceSource)}` : '',
+      ].filter(Boolean)
+      return (
+        <span key={key} className={className} title={tipParts.join('\n')}>
+          {text}
         </span>
       )
     }

@@ -36,6 +36,7 @@ pub use runtime::{concurrency_default, known_provider, provider_icons, provider_
 pub use updates::check as check_updates;
 pub(crate) use updates::{refresh_outcomes as refresh_update_outcomes, snapshot as updates_snapshot};
 pub(crate) use catalog::{refresh_now as refresh_catalog_now, status as catalog_status};
+pub(crate) use model_catalog::refresh_if_active as refresh_model_catalog_if_active;
 pub fn refresh_catalog() -> serde_json::Value {
     catalog::wake(true);
     catalog::status()

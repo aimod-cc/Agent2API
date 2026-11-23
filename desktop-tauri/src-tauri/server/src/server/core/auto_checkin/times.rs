@@ -9,7 +9,6 @@
 //! | 家 | 窗口（北京时间） | 依据 |
 //! |---|---|---|
 //! | Qoder（两地） | 每天 10:00 开启 | `providers::qoder::checkin` 的模块头（实测） |
-//! | ZCode（两地） | 每天 19:00 开启 | 官方公告：每日 19:00 起可领当日赠送额度 |
 //!
 //! 时刻取「窗口 + 1 分钟」：正好卡在开启那一秒时，上游可能还没下发活动。
 //!
@@ -20,7 +19,7 @@
 //!
 //! ── 补签（第二轮）──────────────────────────────────────────
 //! 补签点逐家按 `max(retryTime, 主签到区间结束 + 等待间隔)` 算，且只处理当天未签到账号。
-//! 默认区间 00:01–00:10、间隔 10 分钟时，普通平台 00:20 补，Qoder 10:20、ZCode 19:20。
+//! 默认区间 00:01–00:10、间隔 10 分钟时，普通平台 00:20 补，Qoder 10:20。
 //! 补签不会提前执行仍在等待随机主轮的账号，也不会把超出当天的时间绕回凌晨。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
@@ -68,11 +67,9 @@ pub fn provider_window(schedule: &Schedule, provider: &str, now: DateTime<FixedO
 ///
 /// 顺序即界面「专属时刻」一栏的展示顺序。**只登记有实测依据的窗口** ——
 /// 别按「大概那时候开」往这里加，加了就等于把某家的签到时刻悄悄挪走。
-pub const PROVIDER_TIMES: [(&str, &str); 4] = [
+pub const PROVIDER_TIMES: [(&str, &str); 2] = [
     ("qoder", "10:01"),
     ("qoder-intl", "10:01"),
-    ("zcode", "19:01"),
-    ("zcode-intl", "19:01"),
 ];
 
 /// 某家的内置专属时刻（没有则 None = 跟随条目时刻）。
@@ -303,11 +300,13 @@ fn next_occurrence(
 /// 只认已知的签到提供商（`checkin_providers()`，含插件家）；空串表示「这一家
 /// 撤掉覆盖、回落到内置 / 条目时刻」，因此**保留**为空串而不是丢弃 —— 丢弃会
 /// 让「撤掉覆盖」变成「没改」，用户改不回去。
-pub fn normalize_overrides(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+pub(crate) fn normalize_overrides_with(
+    value: Option<&serde_json::Value>,
+    known: &[String],
+) -> BTreeMap<String, String> {
     let Some(object) = value.and_then(serde_json::Value::as_object) else {
         return BTreeMap::new();
     };
-    let known = crate::server::core::auto_checkin::checkin_providers();
     let mut map = BTreeMap::new();
     for (provider, raw) in object {
         if !known.iter().any(|id| id == provider) {
@@ -323,6 +322,14 @@ pub fn normalize_overrides(value: Option<&serde_json::Value>) -> BTreeMap<String
         }
     }
     map
+}
+
+pub fn normalize_overrides(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    if value.and_then(serde_json::Value::as_object).is_none() {
+        return BTreeMap::new();
+    }
+    let known = crate::server::core::auto_checkin::checkin_providers();
+    normalize_overrides_with(value, &known)
 }
 
 /// 归一化 `retryTime`：缺失 → 缺省；空串 → 关闭（返回空串）；非法 → 缺省。

@@ -1415,10 +1415,10 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
     // 补位项：不带动任何写操作（PROXY_CUSTOM_CURRENT 在 applyProxyPick 里被忽略），
     // 只是把当前值原样显示出来。轮询档不加前缀 —— 后端给的 label 本身就是
     // 「轮询全部代理（N 个出口）」这种完整一句话（见 describe_account_proxy）
-    const prefix = source === 'clash' ? t('Clash 出口：') : source === 'custom' ? t('自定义：') : ''
+    const prefix = source === 'clash' ? t('EasyClash 出口：') : source === 'custom' ? t('自定义：') : ''
     items.push({ value: PROXY_CUSTOM_CURRENT, label: `${prefix}${label}${broken ? t('（不可用）') : ''}` })
   } else if (source === 'pool' && !poolItems.some(item => `${POOL_VALUE_PREFIX}${item.id}` === current)) {
-    // 池引用但条目已不在池里（被删 / Clash 侧删了出口）：补位显示当前值
+    // 池引用但条目已不在池里（被删 / EasyClash 侧删了出口）：补位显示当前值
     items.push({ value: current, label: `${label}${broken ? t('（不可用）') : ''}` })
   }
   items.push({ value: PROXY_CUSTOM_EDIT, label: t('自定义代理…') })
@@ -1428,7 +1428,7 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
     : source === 'rotate'
       ? t('当前：{label}（每条请求换一个出口）；「自定义代理…」打开完整设置', { label })
       : source === 'clash'
-        ? t('当前：{label}（Clash Verge 直接引用）；可在「网络代理」页同步端点后改选', { label })
+        ? t('当前：{label}（EasyClash 直接引用）；可在「网络代理」页同步端点后改选', { label })
         : source === 'custom'
           ? t('当前：{label}（未经过代理池 —— 可在「网络代理」页添加相同地址后来这里改选）', { label })
           : t('当前：{label}；选项来自「网络代理」页；「自定义代理…」打开完整设置', {

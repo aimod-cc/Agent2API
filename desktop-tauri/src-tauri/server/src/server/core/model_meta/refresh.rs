@@ -1,10 +1,10 @@
-//! models.dev 的联网刷新：拉两份官方 JSON → 压成同一个精简索引 → 落库并换内存。
+//! models.dev 模型元数据的联网刷新：从官网 CDN（兜底官网 API）拉取精简索引 → 落库并换内存。
 //!
-//! ── 压缩口径的唯一事实来源在脚本里 ──────────────────────────
-//! 索引的文件形态由 `scripts/sync-modelsdev.mjs` 定义（内嵌快照就是它产出的），
-//! 本模块是那份口径的**运行期孪生实现**：同一套「收录哪些模型 / 档位取哪一条 /
-//! 索引键怎么归一」。两处必须逐字一致 —— 分叉的症状是「刷新一次之后档位全变回
-//! 通用表」，不报错、不抛异常，只是悄悄退化。改这里就要改那边，反之亦然。
+//! ── 同源生成与分发（官网后台定时同步）──────────────────────────
+//! 管理后台定时从 `models.dev` 拉取原始数据，在服务端同时生成并上传到官网 CDN：
+//!   · 精简能力与档位表（`models-metadata.json`，本模块拉取，约 90 KB）
+//!   · 完整公共模型目录（`models-catalog.json`，脚本插件按需拉取）
+//! 客户端不再直连 `models.dev` 下载几 MB 的原始文件，也不必在本地重复做提炼计算。
 //!
 //! ── 为什么运行期还要再拉一次（已有内嵌快照）─────────────────
 //! 内嵌快照是发版那一刻的数据。models.dev 是社区库，新模型与档位调整都在持续
@@ -12,33 +12,26 @@
 //! 新模型、元数据里却没有它」。因此与各家模型目录同一节奏：定时刷新 + 手动可
 //! 提前，成功即覆盖，失败保留旧值（不退回更旧的内嵌快照）。
 //!
-//! ── 出网走公网那条链路（不新增配置键）───────────────────────
-//! `update::client::fetch_public` —— 与「软件更新」同一条出口解析（设置的更新
-//! 出口 > Clash 混合端口 > 直连）。它回答的问题就是「这台机器的公网怎么出去」，
-//! 与访问哪个公网站点无关；为 models.dev 单开一个出口设置只会多一个没人配、
-//! 出问题时又必须配对的旋钮。
+//! ── 出网走官网受控分发链路 ──────────────────────────────────
+//! `update::website::fetch_json_with_fallback` —— 优先读 `cdn.agent2api.dev`，
+//! 失败时自动回退 `agent2api.dev`，复用「软件更新」同一条出口候选解析与域名安全校验。
 //!
 //! ── 排期与失败冷却 ──────────────────────────────────────────
 //! 与各家目录刷新共用 `task_state` 的那套：键 `modelRefresh:modelsdev`、间隔取
 //! 「模型目录刷新」任务配置的间隔、失败按 `task_state` 的指数退避冷却、手动触发
 //! 越过冷却（`ManualBackoff::Bypass`：用户按按钮往往正是刚把网络问题修好）。
 
-use std::collections::HashMap;
-
 use serde_json::{json, Value};
 
 use crate::server::config;
 use crate::server::core::task_state::{self, Claim, ManualBackoff};
-use crate::server::core::update::client;
+use crate::server::core::update::website;
 use crate::server::logging;
 
-use super::snapshot::{self, Record, Snapshot};
+use super::snapshot::{self, Snapshot};
 
-const API_URL: &str = "https://models.dev/api.json";
-const MODELS_URL: &str = "https://models.dev/models.json";
-
-/// 单次请求总超时（api.json 有几 MB，给足一分钟；超时即失败、不产半份索引）。
-const REQUEST_TIMEOUT_MS: u64 = 60_000;
+/// 单次请求总超时。
+const REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 /// 两次刷新之间的最小间隔（防连点 / 防两个进程并排打；手动也不越过）。
 const MIN_GAP_MS: i64 = 5_000;
@@ -93,11 +86,13 @@ pub async fn refresh(manual: bool, interval_ms: i64) -> Value {
             return row;
         }
     };
-    let outcome = fetch_and_reduce().await;
+    let outcome = fetch_snapshot().await;
     match outcome {
         Ok((snapshot, count)) => {
             snapshot::write_cache(&snapshot::serialize(&snapshot));
             snapshot::replace(snapshot);
+            // 若用户启用了脚本插件或本地已有公共模型目录缓存，同一轮顺带触发从官网同步
+            crate::server::core::plugin_host::script::refresh_model_catalog_if_active(manual);
             let summary = format!("models.dev 元数据已更新（{count} 条）");
             logging::log("[Models]", &summary);
             row["status"] = json!("refreshed");
@@ -114,135 +109,20 @@ pub async fn refresh(manual: bool, interval_ms: i64) -> Value {
     row
 }
 
-/// 拉两份官方 JSON 并压成索引。失败时返回**给用户看的原因**（不抛错：这条链路
-/// 的每一处失败都已经是一条界面文案，再包一层错误类型没有额外信息）。
-async fn fetch_and_reduce() -> Result<(Snapshot, usize), String> {
-    let (api, models) = tokio::try_join!(fetch_json(API_URL), fetch_json(MODELS_URL))?;
-    let built = reduce(&api, &models).ok_or_else(|| "models.dev 返回的模型条目为空".to_string())?;
+/// 从官网 CDN（兜底官网 API）拉取精简索引快照。
+async fn fetch_snapshot() -> Result<(Snapshot, usize), String> {
+    let response = website::fetch_json_with_fallback(
+        website::CDN_MODELS_METADATA_URL,
+        website::API_MODELS_METADATA_URL,
+        REQUEST_TIMEOUT_MS,
+    )
+    .await
+    .map_err(|error| error.message)?;
+    if !response.status.is_success() {
+        return Err(format!("官网模型元数据服务返回 HTTP {}", response.status.as_u16()));
+    }
+    let built = snapshot::parse_value(&response.value, "network")
+        .ok_or_else(|| "官网返回的 models.dev 模型条目为空或格式无效".to_string())?;
     let count = built.len();
     Ok((built, count))
-}
-
-async fn fetch_json(url: &str) -> Result<Value, String> {
-    let response = client::fetch_public(
-        url,
-        &[("accept".to_string(), "application/json".to_string())],
-        Some(REQUEST_TIMEOUT_MS),
-    )
-    .await?;
-    if !response.status().is_success() {
-        return Err(format!("{url} 返回 HTTP {}", response.status().as_u16()));
-    }
-    response.json::<Value>().await.map_err(|error| format!("{url} 响应不是合法 JSON：{error}"))
-}
-
-/// 两份官方 JSON → 精简索引（与 `scripts/sync-modelsdev.mjs` 逐字同口径）。
-fn reduce(api: &Value, models: &Value) -> Option<Snapshot> {
-    let mut index: HashMap<String, Record> = HashMap::new();
-    // ① canonical 条目的能力位与上下限
-    for (canonical, entry) in models.as_object()? {
-        if !is_chat_model(entry) {
-            continue;
-        }
-        let key = snapshot::key_of(canonical);
-        if key.is_empty() {
-            continue;
-        }
-        let input = entry
-            .pointer("/modalities/input")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let has = |name: &str| input.iter().any(|item| item.as_str() == Some(name));
-        index.insert(
-            key,
-            Record {
-                canonical: canonical.clone(),
-                reasoning: entry.get("reasoning").and_then(Value::as_bool),
-                tool_call: entry.get("tool_call").and_then(Value::as_bool),
-                images: Some(has("image")),
-                video: Some(has("video")),
-                context: limit_of(entry.pointer("/limit/context")),
-                output: limit_of(entry.pointer("/limit/output")),
-                levels: Vec::new(),
-            },
-        );
-    }
-    // ② provider 条目的命名档位（lab 家优先，其次 provider id 字典序）
-    let mut picks: HashMap<String, (Vec<String>, bool)> = HashMap::new();
-    let mut providers: Vec<(&String, &Value)> = api.as_object()?.iter().collect();
-    providers.sort_by(|(left, _), (right, _)| left.cmp(right));
-    for (provider_id, provider) in providers {
-        let Some(entries) = provider.get("models").and_then(Value::as_object) else { continue };
-        for entry in entries.values() {
-            let canonical = entry
-                .get("canonical_model_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .or_else(|| entry.get("id").and_then(Value::as_str))
-                .unwrap_or_default();
-            let key = snapshot::key_of(canonical);
-            if key.is_empty() {
-                continue;
-            }
-            let Some(levels) = effort_levels(entry) else { continue };
-            let is_lab = canonical.split('/').next() == Some(provider_id.as_str());
-            match picks.get(&key) {
-                // 实验室自述的那条优先；两条都不是 lab 时按 provider 名序取第一条
-                Some((_, true)) => continue,
-                Some((_, false)) if !is_lab => continue,
-                _ => picks.insert(key, (levels, is_lab)),
-            };
-        }
-    }
-    for (key, (levels, _)) in picks {
-        if let Some(record) = index.get_mut(&key) {
-            record.levels = levels;
-        }
-    }
-    if index.is_empty() {
-        return None;
-    }
-    Some(Snapshot::new(index, logging::now_ms(), "network"))
-}
-
-/// 正整数上限，其余（0 / 负数 / 小数 / 非数字）→ `None`（=「这份数据没说」）。
-fn limit_of(value: Option<&Value>) -> Option<u64> {
-    let number = value?.as_f64()?;
-    if !number.is_finite() || number < 1.0 {
-        return None;
-    }
-    Some(number.trunc() as u64)
-}
-
-/// 只收录**能出文本**的对话模型（embedding / reranking / 生图生视频都不要）。
-fn is_chat_model(entry: &Value) -> bool {
-    if let Some(kind) = entry.get("type").and_then(Value::as_str) {
-        if kind != "chat" {
-            return false;
-        }
-    }
-    match entry.pointer("/modalities/output").and_then(Value::as_array) {
-        Some(output) => output.iter().any(|item| item.as_str() == Some("text")),
-        None => true,
-    }
-}
-
-/// 从一条 provider 条目里读**命名档位**；只有 `effort` 那一种形态算数
-/// （`toggle` / 空数组 = 没给命名档位 → `None`，网关侧回落通用表）。
-fn effort_levels(entry: &Value) -> Option<Vec<String>> {
-    let options = entry.get("reasoning_options").and_then(Value::as_array)?;
-    let effort = options
-        .iter()
-        .find(|option| option.get("type").and_then(Value::as_str) == Some("effort"))?;
-    let levels: Vec<String> = effort
-        .get("values")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|level| !level.is_empty())
-        .map(str::to_string)
-        .collect();
-    (!levels.is_empty()).then_some(levels)
 }

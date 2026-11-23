@@ -20,8 +20,11 @@ impl Default for ErrorPolicySnapshot {
 
 pub(crate) fn from_raw(raw: &Map<String, Value>) -> Arc<ErrorPolicySnapshot> {
     if let Some(value) = raw.get(KEY_ERROR_POLICY) {
-        if let Ok(settings) = serde_json::from_value::<ErrorSettings>(value.clone()) {
-            if settings.validate().is_ok() { return Arc::new(ErrorPolicySnapshot { settings, configured: true, legacy: false }); }
+        if let Ok(mut settings) = serde_json::from_value::<ErrorSettings>(value.clone()) {
+            if settings.validate().is_ok() {
+                migrate_untouched_v1_defaults(&mut settings);
+                return Arc::new(ErrorPolicySnapshot { settings, configured: true, legacy: false });
+            }
         }
     }
     let legacy = [super::KEY_RETRY_COUNT, super::KEY_RETRY_ACCOUNT_SWITCH_COUNT, super::KEY_RETRY_INTERVAL_SECONDS,
@@ -48,7 +51,6 @@ pub(crate) fn from_raw(raw: &Map<String, Value>) -> Arc<ErrorPolicySnapshot> {
         }
         for status in retry.no_retry_codes.iter().copied().filter(|status| (400..600).contains(status)) {
             let kind = legacy_kind(status);
-            if matches!(kind, ErrorKind::BadRequest | ErrorKind::Content) { continue; }
             if let Some(mut rule) = settings.rules.iter().find(|rule| rule.kind == kind).cloned() {
                 rule.id = format!("legacy-{status}"); rule.name = format!("原直接换号设置 {status}"); rule.statuses = vec![status];
                 rule.action = ErrorAction::SwitchAccount;
@@ -58,6 +60,18 @@ pub(crate) fn from_raw(raw: &Map<String, Value>) -> Arc<ErrorPolicySnapshot> {
         }
     }
     Arc::new(ErrorPolicySnapshot { settings, configured: false, legacy })
+}
+
+fn migrate_untouched_v1_defaults(settings: &mut ErrorSettings) {
+    let v1 = v1_default_rules();
+    let v2 = default_rules();
+    for rule in &mut settings.rules {
+        if let (Some(old), Some(next)) = (v1.iter().find(|item| item.kind == rule.kind), v2.iter().find(|item| item.kind == rule.kind)) {
+            if *rule == *old {
+                *rule = next.clone();
+            }
+        }
+    }
 }
 
 pub fn snapshot() -> Arc<ErrorPolicySnapshot> {
@@ -111,7 +125,6 @@ pub(crate) fn sync_legacy(raw: &mut Map<String, Value>, retry_codes_changed: boo
         settings.overrides.retain(|rule| !rule.id.starts_with("legacy-"));
         for status in retry.no_retry_codes.iter().copied().filter(|status| (400..600).contains(status)) {
             let kind = legacy_kind(status);
-            if matches!(kind, ErrorKind::BadRequest | ErrorKind::Content) { continue; }
             if let Some(mut rule) = settings.rules.iter().find(|rule| rule.kind == kind).cloned() {
                 rule.id = format!("legacy-{status}"); rule.name = format!("原直接换号设置 {status}");
                 rule.statuses = vec![status]; rule.action = ErrorAction::SwitchAccount;

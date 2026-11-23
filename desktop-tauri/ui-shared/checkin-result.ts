@@ -1,4 +1,4 @@
-import type { CheckinAccount, CheckinResultRow, DailyCheckinState } from './checkin'
+import type { ActivityRunStatus, ActivityStepFailure, CheckinAccount, CheckinResultRow, DailyCheckinState } from './checkin'
 
 export type AccountCheckinStatus = 'done' | 'pending' | 'confirming' | 'inactive' | 'ineligible' | 'captcha' | 'failed'
 
@@ -59,10 +59,50 @@ export function claimCompleted(claim: CheckinResultRow['claim']): boolean {
   return !/可能|未能|未见|失败/.test(message) && /已签到|已领取/.test(message)
 }
 
+function stepFailureText(step?: NonNullable<CheckinResultRow['activity']>['poke']): string {
+  if (!step) return ''
+  const rows = Array.isArray(step.failures) ? step.failures : []
+  if (rows.length > 0) {
+    const parts = rows.slice(0, 3).map(row => {
+      const model = row.model?.trim() || ''
+      const msg = (row.message ?? row.msg)?.trim() || ''
+      if (model && msg) return `${model}: ${msg}`
+      return model || msg
+    }).filter(Boolean)
+    if (parts.length > 0) {
+      return rows.length > 3 ? `${parts.join('；')} 等 ${rows.length} 个模型失败` : parts.join('；')
+    }
+  }
+  return step.msg?.trim() || ''
+}
+
+export function activityFailureDetail(activity?: CheckinResultRow['activity']): string {
+  if (!activity) return ''
+  const summary = activity.summary?.trim()
+  if (summary) return summary
+  if (activity.modelCallsSkipped && activity.error?.trim()) {
+    return `未调用保活模型：${activity.error.trim()}`
+  }
+  const parts: string[] = []
+  if (activity.poke && activity.poke.succeeded !== true) {
+    const detail = stepFailureText(activity.poke)
+    if (detail) parts.push(`模型保活：${detail}`)
+  }
+  const bothUncertain = activity.poke?.uncertain === true && activity.webConversation?.uncertain === true
+  if (activity.webConversation && activity.webConversation.succeeded !== true && !bothUncertain) {
+    const detail = stepFailureText(activity.webConversation)
+    if (detail) parts.push(`网页会话：${detail}`)
+  }
+  if (parts.length > 0) return parts.join('；')
+  return activity.error?.trim() || ''
+}
+
 export function rowCompleted(row: CheckinResultRow): boolean {
   if (row.error?.trim()) return false
+  const kept = row.activity?.pokeSucceeded === true || row.activity?.webConversation?.succeeded === true
+  if (row.mode === 'keepalive') return kept
   const active = row.activity?.report?.succeeded === true || row.activity?.webConversation?.succeeded === true
-  return row.mode === 'keepalive' ? active || row.activity?.pokeSucceeded === true : claimCompleted(row.claim) || active
+  return claimCompleted(row.claim) || active
 }
 
 export function rowPending(row: CheckinResultRow): boolean {
@@ -73,5 +113,90 @@ export function rowPending(row: CheckinResultRow): boolean {
 }
 
 export function rowMessage(row: CheckinResultRow): string {
-  return row.error?.trim() || row.claim?.error?.trim() || row.claim?.msg?.trim() || row.activity?.error?.trim() || ''
+  const base = row.error?.trim() || row.claim?.error?.trim() || row.claim?.msg?.trim() || ''
+  const detail = activityFailureDetail(row.activity)
+  if (!detail) return base
+  if (!base || (row.mode === 'keepalive' && /未确认|请查看具体原因/.test(base))) return detail
+  return base.includes(detail) ? base : `${base}（${detail}）`
+}
+
+export type ActivityStepView = {
+  key: 'model' | 'web' | 'report'
+  state: 'done' | 'pending' | 'idle'
+  model?: string
+  reason?: string
+  at?: number | null
+}
+
+export type NormalizedFailure = {
+  model?: string
+  status?: number
+  message: string
+}
+
+function normalizeFailures(rows?: ActivityStepFailure[]): NormalizedFailure[] {
+  if (!Array.isArray(rows)) return []
+  return rows
+    .map(row => ({
+      model: row.model?.trim() || undefined,
+      status: typeof row.status === 'number' ? row.status : undefined,
+      message: (row.message ?? row.msg)?.trim() || '',
+    }))
+    .filter(row => Boolean(row.model || row.message))
+}
+
+export function describeActivityStatus(status: ActivityRunStatus) {
+  if (!status) return null
+  const steps: ActivityStepView[] = (['model', 'web', 'report'] as const).map(key => {
+    const raw = status.steps?.[key]
+    const state: ActivityStepView['state'] = raw?.done
+      ? 'done'
+      : raw?.pending
+        ? 'pending'
+        : 'idle'
+    return {
+      key,
+      state,
+      model: raw?.model?.trim() || undefined,
+      reason: raw?.reason?.trim() || undefined,
+      at: raw?.at ?? null,
+    }
+  })
+  const activity = status.last?.activity
+  return {
+    running: status.job?.running === true,
+    startedAt: status.job?.startedAt ?? null,
+    finishedAt: status.job?.finishedAt ?? null,
+    lastAt: status.last?.at ?? null,
+    hasPending: steps.some(step => step.state === 'pending'),
+    steps,
+    skippedError: activity?.modelCallsSkipped ? activity.error?.trim() || null : null,
+    poke: activity?.poke
+      ? {
+          succeeded: activity.poke.succeeded === true,
+          uncertain: activity.poke.uncertain === true,
+          model: activity.poke.model?.trim() || undefined,
+          msg: activity.poke.msg?.trim() || undefined,
+          failures: normalizeFailures(activity.poke.failures),
+        }
+      : null,
+    web: activity?.webConversation
+      ? {
+          succeeded: activity.webConversation.succeeded === true,
+          uncertain: activity.webConversation.uncertain === true,
+          model: activity.webConversation.model?.trim() || undefined,
+          conversationId: activity.webConversation.conversationId?.trim() || undefined,
+          msg: activity.webConversation.msg?.trim() || undefined,
+          failures: normalizeFailures(activity.webConversation.failures),
+        }
+      : null,
+    report: activity?.report
+      ? {
+          succeeded: activity.report.succeeded === true,
+          uncertain: activity.report.uncertain === true,
+          streakDays: activity.report.streakDays ?? null,
+          msg: activity.report.msg?.trim() || undefined,
+        }
+      : null,
+  }
 }

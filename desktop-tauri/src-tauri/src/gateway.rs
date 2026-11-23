@@ -318,6 +318,7 @@ async fn call_with_retry_policy(
                         || path == "/api/travel-schedule/run"
                         || path.ends_with("/growth/travel") || path.ends_with("/growth/task") || path.ends_with("/growth/school")
                         || path == "/api/checkin-activity"
+                        || path == "/api/checkin-activity/reset"
                         || path.ends_with("/campaigns/claim") || path.ends_with("/campaigns/redeem")
                         || path.ends_with("/onboarding/claim")
                         || path.strip_prefix("/api/accounts/").and_then(|rest| rest.strip_suffix("/zcode-claim"))

@@ -111,7 +111,6 @@ impl Context {
                 self.desktop_launch.as_ref().ok_or_else(|| super::error("本机启动来源已失效"))?.validate(self)?;
                 Ok(result)
             }
-            "credentials.legacy.take" => super::legacy_credentials::take(self, &params),
             "credential.kiro.external.refresh" => super::external_refresh::invoke(self, &params).await,
             "crypto.deepseek.pow.solve" => super::deepseek_pow::solve(self, &params).await,
             "crypto.monkeycode.cap.solve" => super::monkeycode_cap::solve(self, &params).await,
@@ -430,13 +429,17 @@ impl Context {
                         let body = super::http::body(self, &params, deadline)?;
                         deadline.check()?;
                         self.guard_http_submission(&params)?;
-                        let (result,handle) = script::open_pinned_body(&params, body, client, deadline.cap_at(self.call_deadline)).await?;
+                        let opened = script::open_pinned_body(&params, body, client, deadline.cap_at(self.call_deadline)).await;
+                        self.finish_http_submission(&opened);
+                        let (result, handle) = opened?;
                         return self.keep_http(result,handle,deadline);
                     }
                     let body = super::http::body(self, &params, deadline)?;
                     deadline.check()?;
                     self.guard_http_submission(&params)?;
-                    let (result, handle) = script::open_body_with_policy(&params, body, self.system_proxy_when_unset, deadline).await?;
+                    let opened = script::open_body_with_policy(&params, body, self.system_proxy_when_unset, deadline).await;
+                    self.finish_http_submission(&opened);
+                    let (result, handle) = opened?;
                     self.keep_http(result, handle, deadline)
                 }
             }
@@ -480,6 +483,9 @@ impl Context {
                 sink.events.send(super::super::StreamEvent::Head(proto::StreamHead {
                     status, headers: headers.into_iter().collect(), upstream: proto::UpstreamKind::Chat,
                 })).map_err(|_| super::error("下游请求已结束"))?;
+                if (200..400).contains(&status) {
+                    self.confirm_stream_started();
+                }
                 self.head_sent = true;
                 Ok(Value::Null)
             }

@@ -117,6 +117,8 @@ import { promptRulesApi } from './settings-prompt-api'
 // 与设置页的快照 store 没有交集，见该文件的模块头
 import { CloudSyncPanel } from './settings-cloud-sync'
 import { CaptchaSettingsPanel } from './settings-captcha'
+import { NotificationSettingsPanel } from './settings-notifications'
+import { OauthSettingsPanel } from './settings-oauth'
 import { BrandingSettingsPanel } from './settings-branding'
 import { NetworkAccessDialog, NetworkAccessPanel } from './settings-network-access'
 import { GraphicsSettingsPanel } from './settings-graphics'
@@ -1209,6 +1211,8 @@ function AccountPane({ snap }: { snap: SettingsSnapshot }) {
 
       <CaptchaSettingsPanel disabled={snap.busy !== null} />
 
+      <OauthSettingsPanel />
+
       <Card render={<section />} className='panel'>
         <PanelHead title={t('重置管理员')} />
         <CardContent className='panel-body'>
@@ -1683,6 +1687,9 @@ function SettingsPage() {
         </div>
         <div className={paneClass('account')} data-cat='account'>
           <AccountPane snap={snap} />
+        </div>
+        <div className={paneClass('notifications')} data-cat='notifications'>
+          <NotificationSettingsPanel />
         </div>
         <div className={paneClass('data')} data-cat='data'>
           <DataPane snap={snap} />

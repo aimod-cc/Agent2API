@@ -1,186 +1,152 @@
-import React, { useEffect } from 'react'
-import { AppFrame } from '@ui'
-import { store, useStore, bootstrapTheme } from './state/store'
-import { TabBar, Toast, AuthGate, ThemeSync } from './components/Shell'
-import { PwaNotice } from './components/PwaNotice'
-import { usePwa } from './lib/usePwa'
-import { HomePage } from './pages/HomePage'
-import { ReportPage } from './pages/ReportPage'
-import { AccountsPage } from './pages/AccountsPage'
-import { AssistantPage } from './pages/AssistantPage'
-import { MorePage } from './pages/MorePage'
-import { ModelsPage } from './pages/ModelsPage'
-import { KeysPage } from './pages/KeysPage'
-import { ProxiesPage } from './pages/ProxiesPage'
-import { TasksPage } from './pages/TasksPage'
-import { RequestsPage } from './pages/RequestsPage'
-import { LogsPage } from './pages/LogsPage'
-import { RoutingPage } from './pages/routing-page'
-import { SettingsPage } from './pages/SettingsPage'
-import { ProviderSettingsPage } from './pages/provider-settings-page'
-import { DocsPage } from './pages/DocsPage'
-import { AgentPage } from './pages/AgentPage'
-import { ToolsPage } from './pages/ToolsPage'
-import { ServersPage } from './pages/ServersPage'
-import { CheckinPage } from './pages/CheckinPage'
-import { PluginsPage } from './pages/PluginsPage'
-import type { ScreenId } from './lib/routes'
-import { NavBar } from './components/NavBar'
-import { t } from './i18n'
-import { RequiredUpdateGate } from './components/RequiredUpdateGate'
-import { mobileBranding } from './lib/branding'
-import { serverIdentity } from './lib/servers'
-import { applyDocumentBranding, useBrandingRefresh } from '../../ui-shared/branding'
-import { usePluginStartup } from './lib/usePluginStartup'
+import { useEffect } from 'react'
+import { store, useStore } from './core/store'
+import { NavigationDock, ToastHost } from './ui/components'
+import { AccountDetailSheet } from './views/AccountSheets'
+import { AddAccountSheet } from './views/CheckinAndAddSheets'
+import { AccountsView } from './views/AccountsView'
+import { AuthGateView, ServerSetupView } from './views/AuthView'
+import { ChatView } from './views/ChatView'
+import { CheckinView } from './views/CheckinView'
+import { DashboardView } from './views/DashboardView'
+import { KeyEditorSheet, ModelMappingSheet, ModelTestSheet } from './views/ForwardingSheets'
+import { KeysView } from './views/KeysView'
+import { ModelsView } from './views/ModelsView'
+import { NavCustomizerSheet } from './views/NavCustomizerSheet'
+import { RoutingView } from './views/RoutingView'
+import {
+  ForwardingConfigSheet,
+  LogsSheet,
+  PasswordSheet,
+  RequestsSheet,
+  ServersSheet,
+} from './views/SettingsSheets'
+import { NotificationSheet } from './views/NotificationSheet'
+import { OauthSheet } from './views/OauthSheet'
+import { PricingSheet } from './views/PricingSheet'
+import { SettingsView } from './views/SettingsView'
 
-/**
- * 路由表。
- *
- * 一级页（`primary: true`）显示底部标签栏；二级页显示返回栏。
- * 与桌面端不同：桌面端 13 个一级菜单在手机上收成 5 个标签，其余进
- * 「更多」的宫格 —— 层级只有两层，不再有第三层。
- */
-type ScreenDef = {
-  title: string
-  component: () => React.ReactElement
-  primary?: boolean
-}
+function ActiveSheetHost() {
+  const { sheet } = useStore()
+  if (!sheet) return null
+  const close = () => store.closeSheet()
 
-const SCREENS: Record<ScreenId, ScreenDef> = {
-  home: { title: t('首页'), component: HomePage, primary: true },
-  report: { title: t('报表'), component: ReportPage, primary: true },
-  accounts: { title: t('账号'), component: AccountsPage, primary: true },
-  assistant: { title: t('对话'), component: AssistantPage, primary: true },
-  more: { title: t('更多'), component: MorePage, primary: true },
-  models: { title: t('模型管理'), component: ModelsPage },
-  keys: { title: t('网关 Key'), component: KeysPage },
-  proxies: { title: t('网络代理'), component: ProxiesPage },
-  tasks: { title: t('自动维护'), component: TasksPage },
-  requests: { title: t('请求日志'), component: RequestsPage },
-  logs: { title: t('运行日志'), component: LogsPage },
-  routing: { title: t('路由 · 错误处理'), component: RoutingPage },
-  settings: { title: t('设置'), component: SettingsPage },
-  'provider-settings': { title: t('提供商设置'), component: ProviderSettingsPage },
-  docs: { title: t('接口文档'), component: DocsPage },
-  agent: { title: t('Agent 配置'), component: AgentPage },
-  tools: { title: t('MCP & Skills'), component: ToolsPage },
-  servers: { title: t('服务器'), component: ServersPage },
-  checkin: { title: t('签到中心'), component: CheckinPage },
-  plugins: { title: t('网关插件'), component: PluginsPage },
+  switch (sheet.kind) {
+    case 'servers':
+      return <ServersSheet onClose={close} />
+    case 'nav-customizer':
+      return <NavCustomizerSheet onClose={close} />
+    case 'add-account':
+      return <AddAccountSheet defaultProvider={sheet.defaultProvider} onClose={close} />
+    case 'account-detail':
+      return <AccountDetailSheet account={sheet.account} onClose={close} />
+    case 'model-test':
+      return <ModelTestSheet model={sheet.model} onClose={close} />
+    case 'model-mappings':
+      return <ModelMappingSheet onClose={close} />
+    case 'key-editor':
+      return <KeyEditorSheet item={sheet.item} onClose={close} />
+    case 'requests':
+      return <RequestsSheet onClose={close} />
+    case 'logs':
+      return <LogsSheet onClose={close} />
+    case 'forwarding-config':
+      return <ForwardingConfigSheet onClose={close} />
+    case 'password':
+      return <PasswordSheet onClose={close} />
+    case 'notifications':
+      return <NotificationSheet onClose={close} />
+    case 'oauth':
+      return <OauthSheet onClose={close} />
+    case 'pricing':
+      return (
+        <PricingSheet
+          initialProvider={sheet.provider}
+          initialModel={sheet.model}
+          initialPricing={sheet.pricing}
+          onClose={close}
+        />
+      )
+    default:
+      return null
+  }
 }
 
 export function App() {
-  const state = useStore()
-  const pwa = usePwa()
-  const def = SCREENS[state.route.screen]
-  const Page = def.component
-  const isPrimary = Boolean(def.primary)
-  // 助手页自己滚动对话区，外层不再创建第二个滚动容器。
-  const fillHeight = state.route.screen === 'assistant'
-  /**
-   * APK 首次启动、一台服务器都没配：**没有地址就什么都拉不到**，所以直接
-   * 顶掉整个界面（不显示标签栏 —— 切到别的标签也是空的）。配好一台之后
-   * 这里自然放行。
-   */
-  const needsServer = state.packaged && !state.server
-  const branding = mobileBranding.useValue()
-  useBrandingRefresh(mobileBranding, serverIdentity(), !needsServer)
-  usePluginStartup(!needsServer && !state.authLost, serverIdentity())
+  const { tab, packaged, server, authLost } = useStore()
 
   useEffect(() => {
-    bootstrapTheme()
-    store.restoreFromHash()
-    // 没有可用服务器时不要发请求：那会以「无法连接网关」的形式刷一屏错误，
-    // 而真实原因是「还没填地址」。
-    if (!state.packaged || state.server) {
+    if (server?.base) {
       void store.refresh(true)
     }
-    // 浏览器前进 / 后退（PWA 与 APK 的 WebView 都会触发）。走 store 的
-    // handlePopState 而不是直接 restoreFromHash：前者会同步弹掉二级栈，
-    // 后者只看 hash，会把「返回」变成「重进当前页」。
-    const onPop = () => store.handlePopState()
-    window.addEventListener('popstate', onPop)
-    return () => window.removeEventListener('popstate', onPop)
-    // 只在挂载时跑一次：后续的 refresh 由各页面与写操作自己触发
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [server?.base])
 
-  /**
-   * 安卓物理返回键。
-   *
-   * 不处理的话 Capacitor 的默认行为是直接 finish 掉 Activity —— 用户在
-   * 任何二级页按一下都会回到桌面，而不是退回上一页。
-   *
-   * 优先级：先让已打开的弹层自己关（Sheet / Dialog 走各自的关闭逻辑），
-   * 再交给 store 退栈。首页且无弹层时才退出应用 —— 这是安卓的通行预期。
-   */
   useEffect(() => {
-    if (!state.packaged) return
-    let dispose: (() => void) | undefined
-    let cancelled = false
-    void import('@capacitor/app')
-      .then(({ App: CapApp }) => {
-        if (cancelled) return
-        void CapApp.addListener('backButton', () => {
-          // 弹层开着时先关弹层。Base UI 的弹层挂 data-open，且关闭按钮带
-          // data-slot='sheet-close' / 'dialog-close'；点它等价于用户按关闭。
-          const popup = document.querySelector<HTMLElement>(
-            '[data-slot="sheet-content"][data-open], [data-slot="dialog-content"][data-open]',
-          )
-          if (popup) {
-            const closer = popup.querySelector<HTMLElement>('[data-slot="sheet-close"], [data-slot="dialog-close"]')
-            closer?.click()
-            return
+    const cap = (
+      window as Window & {
+        Capacitor?: {
+          Plugins?: {
+            App?: {
+              addListener?: (
+                eventName: string,
+                cb: () => void,
+              ) => Promise<{ remove: () => void }> | { remove: () => void }
+            }
           }
-          if (!store.handleHardwareBack()) void CapApp.exitApp()
-        }).then(handle => {
-          if (cancelled) void handle.remove()
-          else dispose = () => void handle.remove()
-        })
-      })
-      .catch(() => {
-        /* 插件缺失（例如浏览器形态）时什么都不做：浏览器自己有返回键 */
-      })
+        }
+      }
+    ).Capacitor
+
+    const sub = cap?.Plugins?.App?.addListener?.('backButton', () => {
+      const current = store.getState()
+      if (current.sheet) {
+        store.closeSheet()
+      } else if (!current.navTabs.includes(current.tab)) {
+        store.returnFromSubPage()
+      } else if (current.tab !== 'dashboard') {
+        store.setTab('dashboard')
+      }
+    })
+
     return () => {
-      cancelled = true
-      dispose?.()
+      if (sub && typeof (sub as Promise<{ remove: () => void }>).then === 'function') {
+        void (sub as Promise<{ remove: () => void }>).then(h => h.remove())
+      }
     }
-    // packaged 在应用生命周期内不变
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  useEffect(() => {
-    applyDocumentBranding(branding, `${needsServer ? t('服务器') : def.title} · ${branding.displayName}`)
-  }, [branding, def.title, needsServer])
-
-  if (needsServer) {
+  if (packaged && !server) {
     return (
-      <AppFrame className='m-app'>
-        <ThemeSync />
-        <div className='m-scroll' data-screen='servers'>
-          <ServersPage key={state.serverRevision} />
-        </div>
-        <Toast />
-      </AppFrame>
+      <>
+        <ServerSetupView />
+        <ActiveSheetHost />
+        <ToastHost />
+      </>
+    )
+  }
+
+  if (authLost) {
+    return (
+      <>
+        <AuthGateView mode={authLost} />
+        <ActiveSheetHost />
+        <ToastHost />
+      </>
     )
   }
 
   return (
-    <AppFrame className='m-app' data-offline={pwa.offline ? 'true' : undefined}>
-      <ThemeSync />
-      <PwaNotice />
-      {isPrimary ? null : <NavBar title={def.title} onBack={() => store.back()} />}
-      <div
-        className='m-scroll'
-        style={fillHeight ? { overflow: 'hidden' } : undefined}
-        data-screen={state.route.screen}
-      >
-        <Page key={state.serverRevision} />
-      </div>
-      <TabBar />
-      <Toast />
-      <RequiredUpdateGate />
-      <AuthGate key={state.serverRevision} />
-    </AppFrame>
+    <>
+      {tab === 'dashboard' ? <DashboardView /> : null}
+      {tab === 'checkin' ? <CheckinView /> : null}
+      {tab === 'accounts' ? <AccountsView /> : null}
+      {tab === 'models' ? <ModelsView /> : null}
+      {tab === 'routing' ? <RoutingView /> : null}
+      {tab === 'keys' ? <KeysView /> : null}
+      {tab === 'chat' ? <ChatView /> : null}
+      {tab === 'settings' ? <SettingsView /> : null}
+      <NavigationDock />
+      <ActiveSheetHost />
+      <ToastHost />
+    </>
   )
 }

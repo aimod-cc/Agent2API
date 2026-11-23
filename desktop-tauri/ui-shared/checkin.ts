@@ -159,6 +159,53 @@ export type ScheduleEntry = {
   lastResult: CheckinResult | null
 }
 
+export type ActivityStepFailure = {
+  model?: string
+  status?: number
+  message?: string
+  msg?: string
+}
+
+export type ActivityStepResult = {
+  succeeded?: boolean
+  uncertain?: boolean
+  model?: string | null
+  conversationId?: string | null
+  msg?: string | null
+  failures?: ActivityStepFailure[]
+}
+
+export type ActivityStepSnapshot = {
+  day?: string | null
+  done?: boolean
+  pending?: boolean
+  model?: string | null
+  at?: number | null
+  reason?: string | null
+  status?: number | null
+  resetAt?: number | null
+}
+
+export type ActivityRunStatus = {
+  job?: {
+    running?: boolean
+    cancelled?: boolean
+    startedAt?: number | null
+    finishedAt?: number | null
+    until?: number | null
+  } | null
+  last?: {
+    at?: number | null
+    claim?: CheckinResultRow['claim']
+    activity?: CheckinResultRow['activity']
+  } | null
+  steps?: {
+    model?: ActivityStepSnapshot | null
+    web?: ActivityStepSnapshot | null
+    report?: ActivityStepSnapshot | null
+  } | null
+} | null
+
 export type CheckinResultRow = {
   id?: string
   name?: string
@@ -174,10 +221,15 @@ export type CheckinResultRow = {
     points?: number
   } | null
   activity?: {
-    error?: string
+    mode?: string | null
+    error?: string | null
+    summary?: string | null
+    modelCallsSkipped?: boolean
     pokeSucceeded?: boolean
-    report?: { succeeded?: boolean }
-    webConversation?: { succeeded?: boolean }
+    pokeModel?: string | null
+    poke?: ActivityStepResult | null
+    report?: { succeeded?: boolean; uncertain?: boolean; streakDays?: number | null; msg?: string | null } | null
+    webConversation?: ActivityStepResult | null
   } | null
 }
 
@@ -293,6 +345,7 @@ export type CheckinCenter = {
   travel: TravelState
   pluginTasks?: PluginTaskRow[]
   history: HistoryRow[]
+  recordsTotal?: number
   adminPanels: string[]
   checkinFeatures: Record<string, {
     description?: string | null

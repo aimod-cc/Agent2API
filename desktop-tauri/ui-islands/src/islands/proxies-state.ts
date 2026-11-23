@@ -247,7 +247,7 @@ export async function syncClash(): Promise<void> {
     accept(data)
     if (data.syncError) toast(t('没能同步：{reason}', { reason: data.syncError }), 'err')
     else toast(data.changes
-      ? t('✅ 已同步 Clash Verge 出口（{n} 项变更）', { n: data.changes })
+      ? t('✅ 已同步 EasyClash 出口（{n} 项变更）', { n: data.changes })
       : t('已是最新，没有需要同步的变更'), 'ok')
   } catch (error) {
     toast(t('同步失败：{reason}', { reason: errorMessage(error) }), 'err')
@@ -311,7 +311,7 @@ export async function toggleItem(item: ProxyPoolItem, enabled: boolean): Promise
 
 export async function removeItem(item: ProxyPoolItem): Promise<void> {
   if (item.source === 'clash') {
-    toast(t('只读：在 Clash Verge 里改'), 'err')
+    toast(t('只读：在 EasyClash 里改'), 'err')
     return
   }
   const bridge = wb().workbuddyDesktop
@@ -398,7 +398,7 @@ export async function batchRemove(): Promise<void> {
   const deletable = picked.filter(item => item.source !== 'clash')
   const skipped = picked.length - deletable.length
   if (!deletable.length) {
-    if (skipped) toast(t('选中的 {n} 条都来自 Clash Verge 同步，不能删除（请到 Clash Verge 里删）', { n: skipped }), 'err')
+    if (skipped) toast(t('选中的 {n} 条都来自 EasyClash 同步，不能删除（请到 EasyClash 里删）', { n: skipped }), 'err')
     return
   }
   const names = deletable.slice(0, 8).map(item => escapeHtml(itemName(item))).join(t('、'))
@@ -414,7 +414,7 @@ export async function batchRemove(): Promise<void> {
     ? `<p style="margin-top:6px">${t('选中的代理用于{services}；删除后这些线路将不可用，不会自动回退直连。', { services: services.map(escapeHtml).join(t('、')) })}</p>`
     : ''
   const skippedHtml = skipped
-    ? `<p style="margin-top:6px">${t('另有 {n} 条来自 Clash Verge 同步，将跳过（请到 Clash Verge 里删）。', { n: skipped })}</p>`
+    ? `<p style="margin-top:6px">${t('另有 {n} 条来自 EasyClash 同步，将跳过（请到 EasyClash 里删）。', { n: skipped })}</p>`
     : ''
   const ok = await wb().wbConfirm?.ask?.({
     title: t('批量删除代理'),
@@ -440,7 +440,7 @@ export async function batchRemove(): Promise<void> {
   }
   patch({ batchBusy: false, batchProgress: null })
   const parts = [t('已删除 {n} 个代理', { n: done })]
-  if (skipped) parts.push(t('跳过 {n} 个（Clash 同步）', { n: skipped }))
+  if (skipped) parts.push(t('跳过 {n} 个（EasyClash 同步）', { n: skipped }))
   if (failed) parts.push(t('失败 {n} 个（{reason}）', { n: failed, reason: firstError }))
   toast(failed ? parts.join(t('，')) : `✅ ${parts.join(t('，'))}`, failed ? 'err' : 'ok')
 }

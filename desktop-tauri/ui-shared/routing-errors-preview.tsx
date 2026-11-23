@@ -1,20 +1,21 @@
 import * as React from 'react'
 import { Badge, Card, CardAction, CardContent, CardFooter, CardHeader, CardTitle, Collapsible, CollapsibleContent, CollapsibleTrigger } from '@ui'
 import { ErrorChoice, ErrorIcon, ErrorNumber, ErrorText, ErrorToggle } from './routing-errors-controls'
-import { duration, type ErrorSettings, type ErrorTranslate } from './routing-errors-types'
+import { duration, type ErrorSettings, type ErrorTranslate, type PluginErrorRule } from './routing-errors-types'
 import { errorScenarios, simulateError, type ErrorPreviewInput } from './routing-errors-simulation'
 
-export function ErrorPreviewPanel({ settings, providers, t, input, onChange }: {
-  settings: ErrorSettings; providers: { id: string; label: string }[]; t: ErrorTranslate; input: ErrorPreviewInput; onChange(input: ErrorPreviewInput): void
+export function ErrorPreviewPanel({ settings, providers, providerRules = [], t, input, onChange }: {
+  settings: ErrorSettings; providers: { id: string; label: string }[]; providerRules?: PluginErrorRule[]; t: ErrorTranslate; input: ErrorPreviewInput; onChange(input: ErrorPreviewInput): void
 }) {
   const [more, setMore] = React.useState(false)
   const patch = (next: Partial<ErrorPreviewInput>) => onChange({ ...input, ...next })
-  const result = simulateError(settings, input, t)
+  const result = simulateError(settings, input, t, providerRules)
   return <Card className='re-preview'><CardHeader><ErrorIcon name='route' /><CardTitle>{t('处理预览')}</CardTitle><CardAction><Badge variant='outline' shape='tag'>{t('模拟')}</Badge></CardAction></CardHeader>
     <CardContent className='re-preview-content'>
       <ErrorChoice label={t('选择模拟错误')} value={input.scenario} options={errorScenarios(t).map(item => ({ value: item.id, label: item.label }))} onChange={scenario => patch({ scenario })} />
       <div className={`re-result${result.stopped ? ' is-stopped' : ''}`}><strong>{result.title}</strong></div>
       {result.cooldown ? <div className='re-reset'><ErrorIcon name='timer' /><div><strong>{t('{time}后恢复参与', { time: duration(result.cooldown, t) })}</strong><p>{result.source}</p></div></div> : null}
+      {result.deprioritize ? <div className='re-reset'><ErrorIcon name='timer' /><div><strong>{t('优先级调到最低（{time} 后恢复）', { time: duration(result.deprioritize, t) })}</strong><p>{result.source}</p></div></div> : null}
       <ol className='re-preview-steps'>{result.steps.map((step, index) => <li key={index}><span>{index + 1}</span><div><strong>{step.title}</strong><p>{step.detail}</p></div></li>)}</ol>
       <div className='re-preview-budget'><span>{t('原账号可重发 {n} 次', { n: result.resendsLeft })}</span><span>{t('还可换 {n} 个账号', { n: result.switchesLeft })}</span></div>
       <ErrorToggle label={t('已经开始输出')} checked={input.started} onChange={started => patch({ started })} />
@@ -23,6 +24,10 @@ export function ErrorPreviewPanel({ settings, providers, t, input, onChange }: {
         <CollapsibleContent><div className='re-more-conditions'>
           <ErrorChoice label={t('模拟提供商')} value={input.provider} options={providers.map(item => ({ value: item.id, label: item.label }))} onChange={provider => patch({ provider })} />
           <ErrorText label={t('模拟模型')} value={input.model} onChange={model => patch({ model })} />
+          <div className='re-form-grid'>
+            <ErrorText label={t('指定状态码')} placeholder={t('默认')} value={input.customStatus || ''} onChange={customStatus => patch({ customStatus })} />
+            <ErrorText label={t('指定业务码')} placeholder={t('默认')} value={input.customCode || ''} onChange={customCode => patch({ customCode })} />
+          </div>
           <ErrorToggle label={t('明确指定账号')} checked={input.pinned} onChange={pinned => patch({ pinned })} />
           <div className='re-form-grid'><ErrorNumber label={t('已经换过的账号数')} unit={t('个')} value={input.switchesUsed} max={10} onChange={switchesUsed => patch({ switchesUsed })} />
             <ErrorNumber label={t('已经重发的次数')} unit={t('次')} value={input.resendsUsed} max={10} onChange={resendsUsed => patch({ resendsUsed })} />

@@ -31,9 +31,7 @@ fn try_update_raw_fields_inner<T, E>(
 ) -> Result<T, E> {
     let _usage_guard = usage.then(crate::server::core::usage_query::config::lock);
     let _guard = plugin_task_grants::update_lock();
-    if super::CONFIG_UPDATE_LOCK.is_poisoned() { model_key_source::fail_closed(); }
-    let Some(mut next) = plugin_task_grants::write_snapshot() else {
-        model_key_source::fail_closed();
+    let Some(mut next) = super::write_snapshot_or_recover() else {
         return Err(storage_error());
     };
     let previous = next.clone();
@@ -74,6 +72,8 @@ fn try_update_raw_fields_inner<T, E>(
         next.prompt = super::prompt_from(&next.raw);
     }
     if !save_raw(&next.raw) {
+        // 落库失败时内存仍维持 previous，必须立即用 previous 重建新代次，避免 before_change 撤销后长期停在 401。
+        model_key_source::published(&previous, false);
         return Err(storage_error());
     }
     let changed = fingerprint != synced_fingerprint(&next.raw);

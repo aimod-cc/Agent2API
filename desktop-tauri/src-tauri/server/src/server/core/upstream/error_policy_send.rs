@@ -125,12 +125,7 @@ pub(super) async fn send_with_retry(
             let advice = adapter.retry_decision_async(status, &body, budget.used(), budget.total).await;
             let retry = match advice {
                 RetryDecision::Retry { delay_ms, reason } => Some((decision.retry_delay(delay_ms), reason)),
-                RetryDecision::Default => Some((decision.retry_delay(0), "按统一错误规则在原账号重发".into())),
-                RetryDecision::Stop { reason } => {
-                    error_policy::note(telemetry, &decision, Some(&reason));
-                    telemetry.note_attempt_notice(&reason);
-                    None
-                }
+                RetryDecision::Default | RetryDecision::Stop { .. } => Some((decision.retry_delay(0), "按统一错误规则在原账号重发".into())),
             };
             if let Some((delay, reason)) = retry {
                 if budget.can_wait(delay) {

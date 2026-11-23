@@ -106,9 +106,15 @@ pub async fn skill_metadata(State(state): State<ServerState>, headers: HeaderMap
     )
 }
 
-async fn skill_operation(state: &ServerState, scope: Option<&KeyScope>, body: Bytes, operation: &str) -> Response {
-    if !tool_services::is_enabled(tool_services::WEB_SEARCH_SERVICE_ID, "skill") {
-        return skill_disabled();
+async fn run_tool_operation(
+    state: &ServerState,
+    scope: Option<&KeyScope>,
+    body: Bytes,
+    protocol: &str,
+    operation: &str,
+) -> Response {
+    if !tool_services::is_enabled(tool_services::WEB_SEARCH_SERVICE_ID, protocol) {
+        return if protocol == "skill" { skill_disabled() } else { api_disabled() };
     }
     let payload = match parse_body(&body) {
         Ok(value) => value,
@@ -124,8 +130,16 @@ async fn skill_operation(state: &ServerState, scope: Option<&KeyScope>, body: By
         Ok(items) => items,
         Err(error) => return search_error_response(&error),
     };
+    let limit = if operation == "search" {
+        match tool_services::extract_limit(&payload) {
+            Ok(limit) => limit,
+            Err(error) => return search_error_response(&error),
+        }
+    } else {
+        None
+    };
     let outcome = if operation == "search" {
-        tool_services::run_search(state.store(), scope, items)
+        tool_services::run_search(state.store(), scope, items, limit)
             .await
             .map(|run| (run.payload, run.successful))
     } else {
@@ -140,6 +154,10 @@ async fn skill_operation(state: &ServerState, scope: Option<&KeyScope>, body: By
         }
         Err(error) => search_error_response(&error),
     }
+}
+
+async fn skill_operation(state: &ServerState, scope: Option<&KeyScope>, body: Bytes, operation: &str) -> Response {
+    run_tool_operation(state, scope, body, "skill", operation).await
 }
 
 /// POST /skill/web-search/search
@@ -187,39 +205,7 @@ pub async fn api_metadata(State(state): State<ServerState>, headers: HeaderMap) 
 }
 
 async fn api_operation(state: &ServerState, scope: Option<&KeyScope>, body: Bytes, operation: &str) -> Response {
-    if !tool_services::is_enabled(tool_services::WEB_SEARCH_SERVICE_ID, "api") {
-        return api_disabled();
-    }
-    let payload = match parse_body(&body) {
-        Ok(value) => value,
-        Err(error) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                json!({ "error": { "code": "invalid_input", "message": error.message } }),
-            )
-        }
-    };
-    let field = if operation == "search" { "queries" } else { "urls" };
-    let items = match tool_services::batch_items(payload.get(field), field) {
-        Ok(items) => items,
-        Err(error) => return search_error_response(&error),
-    };
-    let outcome = if operation == "search" {
-        tool_services::run_search(state.store(), scope, items)
-            .await
-            .map(|run| (run.payload, run.successful))
-    } else {
-        tool_services::run_fetch(items)
-            .await
-            .map(|run| (run.payload, run.successful))
-    };
-    match outcome {
-        Ok((payload, successful)) => {
-            let status = if successful == 0 { StatusCode::BAD_GATEWAY } else { StatusCode::OK };
-            json_response(status, payload)
-        }
-        Err(error) => search_error_response(&error),
-    }
+    run_tool_operation(state, scope, body, "api", operation).await
 }
 
 /// POST /api/web-search/search

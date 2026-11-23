@@ -181,6 +181,7 @@
   "检查失败": "Falha na verificação",
   "检查更新": "Verificar atualizações",
   "检查更新与下载安装包使用所选线路；未选择代理时先直连，失败后尝试 Clash Verge 混合端口；指定代理不可用时不会自动改走直连。": "A verificação de atualizações e o download do instalador usam a rota selecionada. Sem proxy selecionado, tenta primeiro a conexão direta e, se falhar, a porta mista do Clash Verge. Um proxy especificado indisponível nunca volta automaticamente à conexão direta.",
+  "检查更新与下载安装包使用所选线路；未选择代理时先直连，失败后尝试 EasyClash 混合端口；指定代理不可用时不会自动改走直连。": "A verificação de atualizações e o download do instalador usam a rota selecionada. Sem proxy selecionado, tenta primeiro a conexão direta e, se falhar, a porta mista do EasyClash. Um proxy especificado indisponível nunca volta automaticamente à conexão direta.",
   "检查更新与下载安装包使用所选线路；未选择代理时直连，指定代理不可用时不会自动改走直连。": "Verificações de atualização e downloads usam a rota selecionada. Sem proxy, a conexão é direta; um proxy selecionado indisponível não muda automaticamente para conexão direta.",
   "检查更新与下载安装包走哪条线路（当前：{current}）；选择即保存。选项来自「网络代理」页；直连失败时会自动借 Clash 混合端口重试一次，选定指定代理后只走它": "Define por qual conexão passam a verificação de atualizações e o download do instalador (atual: {current}); a seleção é salva imediatamente. As opções vêm da página “Proxy de rede”; se a conexão direta falhar, será feita automaticamente uma nova tentativa pela porta híbrida do Clash; ao selecionar um proxy específico, apenas ele será usado",
   "检查更新失败：{error}": "Falha ao verificar atualizações: {error}",

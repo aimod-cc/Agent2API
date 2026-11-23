@@ -81,11 +81,10 @@ impl Invocation {
             Some("cancelled") => "Wasm 插件调用已取消",
             Some("unavailable") => "Wasm 插件调用已关闭",
             Some(_) => "Wasm 插件执行未完成",
-            None => "Wasm 插件计算用量",
+            None => "Wasm 插件沙盒资源统计",
         };
         let level = if matches!(reason, Some("cancelled" | "unavailable")) { "info" }
             else if error.is_some() { "warn" }
-            else if self.method == proto::methods::gateway::CONVERSATION { "info" }
             else { "debug" };
         let data = json!({ "provider": self.provider, "action": self.method, "moduleDigest": self.module,
             "account": state.account, "requestId": state.request, "phase": state.phase,

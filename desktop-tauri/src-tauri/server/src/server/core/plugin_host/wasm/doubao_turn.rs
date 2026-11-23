@@ -64,12 +64,20 @@ impl Context {
             }
             local_gate::check(&turn.row,self.call_deadline).await?;
         }
-        let turn = self.doubao_turn.as_mut().ok_or_else(invalid)?;
-        let client = turn.client.client().map_err(|_|invalid())?.clone();
+        let client = self.doubao_turn.as_ref().ok_or_else(invalid)?.client.client().map_err(|_| invalid())?.clone();
         let task = (url.path()=="/chat/async/chunk_stream").then(||body["task_id"].as_str().unwrap_or("").to_string());
-        let (result,handle) = script::open_pinned_body(params,pinned_body,client,deadline.cap_at(self.call_deadline)).await?;
+        let opened = script::open_pinned_body(params,pinned_body,client,deadline.cap_at(self.call_deadline)).await;
+        if url.path() == "/chat/completion" {
+            self.finish_http_submission(&opened);
+        } else {
+            self.confirm_stream_started();
+        }
+        let (result,handle) = opened?;
         if result["status"] == 200 && result["headers"]["content-type"].as_str().is_some_and(|value| value.starts_with("text/event-stream")) {
-            turn.readers.insert(handle.id().to_string(),receipt::Reader::new(task));
+            self.confirm_stream_started();
+            if let Some(turn) = self.doubao_turn.as_mut() {
+                turn.readers.insert(handle.id().to_string(),receipt::Reader::new(task));
+            }
         }
         Ok(Some((result,handle)))
     }

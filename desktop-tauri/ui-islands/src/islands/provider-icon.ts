@@ -10,25 +10,43 @@ type IconBridge = {
   }
 }
 
+const iconListeners = new Set<() => void>()
+let bridgeConnected = false
+let unsubscribeRefresh: (() => void) | undefined
+let cachedProviderIcons: unknown = (window as unknown as IconBridge).wbApp?.getState?.()?.providerIcons
+
+function syncProviderIcons(): void {
+  const next = (window as unknown as IconBridge).wbApp?.getState?.()?.providerIcons
+  if (next === cachedProviderIcons) return
+  cachedProviderIcons = next
+  for (const listener of iconListeners) listener()
+}
+
+function connectBridge(): void {
+  unsubscribeRefresh?.()
+  unsubscribeRefresh = (window as unknown as IconBridge).wbApp?.subscribeRefresh?.(syncProviderIcons)
+  syncProviderIcons()
+}
+
+function ensureConnected(): void {
+  if (bridgeConnected) return
+  bridgeConnected = true
+  window.addEventListener('wb:app-ready', connectBridge)
+  connectBridge()
+}
+
 function subscribe(listener: () => void): () => void {
-  let unsubscribe: (() => void) | undefined
-  const connect = () => {
-    unsubscribe?.()
-    unsubscribe = (window as unknown as IconBridge).wbApp?.subscribeRefresh?.(listener)
-    listener()
-  }
-  window.addEventListener('wb:app-ready', connect)
-  connect()
+  ensureConnected()
+  iconListeners.add(listener)
   return () => {
-    window.removeEventListener('wb:app-ready', connect)
-    unsubscribe?.()
+    iconListeners.delete(listener)
   }
 }
 
 export function useProviderIcon(provider: string, fallback = BUILTIN_PROVIDER_ICONS[provider] || '') {
   const base = useGatewayBase()
   const icon = React.useSyncExternalStore(subscribe, () => providerIconSource(
-    (window as unknown as IconBridge).wbApp?.getState?.()?.providerIcons, provider,
+    cachedProviderIcons, provider,
     path => `${base.replace(/\/+$/, '')}${path}`,
   ))
   return useImageFallback(icon, fallback)

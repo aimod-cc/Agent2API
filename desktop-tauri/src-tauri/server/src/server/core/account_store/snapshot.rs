@@ -16,9 +16,16 @@ struct CachedSnapshot {
     revision: u64,
     metadata: u64,
     data_version: i64,
+    beijing_day: String,
     checked_at: Instant,
-    rows: Arc<BTreeMap<i64, Arc<Value>>>,
+    rows: Arc<BTreeMap<i64, CachedRow>>,
     snapshot: Arc<RoutingSnapshot>,
+}
+
+#[derive(Clone)]
+struct CachedRow {
+    public: Arc<Value>,
+    onboarding_settled: Option<Arc<Value>>,
 }
 
 pub(crate) struct RoutingSnapshot {
@@ -27,15 +34,21 @@ pub(crate) struct RoutingSnapshot {
     pub by_provider: HashMap<String, Vec<Arc<Value>>>,
     pub public_accounts: Vec<Arc<Value>>,
     pub public_by_id: HashMap<String, Arc<Value>>,
+    pub onboarding_settled: HashMap<String, Arc<Value>>,
     pub available_providers: HashSet<String>,
     pub forwarding_providers: HashSet<String>,
 }
 
 impl RoutingSnapshot {
-    fn from_rows(rows: &BTreeMap<i64, Arc<Value>>) -> Self {
-        let public_accounts: Vec<_> = rows.values().cloned().collect();
+    fn from_rows(rows: &BTreeMap<i64, CachedRow>) -> Self {
+        let public_accounts: Vec<_> = rows.values().map(|row| row.public.clone()).collect();
         let public_by_id = public_accounts.iter().filter_map(|account| {
             Some((account.get("id")?.as_str()?.to_string(), account.clone()))
+        }).collect();
+        let onboarding_settled = rows.values().filter_map(|row| {
+            let id = row.public.get("id")?.as_str()?;
+            let settled = row.onboarding_settled.as_ref()?;
+            Some((id.to_string(), settled.clone()))
         }).collect();
         let accounts: Vec<_> = public_accounts.iter().map(|account| Arc::new(route_account(account))).collect();
         let by_id = accounts.iter().filter_map(|account| {
@@ -54,7 +67,16 @@ impl RoutingSnapshot {
             let provider = crate::server::core::routing::provider_of(account);
             by_provider.entry(provider.to_string()).or_default().push(account.clone());
         }
-        Self { accounts, by_id, by_provider, public_accounts, public_by_id, available_providers, forwarding_providers }
+        Self {
+            accounts,
+            by_id,
+            by_provider,
+            public_accounts,
+            public_by_id,
+            onboarding_settled,
+            available_providers,
+            forwarding_providers,
+        }
     }
 }
 
@@ -63,7 +85,10 @@ impl AccountStore {
         let Some(db) = self.database() else { return empty() };
         let cache = self.snapshot_cache();
         let metadata = crate::server::core::providers::catalog::generation();
-        if let Some(snapshot) = fresh(cache, db.account_revision(), metadata) { return snapshot; }
+        let beijing_day = crate::server::core::beijing::today_key();
+        if let Some(snapshot) = fresh(cache, db.account_revision(), metadata, &beijing_day) {
+            return snapshot;
+        }
         crate::server::core::blocking::in_place(|| self.build_routing_snapshot(db))
     }
 
@@ -71,16 +96,19 @@ impl AccountStore {
         let cache = self.snapshot_cache();
         let _build = cache.build.lock().unwrap_or_else(|error| error.into_inner());
         let metadata = crate::server::core::providers::catalog::generation();
-        if let Some(snapshot) = fresh(cache, db.account_revision(), metadata) { return snapshot; }
+        let beijing_day = crate::server::core::beijing::today_key();
+        if let Some(snapshot) = fresh(cache, db.account_revision(), metadata, &beijing_day) {
+            return snapshot;
+        }
         let previous = cache.state.read().ok().and_then(|state| state.as_ref().map(|cached| {
-            (cached.revision, cached.metadata, cached.data_version, cached.rows.clone())
+            (cached.revision, cached.metadata, cached.data_version, cached.beijing_day.clone(), cached.rows.clone())
         }));
         // 连接锁只复制密文行；解密、规则推导和轻量投影全部在锁外执行。
         let batch = db.with(|conn| -> rusqlite::Result<_> {
             let data_version: i64 = conn.pragma_query_value(None, "data_version", |row| row.get(0))?;
-            let since = previous.as_ref().filter(|(_, old_metadata, old_version, _)| {
-                *old_metadata == metadata && *old_version == data_version
-            }).map(|(revision, _, _, _)| *revision);
+            let since = previous.as_ref().filter(|(_, old_metadata, old_version, old_day, _)| {
+                *old_metadata == metadata && *old_version == data_version && *old_day == beijing_day
+            }).map(|(revision, _, _, _, _)| *revision);
             let changes = db.account_changes(since);
             let (replace, rows, unchanged) = match changes.rows {
                 Some(ids) => {
@@ -93,7 +121,8 @@ impl AccountStore {
         }).and_then(Result::ok);
         let Some((revision, data_version, replace, changes, unchanged)) = batch else { return empty() };
         if unchanged && db.account_revision() == revision
-            && crate::server::core::providers::catalog::generation() == metadata {
+            && crate::server::core::providers::catalog::generation() == metadata
+            && crate::server::core::beijing::today_key() == beijing_day {
             if let Ok(mut state) = cache.state.write() {
                 if let Some(cached) = state.as_mut() {
                     cached.checked_at = Instant::now();
@@ -102,14 +131,19 @@ impl AccountStore {
             }
         }
         let mut rows = if replace { BTreeMap::new() } else {
-            previous.map(|(_, _, _, rows)| (*rows).clone()).unwrap_or_default()
+            previous.map(|(_, _, _, _, rows)| (*rows).clone()).unwrap_or_default()
         };
         let mut failed = 0;
         for (rowid, raw) in changes {
             rows.remove(&rowid);
             if let Some(raw) = raw {
                 match read_rows::decode(raw) {
-                    Ok((_, record)) => { rows.insert(rowid, Arc::new(self.public_account(&record))); }
+                    Ok((_, record)) => {
+                        let public = Arc::new(self.public_account(&record));
+                        let ledger = super::plugin_ledger::ledger_value(&record, "onboarding");
+                        let onboarding_settled = ledger.is_object().then(|| Arc::new(ledger));
+                        rows.insert(rowid, CachedRow { public, onboarding_settled });
+                    }
                     Err(_) => failed += 1,
                 }
             }
@@ -118,10 +152,19 @@ impl AccountStore {
             super::sql::warn_load_failure("读取选路账号", &format!("{failed} 条账号记录解密或解析失败，已跳过；原始数据未修改"));
         }
         let snapshot = Arc::new(RoutingSnapshot::from_rows(&rows));
-        if db.account_revision() == revision && crate::server::core::providers::catalog::generation() == metadata {
+        if db.account_revision() == revision
+            && crate::server::core::providers::catalog::generation() == metadata
+            && crate::server::core::beijing::today_key() == beijing_day {
             if let Ok(mut state) = cache.state.write() {
-                *state = Some(CachedSnapshot { revision, metadata, data_version,
-                    checked_at: Instant::now(), rows: Arc::new(rows), snapshot: snapshot.clone() });
+                *state = Some(CachedSnapshot {
+                    revision,
+                    metadata,
+                    data_version,
+                    beijing_day,
+                    checked_at: Instant::now(),
+                    rows: Arc::new(rows),
+                    snapshot: snapshot.clone(),
+                });
             }
         }
         snapshot
@@ -142,11 +185,14 @@ impl AccountStore {
     }
 }
 
-fn fresh(cache: &SnapshotCache, revision: u64, metadata: u64) -> Option<Arc<RoutingSnapshot>> {
+fn fresh(cache: &SnapshotCache, revision: u64, metadata: u64, beijing_day: &str) -> Option<Arc<RoutingSnapshot>> {
     let state = cache.state.read().ok()?;
     let cached = state.as_ref()?;
-    (cached.revision == revision && cached.metadata == metadata
-        && cached.checked_at.elapsed() < Duration::from_secs(1)).then(|| cached.snapshot.clone())
+    (cached.revision == revision
+        && cached.metadata == metadata
+        && cached.beijing_day == beijing_day
+        && cached.checked_at.elapsed() < Duration::from_secs(1))
+    .then(|| cached.snapshot.clone())
 }
 
 fn empty() -> Arc<RoutingSnapshot> {

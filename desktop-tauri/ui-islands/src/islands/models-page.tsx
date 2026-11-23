@@ -8,6 +8,12 @@ import {
 } from '@ui'
 import { TableFooter, useClientPaging } from './table-shell'
 import { CapabilityDialog } from './model-capability-dialog'
+import { ModelPricingDialog, type ModelPricingContext } from './model-pricing-dialog'
+import { ProviderPricingDialog, type ProviderPricingContext } from './provider-pricing-dialog'
+import {
+  loadPricingSettings, switchDisplayCurrency, updateCachedDisplay, usePricingDisplay,
+  type ModelPricingSettings,
+} from './model-pricing'
 import { ModelTestDialog, type ModelTestTarget } from './model-test-dialog'
 import { ModelBatchDialog } from './models-batch-dialog'
 import { ModelCell } from './models-cells'
@@ -153,6 +159,10 @@ function ModelsPage() {
    * 放在组件里就够了。值为 null = 弹窗关着。
    */
   const [testTarget, setTestTarget] = React.useState<ModelTestTarget | null>(null)
+  const [pricingTarget, setPricingTarget] = React.useState<ModelPricingContext | null>(null)
+  const [providerPricingTarget, setProviderPricingTarget] = React.useState<ProviderPricingContext | null>(null)
+  const [pricingSettings, setPricingSettings] = React.useState<ModelPricingSettings | null>(null)
+  const pricingDisplay = usePricingDisplay()
   /** 批量操作的弹窗开关（勾选若干行后由表头旁按钮打开） */
   const [batchOpen, setBatchOpen] = React.useState(false)
   /**
@@ -369,13 +379,58 @@ function ModelsPage() {
     )
   }
 
+  React.useEffect(() => {
+    const fromView = state.data?.pricingSettings
+    if (fromView) {
+      setPricingSettings(fromView)
+      updateCachedDisplay({
+        currency: fromView.currency,
+        exchangeRate: fromView.fx?.rate,
+        fx: fromView.fx,
+      })
+    } else if (!pricingSettings) {
+      void loadPricingSettings().then(res => { if (res) setPricingSettings(res) }).catch(() => {})
+    }
+  }, [state.data?.pricingSettings])
+
+  async function reloadPricingAndManage(): Promise<void> {
+    const modelsPanel = (window as unknown as {
+      wbModelsPanel?: { load?: (options?: { force?: boolean }) => Promise<void> }
+    }).wbModelsPanel
+    const [latest] = await Promise.all([
+      loadPricingSettings().catch(() => null),
+      modelsPanel?.load?.({ force: true }) ?? Promise.resolve(),
+    ])
+    if (latest) setPricingSettings(latest)
+  }
+
+  function openModelPricing(model: ManageModel): void {
+    const pid = model.provider || ''
+    setPricingTarget({
+      provider: pid,
+      providerLabel: providerLabelOf(pid),
+      modelId: model.id,
+      pricing: model.pricing ?? null,
+      settings: pricingSettings,
+    })
+  }
+
+  function openProviderPricing(): void {
+    if (provider === 'all' || provider === ALL_CUSTOM) return
+    setProviderPricingTarget({
+      provider,
+      providerLabel: providerLabelOf(provider),
+      settings: pricingSettings,
+    })
+  }
+
   function modelRow(model: ManageModel) {
     // 勾选的行挂 .sel：品牌淡底（比 hover 高一档），让「选中的是哪几行」在滚动后仍可辨
     const picked = selection.has(rowKeyOf(model))
     return (
       <TableRow key={`${model.provider || ''}\u0001${model.id}`} className={cn(picked && 'sel')}>
         <ModelCell model={model} selection={selection} togglePick={togglePick}
-          setTestTarget={setTestTarget} columns={columns} />
+          setTestTarget={setTestTarget} setPricingTarget={openModelPricing} columns={columns} />
       </TableRow>
     )
   }
@@ -503,6 +558,21 @@ function ModelsPage() {
                   </span>
                 </div>
                 <div className='head-actions'>
+                  <SegmentedControl
+                    value={pricingDisplay.currency}
+                    onValueChange={value => { void switchDisplayCurrency(value as 'usd' | 'cny') }}
+                    options={[{ value: 'usd', label: 'USD $' }, { value: 'cny', label: 'CNY ¥' }]}
+                    aria-label={t('计价货币')}
+                  />
+                  {provider !== 'all' && provider !== ALL_CUSTOM ? (() => {
+                    const rule = pricingSettings?.providerPricing?.[provider]
+                    const tag = rule?.priceRate ? ` ×${rule.priceRate}` : rule?.rateWindows?.length ? ` ${rule.rateWindows.length}时段` : ''
+                    return (
+                      <Button variant='outline' size='sm' onClick={openProviderPricing}>
+                        {t('计价倍率')}{tag}
+                      </Button>
+                    )
+                  })() : null}
                   {view.providers?.some(item => item.provider === provider && item.settingsAvailable) ? <Button variant='outline' size='sm'
                     onClick={() => openProviderSettings(provider)}>{t('提供商设置')}</Button> : null}
                   {/* 「获取模型」是这一页的主操作（把清单拉回来），用实心主按钮建立主次；
@@ -575,6 +645,7 @@ function ModelsPage() {
                   <col className='c-check' data-col='check' />
                   <col className='c-model' data-col='model' />
                   <col className='c-rate' data-col='rate' />
+                  <col className='c-pricing' data-col='pricing' />
                   <col className='c-visibility' data-col='visibility' />
                   <col className='c-source' data-col='source' />
                   <col className='c-budget' data-col='budget' />
@@ -597,6 +668,7 @@ function ModelsPage() {
                       setSort(`rate-${direction}`)
                       paging.goto(1)
                     }}>{t('倍率')}</TableHead>
+                  <TableHead data-col='pricing' title={t('点击任意单元格可覆盖单价或设置参考模型')}>{t('计价')}</TableHead>
                   <TableHead data-col='visibility' title={t('这个模型在官方客户端里是否会被展列；不展示的那些默认已关闭（含默认绑定）')}>{t('可见性')}</TableHead>
                   <TableHead data-col='source'>{t('来源')}</TableHead>
                   {/* 表头只留短标题，完整口径进问号提示（原括号长标题让表头喧宾夺主）。
@@ -682,6 +754,14 @@ function ModelsPage() {
       {batchOpen
         ? <ModelBatchDialog models={selectedModels} onClose={() => setBatchOpen(false)}
           onDone={() => { setSelection(new Set()); setBatchOpen(false) }} />
+        : null}
+      {pricingTarget
+        ? <ModelPricingDialog context={pricingTarget} onClose={() => setPricingTarget(null)}
+          onSaved={reloadPricingAndManage} />
+        : null}
+      {providerPricingTarget
+        ? <ProviderPricingDialog context={providerPricingTarget} onClose={() => setProviderPricingTarget(null)}
+          onSaved={reloadPricingAndManage} />
         : null}
     </>
   )

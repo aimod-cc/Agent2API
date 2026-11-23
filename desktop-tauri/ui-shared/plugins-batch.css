@@ -15,8 +15,9 @@
 .plugins-repair-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid var(--hairline); border-radius: var(--r-md); }
 .plugins-file-drop { width: 100%; height: auto; min-height: 108px; gap: 16px; border-style: dashed; background: var(--surface-2); }
 .plugins-file-drop.is-dragging { border-color: var(--primary); background: var(--primary-soft); }
-.plugins-file-list { min-height: 0; border: 1px solid var(--hairline); border-radius: var(--r-md); overflow-x: hidden; overflow-y: auto; }
-.plugins-file-list-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--hairline); background: var(--surface-2); font-size: 12px; }
+.plugins-file-list { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--hairline); border-radius: var(--r-md); overflow: hidden; }
+.plugins-file-list-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--hairline); background: var(--surface-2); font-size: 12px; }
+.plugins-file-rows { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; }
 .plugins-file-row { display: flex; align-items: center; gap: 12px; min-height: 72px; padding: 12px 16px; border-bottom: 1px solid var(--hairline); }
 .plugins-file-row:last-child { border-bottom: 0; }
 .plugins-file-state { flex: 0 0 auto; min-width: 96px; text-align: right; font-size: 11.5px; }

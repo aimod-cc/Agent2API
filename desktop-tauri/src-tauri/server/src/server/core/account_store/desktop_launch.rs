@@ -12,39 +12,53 @@ pub(crate) struct LaunchOrigin {
     row: i64,
     added: i64,
     initial: Value,
+    initial_proxy: Value,
     accepted: std::sync::Mutex<Value>,
 }
 
-fn read(conn: &rusqlite::Connection, id: &str, provider: &str) -> Result<(i64, i64, Value), String> {
+fn read(conn: &rusqlite::Connection, id: &str, provider: &str) -> Result<(i64, i64, Value, Value), String> {
     let record = sql::load_by_id(conn, id).map_err(|_| "账号凭证不可读")?.ok_or("账号不存在")?;
     if record.provider() != provider { return Err("账号不属于当前提供商".into()); }
     let row = conn.query_row("SELECT rowid FROM accounts WHERE id=?1 AND provider=?2", [id, provider], |row| row.get(0))
         .map_err(|_| "账号原始记录不可确认")?;
     Ok((row, record.added_at(), json!({ "identity": record.get("pluginIdentity").cloned().unwrap_or_else(|| json!(record.id())),
-        "desktop": record.get("desktop").and_then(Value::as_bool).unwrap_or(false), "secret": plugin_accounts::secret_of(&record) })))
+        "desktop": record.get("desktop").and_then(Value::as_bool).unwrap_or(false), "secret": plugin_accounts::secret_of(&record) }),
+        record.proxy()))
 }
 
 impl AccountStore {
     pub(crate) fn desktop_launch_origin(&self, provider: &str, id: &str) -> Result<LaunchOrigin, String> {
         let db = self.database().cloned().ok_or("账号数据库不可用")?;
         let _guard = self.guard();
-        let ((row, added, initial), source) = db.prepare_credential_source(|conn| read(conn, id, provider))
+        let ((row, added, initial, initial_proxy), source) = db.prepare_credential_source(|conn| read(conn, id, provider))
             .map_err(|_| "账号存储来源不可确认")??;
         Ok(LaunchOrigin { store: self.clone(), db, source, id: id.into(), provider: provider.into(), row, added,
-            accepted: std::sync::Mutex::new(initial.clone()), initial })
+            accepted: std::sync::Mutex::new(initial.clone()), initial, initial_proxy })
     }
 }
 
 impl LaunchOrigin {
     pub(crate) fn initial(&self) -> &Value { &self.initial }
+    pub(crate) fn initial_proxy(&self) -> &Value { &self.initial_proxy }
 
     pub(crate) fn check(&self, expect: &Value) -> Result<(), String> {
         let _guard = self.store.guard();
         self.db.commit_credential_source(&self.source, |conn| {
-            let (row, added, current) = read(conn, &self.id, &self.provider)?;
+            let (row, added, current, _) = read(conn, &self.id, &self.provider)?;
             let current = Secret(current);
             if row != self.row || added != self.added || &current.0 != expect {
                 return Err("账号在启动准备期间已变化，请重新发起操作".into());
+            }
+            Ok(())
+        }).map_err(|_| "账号存储已恢复或切换，本次启动确认已失效")?
+    }
+
+    pub(crate) fn check_proxy(&self) -> Result<(), String> {
+        let _guard = self.store.guard();
+        self.db.commit_credential_source(&self.source, |conn| {
+            let (row, added, _, proxy) = read(conn, &self.id, &self.provider)?;
+            if row != self.row || added != self.added || proxy != self.initial_proxy {
+                return Err("账号代理配置已变化，请重新确认".into());
             }
             Ok(())
         }).map_err(|_| "账号存储已恢复或切换，本次启动确认已失效")?
@@ -87,7 +101,7 @@ impl LaunchOrigin {
         let updated = self.db.commit_credential_source(&self.source, |conn| {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|_| "账号凭证写回不可用")?;
             if !manager.is_current() { return Err("本机管理会话已变化，未写回账号凭证".into()); }
-            let (row, added, current) = read(&tx, &self.id, &self.provider)?;
+            let (row, added, current, _) = read(&tx, &self.id, &self.provider)?;
             let current = Secret(current);
             if row != self.row || added != self.added || current.0 != *accepted {
                 return Err("账号在启动准备期间已变化，请重新发起操作".into());
@@ -123,6 +137,7 @@ impl LaunchOrigin {
 impl Drop for LaunchOrigin {
     fn drop(&mut self) {
         crate::server::core::plugin_host::wasm::desktop_launch::wipe(&mut self.initial);
+        crate::server::core::plugin_host::wasm::desktop_launch::wipe(&mut self.initial_proxy);
         if let Ok(value) = self.accepted.get_mut() { crate::server::core::plugin_host::wasm::desktop_launch::wipe(value); }
     }
 }

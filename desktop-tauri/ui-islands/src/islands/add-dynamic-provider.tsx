@@ -12,9 +12,12 @@ import {
   type LoginProgress, type LoginResult,
   type WebLoginController, type WebLoginView,
 } from './add-account-bridge'
-import { draftOfProxy, readProxyDraft } from './accounts-proxy-form'
-import { accountProxySummary, AccountProxySection } from './add-account-proxy'
-import { UserAgentInput, useUserAgentPresets, userAgentEditable, applyUserAgentAfterCreate, createdAccountIdOf } from './add-account-user-agent'
+import { readProxyDraft } from './accounts-proxy-form'
+import { useAddAccountProxy, useAddAccountProxyDraft } from './add-account-proxy'
+import { useAddAccountSettings } from './add-account-settings'
+import { SettingGroup } from './accounts-settings-fields'
+import { providerFeatures } from './accounts-features'
+import { userAgentEditable, createdAccountIdOf } from './add-account-user-agent'
 import { openExternal } from './update-shared'
 import { PluginLoginInteraction, type LoginRequest } from '../../../ui-shared/plugin-login-interaction'
 import { PluginDesktopImport } from '../../../ui-shared/plugin-desktop-import'
@@ -55,14 +58,13 @@ export function DynamicProviderBlock({
   const [values, setValues] = React.useState<Record<string, Record<string, string>>>({})
   const [upload, setUpload] = React.useState<CredentialUpload>()
   const [name, setName] = React.useState('')
-  // 第三方插件是否允许覆盖由后端申报；网页登录成功后走同一补写入口。
-  const [userAgent, setUserAgent] = React.useState('')
-  const userAgentRef = React.useRef(userAgent)
-  userAgentRef.current = userAgent
-  const uaPresets = useUserAgentPresets()
+  const proxy = useAddAccountProxy()
+  const { draft: proxyDraft, change: setProxyDraft } = useAddAccountProxyDraft()
+  const settings = useAddAccountSettings()
+  const settingsRef = React.useRef(settings)
+  settingsRef.current = settings
+  const supportsUsage = providerFeatures(provider).usage
   const uaEditable = userAgentEditable(provider)
-  const [proxyDraft, setProxyDraft] = React.useState(() => draftOfProxy(undefined))
-  const [readingSystemProxy, setReadingSystemProxy] = React.useState(false)
   const [mode, setMode] = React.useState<'external' | 'embedded'>(shared().workbuddyDesktop?.platform === 'web' ? 'external' : 'embedded')
   const [saving, setSaving] = React.useState(false)
   const [error, updateError] = React.useState('')
@@ -107,7 +109,7 @@ export function DynamicProviderBlock({
   const methodAvailable = method && methodsState.phase === 'ready'
   const selectedRef = React.useRef(selected)
   selectedRef.current = selected || method?.id || ''
-  const locked = saving || loginView.disabled || readingSystemProxy
+  const locked = saving || loginView.disabled || proxy.busy
   const [readingFile, setReadingFile] = React.useState(false)
   const submitLocked = locked || readingFile || resolvedPrompts.pending || Boolean(resolvedPrompts.error)
   const remarkRef = React.useRef(name)
@@ -195,7 +197,7 @@ export function DynamicProviderBlock({
       setValues({})
       setName('')
       setUpload(undefined)
-      setProxyDraft(previous => ({ ...previous, password: '' }))
+      setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
     }
   }, [active, preserveOnHide, callbackIdentity])
 
@@ -304,9 +306,13 @@ export function DynamicProviderBlock({
               catch { if (resultCurrent(owner)) toast(t('账号已添加，但备注名未保存，请在账号设置中修改。'), 'warn') }
             }
           }
-          await applyUserAgentAfterCreate(createdAccountIdOf(result), provider, userAgentRef.current)
+          const settingsWarning = await settingsRef.current.applySettingsAfterCreate(
+            createdAccountIdOf(result),
+            provider,
+            { supportsUsage, uaEditable },
+          )
           if (!resultCurrent(owner)) return
-          await finish(result)
+          await finish(result, settingsWarning)
         },
       }) ?? null
     }
@@ -324,7 +330,7 @@ export function DynamicProviderBlock({
         clearCallback()
         setValues({})
         setUpload(undefined)
-        setProxyDraft(previous => ({ ...previous, password: '' }))
+        setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
         return
       }
       if (next.provider !== provider || next.active !== true) return
@@ -393,7 +399,7 @@ export function DynamicProviderBlock({
         loginScope.current = null
         progressRef.current = {}; setProgress({}); clearCallback()
         snapshot.current = { ...snapshot.current, inputs: {}, proxyDraft: { ...snapshot.current.proxyDraft, password: '' } }
-        setValues({}); setUpload(undefined); setProxyDraft(previous => ({ ...previous, password: '' }))
+        setValues({}); setUpload(undefined); setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
       }
     }
     const unsubscribeBoot = subscribePluginStartup(guard)
@@ -430,7 +436,7 @@ export function DynamicProviderBlock({
     return () => window.clearTimeout(timer)
   }, [progress.state, progress.managedLogin, progress.phase, progress.saved, progress.remainingMs])
 
-  async function finish(result: LoginResult): Promise<void> {
+  async function finish(result: LoginResult, extraWarning?: string): Promise<void> {
     clearCallback()
     progressRef.current = {}
     loginScope.current = null
@@ -439,12 +445,13 @@ export function DynamicProviderBlock({
     setValues({})
     setName('')
     setUpload(undefined)
-    setUserAgent('')
-    setProxyDraft(draftOfProxy(undefined))
+    settings.resetAll()
     setError('')
     const nickname = textOf(result.session?.nickname)
-    await afterAdd(addedLabelOf(result.account) || nickname, label)
-    if (result.warning) toast(t('账号已添加，但请留意：{warning}', { warning: result.warning }), 'warn')
+    const combinedWarning = [result.warning, extraWarning].filter(Boolean).join('\n')
+    const mergedResult = combinedWarning ? { ...result, warning: combinedWarning } : result
+    await afterAdd(addedLabelOf(result.account) || nickname, label, mergedResult, provider)
+    if (combinedWarning) toast(t('账号已添加，但请留意：{warning}', { warning: combinedWarning }), 'warn')
   }
 
   async function submit(): Promise<void> {
@@ -453,13 +460,29 @@ export function DynamicProviderBlock({
       if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       if (method.reason) throw new Error(method.reason)
       const fields = readInputs(credentialInputMethod(method, upload), inputs)
-      const proxy = readProxyDraft(proxyDraft)
-      if (proxy && 'source' in proxy && proxy.source === 'rotate') {
+      let proxyPayload
+      try {
+        proxyPayload = readProxyDraft(proxyDraft)
+      } catch (failure) {
+        settings.setPane('network')
+        throw failure
+      }
+      if (proxyPayload && 'source' in proxyPayload && proxyPayload.source === 'rotate') {
+        settings.setPane('network')
         throw new Error(t('登录代理不支持轮询出网，请选择一条已保存的代理'))
       }
+      const settingsResult = settings.readSettingsPayload({ supportsUsage, uaEditable })
+      if ('error' in settingsResult) {
+        settings.setPane(settingsResult.pane)
+        throw new Error(settingsResult.error)
+      }
       const remark = method.prompts.some(prompt => prompt.key === 'name') ? fields.name : name.trim()
-      const payload: Record<string, unknown> = { provider, proxy, ...(remark ? { name: remark } : {}) }
-      if (uaEditable && userAgent.trim()) payload.userAgent = userAgent.trim()
+      const payload: Record<string, unknown> = {
+        provider,
+        proxy: proxyPayload,
+        ...(remark ? { name: remark } : {}),
+        ...settingsResult.payload,
+      }
       if (method.type === 'api') {
         payload.methodIndex = method.methodIndex
         payload.inputs = fields
@@ -471,14 +494,16 @@ export function DynamicProviderBlock({
       }
       savingRef.current = true
       setSaving(true)
+      proxy.setBusy(true)
       setError('')
       // API 方法必须进入 account.normalize，不能把 Key/Token 交给 OAuth start。
-      const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxy)
+      const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxyPayload)
       await finish(result)
     } catch (failure) {
       if (alive.current) setError(describeError(failure), failure)
     } finally {
       savingRef.current = false
+      proxy.setBusy(false)
       if (alive.current) setSaving(false)
     }
   }
@@ -498,7 +523,20 @@ export function DynamicProviderBlock({
     try {
       if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       readInputs(method, inputs)
-      readProxyDraft(proxyDraft)
+      try {
+        const proxyPayload = readProxyDraft(proxyDraft)
+        if (proxyPayload && 'source' in proxyPayload && proxyPayload.source === 'rotate') {
+          throw new Error(t('登录代理不支持轮询出网，请选择一条已保存的代理'))
+        }
+      } catch (failure) {
+        settings.setPane('network')
+        throw failure
+      }
+      const settingsCheck = settings.readSettingsPayload({ supportsUsage, uaEditable })
+      if ('error' in settingsCheck) {
+        settings.setPane(settingsCheck.pane)
+        throw new Error(settingsCheck.error)
+      }
       if (!controllerRef.current) throw new Error(t('共享登录桥不可用，请重新打开面板'))
       controllerRef.current.start()
     } catch (failure) { setError(describeError(failure), failure) }
@@ -510,7 +548,17 @@ export function DynamicProviderBlock({
     }
     if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
     readInputs(method, inputs)
-    readProxyDraft(proxyDraft)
+    try {
+      readProxyDraft(proxyDraft)
+    } catch (failure) {
+      settings.setPane('network')
+      throw failure
+    }
+    const settingsCheck = settings.readSettingsPayload({ supportsUsage, uaEditable })
+    if ('error' in settingsCheck) {
+      settings.setPane(settingsCheck.pane)
+      throw new Error(settingsCheck.error)
+    }
     if (!controllerRef.current) throw new Error(t('共享登录桥不可用，请重新打开面板'))
     if (shared().wbWebLogin?.isActive?.()) throw new Error(loginView.hint || t('此提供商已有登录任务，请先完成或取消。'))
     setError('')
@@ -522,7 +570,7 @@ export function DynamicProviderBlock({
     clearCallback()
     setValues({})
     setUpload(undefined)
-    setProxyDraft(previous => ({ ...previous, password: '' }))
+    setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
     controllerRef.current?.cancel()
   }
 
@@ -585,7 +633,7 @@ export function DynamicProviderBlock({
     method?.browserMode === 'plugin' && !method.embeddedOnly ? pluginBrowserInstructions(provider) : '',
     loginText(progress.instructions), loginText(progress.hint), loginText(loginView.hint))
   const proxyLocked = locked || loginView.waiting
-  const optionsLocked = method?.type === 'sms' ? saving || readingSystemProxy : proxyLocked
+  const optionsLocked = method?.type === 'sms' ? saving || proxy.busy : proxyLocked
   const owned = loginScope.current
   const managed: ManagedLoginScope | undefined = progress.managedLogin && owned && owned.methodIndex !== undefined ? {
     provider, methodIndex: owned.methodIndex, key: JSON.stringify([owned.origin, owned.bootId, owned.managementGeneration, provider, owned.state]),
@@ -608,7 +656,15 @@ export function DynamicProviderBlock({
       active={active && localActionSelected} disabled={locked || loginView.waiting} source={shared().workbuddyDesktop}
       scopeIdentity={JSON.stringify([window.location.origin, bootId(), availability])} footerHost={footerHost} preserveOnHide
       current={() => shared().workbuddyDesktop?.platform === 'windows' && Boolean(shared().__TAURI_INTERNALS__?.invoke) && accountProviderAvailable('chatglm')}
-      request={desktopImportRequest} onSaved={async () => { await afterAdd('', label) }} t={t} /> : null}
+      request={desktopImportRequest} onSaved={async importedAccount => {
+        const extraWarning = await settings.applySettingsAfterCreate(importedAccount?.id, provider, { supportsUsage, uaEditable })
+        settings.resetAll()
+        await afterAdd('', label, {
+          account: importedAccount || undefined,
+          ...(extraWarning ? { warning: extraWarning } : {}),
+        }, provider)
+        if (extraWarning) toast(extraWarning, 'warn')
+      }} t={t} /> : null}
     {(progress.active && progress.state) || (methodAvailable && method.type === 'sms' && Boolean(method.sms) && !method.reason)
       ? <PluginLoginInteraction
         key={methodAvailable && method.type === 'sms' ? `sms:${provider}:${method.id}` : progress.state}
@@ -692,25 +748,19 @@ export function DynamicProviderBlock({
     {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription>
       <PluginLoginDiagnostic diagnostic={diagnostic} />
     </Alert> : null}
-    {methodAvailable ? <AccountProxySection draft={proxyDraft} onChange={setProxyDraft}
-      idPrefix={`${prefix}-proxy`} disabled={optionsLocked} proxyDisabled={proxyLocked} onSystemImportBusy={setReadingSystemProxy}
-      label={t('备注与代理')}
-      summary={`${accountName || t('默认账号名')} · ${accountProxySummary(proxyDraft)}`}>
-      {optionalName || !method.prompts.some(prompt => prompt.key === 'name') ? <div className='plugin-login-field'>
-        <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>
-        <Input id={`${prefix}-name`} maxLength={MAX_NAME_LENGTH} placeholder={t('可选，留空使用账号昵称')}
-          value={accountName} disabled={optionsLocked} onChange={event => {
-            const value = event.currentTarget.value
-            if (optionalName) setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [optionalName.key]: value } }))
-            else setName(value)
-          }} />
-      </div> : null}
-      {uaEditable ? <div className='plugin-login-field'>
-        <Label htmlFor={`${prefix}-user-agent`}>{t('User-Agent（可选）')}</Label>
-        <UserAgentInput id={`${prefix}-user-agent`} value={userAgent} onChange={setUserAgent}
-          presets={uaPresets} disabled={proxyLocked} />
-      </div> : null}
-    </AccountProxySection> : null}
+    {methodAvailable && (optionalName || !method.prompts.some(prompt => prompt.key === 'name')) ? (
+      <SettingGroup title={t('账号备注')}>
+        <div className='acct-dlg-block plugin-login-field'>
+          <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>
+          <Input id={`${prefix}-name`} maxLength={MAX_NAME_LENGTH} placeholder={t('可选，留空使用账号昵称')}
+            value={accountName} disabled={optionsLocked} onChange={event => {
+              const value = event.currentTarget.value
+              if (optionalName) setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [optionalName.key]: value } }))
+              else setName(value)
+            }} />
+        </div>
+      </SettingGroup>
+    ) : null}
     <PluginLoginSecurity />
   </div>
 }

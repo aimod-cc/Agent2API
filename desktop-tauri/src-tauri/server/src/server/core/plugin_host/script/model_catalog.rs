@@ -6,7 +6,10 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const URL: &str = "https://models.dev/api.json";
+use crate::server::core::update::website as official;
+
+const PRIMARY_URL: &str = official::CDN_MODELS_CATALOG_URL;
+const FALLBACK_URL: &str = official::API_MODELS_CATALOG_URL;
 const TTL: Duration = Duration::from_secs(3600);
 const RETRY: Duration = Duration::from_secs(60);
 const LIMIT: usize = 32 * 1024 * 1024;
@@ -24,14 +27,26 @@ pub(super) fn prepare() -> PathBuf {
     super::root().join("provider-catalog.json")
 }
 
+/// 当脚本插件宿主已启动或本地已有公共模型目录缓存时，随 `models.dev` 元数据刷新一并同步。
+pub(crate) fn refresh_if_active(force: bool) {
+    let active = super::runtime::host().is_some_and(|host| host.ready())
+        || super::root().join("provider-catalog.json").exists();
+    if active {
+        refresh(force);
+    }
+}
+
 pub(in crate::server::core::plugin_host) fn refresh(force: bool) {
+    if !crate::server::config::models_dev_enabled() {
+        return;
+    }
     let path = super::root().join("provider-catalog.json");
     let fresh = std::fs::metadata(&path).ok().and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age < TTL);
     if fresh && !force { return; }
     {
         let mut state = state().lock().unwrap_or_else(|error| error.into_inner());
-        if state.running || state.retry_at.is_some_and(|at| Instant::now() < at) { return; }
+        if state.running || (!force && state.retry_at.is_some_and(|at| Instant::now() < at)) { return; }
         state.running = true;
     }
     crate::spawn_task(async move {
@@ -51,9 +66,21 @@ pub(in crate::server::core::plugin_host) fn refresh(force: bool) {
 }
 
 async fn download(path: &Path) -> Result<(), String> {
-    let headers = vec![("User-Agent".to_string(), "Agent2API-script-plugins".to_string())];
-    let response = crate::server::core::update::client::fetch_public(URL, &headers, None).await?;
-    if !response.status().is_success() { return Err(format!("模型目录返回 HTTP {}", response.status())); }
+    match download_from(PRIMARY_URL, path).await {
+        Ok(()) => Ok(()),
+        Err(_) => download_from(FALLBACK_URL, path).await,
+    }
+}
+
+async fn download_from(url: &str, path: &Path) -> Result<(), String> {
+    let headers = vec![
+        ("Accept".to_string(), "application/json".to_string()),
+        ("User-Agent".to_string(), "Agent2API-script-plugins".to_string()),
+    ];
+    let response = official::request(url, &headers, Some(60_000))
+        .await
+        .map_err(|error| error.message)?;
+    if !response.status().is_success() { return Err(format!("官网模型目录返回 HTTP {}", response.status())); }
     if response.content_length().is_some_and(|size| size > LIMIT as u64) {
         return Err("模型目录超过允许大小".into());
     }

@@ -435,15 +435,15 @@ export function poolItemAddress(item: PoolItem): string {
 
 export function poolItemLabel(item: PoolItem): string {
   const name = item.name || item.id
-  const parts = [item.source === 'clash' ? 'Clash Verge' : '', item.resolveError ? t('解析失败') : poolItemAddress(item), item.enabled === false ? t('已禁用') : ''].filter(Boolean)
+  const parts = [item.source === 'clash' ? 'EasyClash' : '', item.resolveError ? t('解析失败') : poolItemAddress(item), item.enabled === false ? t('已禁用') : ''].filter(Boolean)
   return parts.length ? t('{name}（{parts}）', { name, parts: parts.join(' · ') }) : name
 }
 
 /**
  * 代理下拉里「池条目」这一类的值前缀：`pool:<proxyId>`。
  *
- * 为什么需要前缀而不是直接用 proxyId：同一个下拉里还列着 Clash 的出口 uid
- * （来自 verge.yaml，形态不受我们控制，`px_...` 撞上它不是不可能），
+ * 为什么需要前缀而不是直接用 proxyId：同一个下拉里还列着 EasyClash 的出口 uid
+ * （来自 store.json，形态不受我们控制，`px_...` 撞上它不是不可能），
  * 以及几个 `__proxy_*__` 占位值。前缀把三类值域彻底分开，判定只看开头即可。
  * 两个消费方（账号页代理列 / 更新设置的出网线路）读的是同一个常量 ——
  * 一边改了前缀、另一边没改，症状是「选了代理池条目却报不支持」，很难查。

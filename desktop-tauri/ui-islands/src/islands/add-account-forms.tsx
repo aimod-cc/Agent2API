@@ -1,9 +1,8 @@
 import * as React from 'react'
-import { Alert, AlertDescription, DialogBody } from '@ui'
+import { Alert, AlertDescription } from '@ui'
 import { shared, accountProviderAvailable } from './add-account-bridge'
 import { CUSTOM_PROVIDER } from './add-account-constants'
 import { CustomProviderBlock } from './add-custom-provider'
-import { AddAccountProxySection } from './add-account-proxy'
 import { DynamicProviderBlock } from './add-dynamic-provider'
 import { t } from '../i18n'
 
@@ -50,9 +49,8 @@ export const AddAccountForms = React.memo(function AddAccountForms({
   open: boolean
 }) {
   const selectedKey = accountFormKey(provider)
-  return <DialogBody>
+  return <>
     {forms.map(form => <AccountForm key={form.key} form={form} active={form.key === selectedKey && open}
       version={version} availability={availability} footerHost={footerHost} />)}
-    {provider === CUSTOM_PROVIDER ? <AddAccountProxySection idPrefix='add-account-proxy' /> : null}
-  </DialogBody>
+  </>
 })

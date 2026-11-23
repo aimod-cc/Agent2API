@@ -24,6 +24,15 @@ impl AutoCheckin {
         let master = master_enabled();
         let now = beijing::now();
         let today = date_key(now);
+        let mut meta_cache: std::collections::HashMap<String, (String, Option<String>)> = std::collections::HashMap::new();
+        let mut provider_meta = |id: &str| -> (String, Option<String>) {
+            if let Some(cached) = meta_cache.get(id) {
+                return cached.clone();
+            }
+            let entry = (provider_label(id), times::declared_time(id));
+            meta_cache.insert(id.to_string(), entry.clone());
+            entry
+        };
         let entries: Vec<Value> = schedules
             .iter()
             .map(|schedule| {
@@ -45,14 +54,15 @@ impl AutoCheckin {
                     .providers
                     .iter()
                     .map(|id| {
+                        let (label, builtin) = provider_meta(id);
                         let mut row = checkin_schedules::account_plan::row_state(schedule, id, now.timestamp_millis());
                         if let Some(fields) = row.as_object_mut() {
                             fields.extend(json!({
                                 "id": id,
-                                "label": provider_label(id),
+                                "label": label,
                                 "time": times::effective_time(schedule, id),
                                 "timeEnd": times::effective_end(schedule, id),
-                                "builtin": times::declared_time(id),
+                                "builtin": builtin,
                                 "firedToday": !pending.iter().any(|item| item == id),
                             }).as_object().cloned().unwrap_or_default());
                         }
@@ -150,11 +160,12 @@ impl AutoCheckin {
             // 全是点了必然失败的勾选框（2026-10 用户反馈）。条目里已存的
             // 范围不受影响 —— 落盘的是 id 数组，这里只决定「能勾哪些」。
             "providerOptions": available_checkin_providers(&self.store).iter().map(|id| {
+                let (label, builtin_time) = provider_meta(id);
                 json!({
                     "id": id,
-                    "label": provider_label(id),
+                    "label": label,
                     // 内置专属时刻（None = 跟随条目时刻），界面在复选框旁标注
-                    "builtinTime": times::declared_time(id),
+                    "builtinTime": builtin_time,
                 })
             }).collect::<Vec<_>>(),
             // 缺省补签时刻：界面「补签时刻」输入框的 placeholder 用

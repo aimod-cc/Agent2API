@@ -42,14 +42,14 @@ export function ProxyRetirementDialog({ open, onClose, t, scope = '' }: {
             <Change retained={false} title={t('不再提供')}>
               {t('订阅导入与更新、订阅节点管理，以及代理内核的下载、安装和运行。')}
             </Change>
-            <Change retained title={t('手动代理与 Clash Verge 同步仍然保留')}>
-              {t('已有手动配置和 Clash Verge 端点引用不受影响。仍可添加 HTTP / SOCKS5 地址、同步 Clash Verge 端点并测试连通性；Clash Verge 由你自行安装和运行。')}
+            <Change retained title={t('手动代理与 EasyClash 同步仍然保留')}>
+              {t('已有手动配置和 EasyClash 端点引用不受影响。仍可添加 HTTP / SOCKS5 地址、同步 EasyClash 端点并测试连通性；EasyClash 由你自行安装和运行。')}
             </Change>
           </div>
           <div className='mt-5 text-xs leading-[1.85]'>
             <strong className='font-semibold'>{t('之前使用订阅节点？')}</strong>
             <p className='mt-1.5 text-muted-foreground'>
-              {t('请填写已有代理服务的 HTTP / SOCKS5 地址，或自行运行 Clash Verge 后同步端点，并重新为相关账号和服务线路选择代理。')}
+              {t('请填写已有代理服务的 HTTP / SOCKS5 地址，或自行运行 EasyClash 后同步端点，并重新为相关账号和服务线路选择代理。')}
             </p>
           </div>
         </DialogBody>

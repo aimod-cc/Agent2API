@@ -60,7 +60,11 @@ pub async fn query_records(
 ) -> Response {
     let limit = parse_usize(params.get("limit")).unwrap_or(200);
     let offset = parse_usize(params.get("offset")).unwrap_or(0);
-    ok_json(checkin_records::query(&query_of(&params), limit, offset))
+    let query = query_of(&params);
+    match crate::server::core::blocking::run(move || checkin_records::query(&query, limit, offset)).await {
+        Ok(data) => ok_json(data),
+        Err(error) => crate::server::errors::management_error(error.status_code, error.message),
+    }
 }
 
 /// DELETE /api/checkin-records —— 按筛选删除 / 显式全清（护栏见模块头）

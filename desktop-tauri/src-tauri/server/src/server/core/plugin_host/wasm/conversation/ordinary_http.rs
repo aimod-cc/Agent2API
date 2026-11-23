@@ -15,6 +15,27 @@ use super::{unavailable, ConversationCall};
 use crate::server::core::plugin_host::wasm::context::{Context, Shared};
 
 impl Context {
+    pub(in crate::server::core::plugin_host::wasm) fn finish_http_submission(
+        &self,
+        result: &Result<(Value, crate::server::core::plugin_host::script::HttpHandle), proto::WireError>,
+    ) {
+        let Some(call) = self.conversation.as_ref() else { return };
+        let Ok(state) = call.signal.state.lock() else { return };
+        if !state.http_submission { return; }
+        drop(state);
+        if matches!(result.as_ref().ok().and_then(|(value, _)| value["status"].as_u64()), Some(status) if is_safe_http_rejection(status as u16)) {
+            call.preparation.confirm_unsubmitted_http_rejection();
+        } else {
+            call.preparation.lock_permanent_replay_block();
+        }
+    }
+
+    pub(in crate::server::core::plugin_host::wasm) fn confirm_stream_started(&self) {
+        if let Some(call) = self.conversation.as_ref() {
+            call.preparation.lock_permanent_replay_block();
+        }
+    }
+
     pub(in crate::server::core::plugin_host::wasm) fn guard_http_submission(
         &self,
         params: &Value,
@@ -135,6 +156,10 @@ fn hex(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+pub(in crate::server::core::plugin_host::wasm) fn is_safe_http_rejection(status: u16) -> bool {
+    matches!(status, 400 | 401 | 402 | 403 | 404 | 409 | 413 | 422 | 429 | 501 | 503 | 507)
 }
 
 fn invalid() -> proto::WireError {

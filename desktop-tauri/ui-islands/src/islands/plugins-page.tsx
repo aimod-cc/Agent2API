@@ -17,7 +17,7 @@ import { t } from '../i18n'
 import { ScriptPluginsPanel } from '../../../ui-shared/plugins-scripts'
 import { matchesPluginStatus, matchesScriptPublisher, type PluginFilterItem, type PluginStatusFilter, type ScriptPublisherFilter } from '../../../ui-shared/plugins-filters'
 import { isRecommendationInstalled, matchesRecommendedPlugin, matchesScriptPlugin, scriptRecommendations, scriptUpdate } from '../../../ui-shared/plugins-script-display'
-import { PLUGIN_GRID_CLASS, PluginGetButton, PluginSectionHeading } from '../../../ui-shared/plugins-store'
+import { PLUGIN_GRID_CLASS, PluginInstallButton, PluginSectionHeading } from '../../../ui-shared/plugins-store'
 import { PluginDetailsDialog, type PluginDetailsPane } from '../../../ui-shared/plugins-details'
 import { PluginDiagnostics } from './plugins-page-tools'
 import { useGatewayBase } from './port-panel'
@@ -407,7 +407,7 @@ function PluginsPage(): React.ReactElement {
         setNotes({ name: pluginName(detailsItem.id, detailsItem.name), version: detailsItem.version || '',
           notes: detailsItem.notes, page: detailsItem.page, prerelease: detailsItem.prerelease })
       }}>{t('更新日志')}</Button> : null}
-      primaryAction={<PluginGetButton t={t} disabled={locked || !detailsInstallable || operations.some(item => item.id === detailsItem.id && item.active)}
+      primaryAction={<PluginInstallButton t={t} disabled={locked || !detailsInstallable || operations.some(item => item.id === detailsItem.id && item.active)}
         onClick={() => { setDetailsStore(null); void start(detailsItem.id, false) }} />} /> : null}
     {settingsPack ? <PluginPackSettingsDialog key={settingsPack.id} pack={settingsPack} initialPane={detailsPane}
       store={store.find(item => item.id === settingsPack.id)} update={updateOf(settingsPack.id)} operation={settingsOperation}

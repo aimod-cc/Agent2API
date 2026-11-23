@@ -22,7 +22,7 @@
 .acct-add-head-mark img { width: 18px; height: 18px; object-fit: contain; }
 
 .acct-add-dialog [data-slot='dialog-body'] { flex: 1; min-height: 0; padding: 0 22px 20px; gap: 0; overflow-y: auto; }
-.acct-add-form-dialog [data-slot='dialog-body'] { padding: 0 20px 18px; gap: 0; }
+.acct-add-form-dialog [data-slot='dialog-body'] { flex: 1; min-height: 0; padding: 0; gap: 0; overflow: hidden; }
 
 /* ── 底栏：各段落的主按钮与说明都落在这里 ───────────────────── */
 
@@ -361,7 +361,7 @@
 .acct-add-form-dialog .plugin-login-local-scope { gap: 8px; padding: 8px 12px; }
 .acct-add-form-dialog .plugin-login-textarea { min-height: 120px; padding: 10px; border-radius: var(--radius-md); font-size: 12px; line-height: 1.6; }
 .acct-add-form-dialog .plugin-login-reveal { font-size: 12px; }
-.acct-add-form-dialog [data-slot='button']:not([data-slot='dialog-close']) { height: 30px; min-height: 30px; font-size: 12.5px; }
+.acct-add-form-dialog [data-slot='button']:not([data-slot='dialog-close']):not([data-size='xs']):not([data-size='icon-xs']):not(.acct-dlg-clear):not(.acct-dlg-advanced-trigger) { height: 30px; min-height: 30px; font-size: 12.5px; }
 .acct-add-form-dialog .plugin-login-sms-country[data-slot='combobox-trigger'],
 .acct-add-form-dialog .plugin-login-sms-country[data-slot='select-trigger'] { height: 24px; min-height: 24px; padding: 0 6px 0 8px; border: 0; background: transparent; box-shadow: none; }
 .acct-add-form-dialog [data-slot='button'].plugin-login-sms-send-btn,
@@ -374,7 +374,6 @@
 
 @media (max-width: 720px) {
   .acct-add-form-dialog > [data-slot='dialog-header'] { padding-left: 16px; }
-  .acct-add-form-dialog > [data-slot='dialog-body'] { padding: 16px; }
   .acct-add-form-dialog .acct-add-foot { gap: 8px; padding: 12px 16px; }
 }
 

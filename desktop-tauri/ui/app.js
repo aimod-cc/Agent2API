@@ -242,6 +242,7 @@ function adoptPluginPages(data) {
   // 交给侧边栏模型（它负责「新菜单补进哪一组」与落盘校验）
   window.wbSidebarLayout?.setDynamicMenus?.([...pluginPages.values()]);
   renderSidebar();
+  window.wbCheckin?.invalidate?.();
   // 当前正停在某个插件页、而它刚被卸载：退回默认页，别让用户对着一块空白
   if (currentPage.startsWith(PLUGIN_PAGE_PREFIX) && !pluginPages.has(currentPage)) {
     showPage('overview', { persist: false });
@@ -256,6 +257,7 @@ function adoptPluginPages(data) {
  */
 async function refreshPluginPages(payload) {
   if (payload) {
+    window.wbCheckin?.invalidate?.();
     adoptPluginPages(payload);
     return;
   }
@@ -564,7 +566,7 @@ function showPage(name, { persist = true, checkUpdate = false } = {}) {
   // 「插件」页装完插件（签到能力正是从那儿来的）。页面岛自己也会在首次挂载时
   // 拉一次，但那是「进程内第一次」—— 之后每次切进来都要刷新。
   if (page === 'checkin') {
-    window.wbCheckin?.load?.();
+    (window.wbCheckin?.enter || window.wbCheckin?.load)?.();
   }
   // 提供商插件页自持包列表与宿主状态，切进去时拉一次最新（用户可能刚在
   // 另一个窗口里手工换过包，或者宿主崩溃重启过）
@@ -1096,6 +1098,7 @@ function applyAccounts(next, redraw = true) {
     if (Object.prototype.hasOwnProperty.call(next, key)) state[key] = next[key];
   }
   window.wbAccountsView?.refreshCaches(new Set(accounts.map(account => account.id)));
+  window.wbCheckin?.invalidate?.();
   if (redraw) {
     renderAccountsView();
     renderTopbarStatus();
@@ -1121,10 +1124,16 @@ function refresh({ force = true } = {}) {
           throw new Error(wbI18n.t('账号列表响应异常'));
         }
         if (completed !== refreshRequested) continue;
+        const previousState = state;
         const previousAccounts = state?.accounts;
         applyAccounts(next.accounts, false);
         const accounts = state.accounts;
         state = { ...next, accounts };
+        if (previousState && (previousState.pluginStartup !== next.pluginStartup
+          && JSON.stringify(previousState.pluginStartup) !== JSON.stringify(next.pluginStartup)
+          || JSON.stringify(previousState.providerIcons) !== JSON.stringify(next.providerIcons))) {
+          window.wbCheckin?.invalidate?.();
+        }
         stateError = '';
         const validIds = new Set(accounts.accounts.map(account => account.id));
         window.wbAccountsView?.refreshCaches(validIds);

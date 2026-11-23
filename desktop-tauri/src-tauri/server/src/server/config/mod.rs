@@ -984,14 +984,7 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
         true
     });
     let _ = DB.set(db);
-    let snapshot = build(read_raw());
-    crate::server::core::providers::catalog::invalidate();
-    if plugin_task_grants::publish(snapshot.clone()) {
-        model_key_source::published(&snapshot, true);
-    } else {
-        model_key_source::fail_closed();
-    }
-    crate::server::core::providers::catalog::invalidate();
+    let (snapshot, _) = publish_reload_locked(read_raw(), true);
     snapshot
 }
 
@@ -1007,17 +1000,60 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
 /// 没有任何旧文件时不必多读一次库。
 pub fn reload() -> RuntimeConfig {
     let _update = plugin_task_grants::update_lock();
+    let (snapshot, _) = publish_reload_locked(read_raw(), true);
+    snapshot
+}
+
+/// 仅在数据库已初始化且当前可读时从库重载配置并发布全新 Key 代次；
+/// 库不可用时不做任何覆盖，避免回落空旧文件破坏内存配置。
+pub(crate) fn try_reload_from_db() -> bool {
+    let _update = plugin_task_grants::update_lock();
+    let Some(raw) = snapshot_from_db() else {
+        return false;
+    };
+    let (_, published) = publish_reload_locked(raw, true);
+    published
+}
+
+fn snapshot_from_db() -> Option<Map<String, Value>> {
+    let db = db()?;
+    let (raw, migrated) = sql::read_snapshot(&db)?;
+    Some(if migrated { raw } else { merge_legacy(raw) })
+}
+
+fn publish_reload_locked(
+    raw: Map<String, Value>,
+    clear_replacement: bool,
+) -> (RuntimeConfig, bool) {
     if CONFIG_UPDATE_LOCK.is_poisoned() { model_key_source::fail_closed(); }
-    model_key_source::before_reload();
-    plugin_task_grants::before_reload();
-    let snapshot = build(read_raw());
+    if clear_replacement {
+        model_key_source::before_reload();
+        plugin_task_grants::before_reload();
+    }
+    let snapshot = build(raw);
     crate::server::core::providers::catalog::invalidate();
-    if plugin_task_grants::publish(snapshot.clone()) {
-        model_key_source::published(&snapshot, true);
+    let published = plugin_task_grants::publish(snapshot.clone());
+    if published {
+        CONFIG_UPDATE_LOCK.clear_poison();
+        model_key_source::republish_from_db(&snapshot, clear_replacement);
     } else {
         model_key_source::fail_closed();
     }
     crate::server::core::providers::catalog::invalidate();
+    (snapshot, published)
+}
+
+pub(super) fn write_snapshot_or_recover() -> Option<RuntimeConfig> {
+    if CONFIG_UPDATE_LOCK.is_poisoned() || model_key_source::is_failed() {
+        model_key_source::fail_closed();
+        if let Some(raw) = snapshot_from_db() {
+            let (_, _) = publish_reload_locked(raw, false);
+        }
+    }
+    let snapshot = plugin_task_grants::write_snapshot();
+    if snapshot.is_none() {
+        model_key_source::fail_closed();
+    }
     snapshot
 }
 
@@ -1314,9 +1350,7 @@ where
     let _usage_guard = crate::server::core::usage_query::config::lock();
     // 读改写必须串行，否则两个模型的独立配置会互相覆盖。
     let _update_guard = plugin_task_grants::update_lock();
-    if CONFIG_UPDATE_LOCK.is_poisoned() { model_key_source::fail_closed(); }
-    let Some(mut next) = plugin_task_grants::write_snapshot() else {
-        model_key_source::fail_closed();
+    let Some(mut next) = write_snapshot_or_recover() else {
         return false;
     };
     let previous = next.clone();

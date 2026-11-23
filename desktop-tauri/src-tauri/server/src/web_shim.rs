@@ -712,6 +712,7 @@ pub fn shim_js() -> &'static str {
       || requestPath.indexOf('/api/plugins/enrollment/') === 0
       || requestMethod === 'POST' && (requestPath === '/api/accounts/refresh' || requestPath === '/api/accounts/refresh-expiring'
         || requestPath === '/api/accounts/checkin' || requestPath === '/api/checkin-activity'
+        || requestPath === '/api/checkin-activity/reset'
         || requestPath === '/api/plugins/tasks/run' || requestPath === '/api/travel-schedule/run'
         || requestPath.endsWith('/growth/travel') || requestPath.endsWith('/growth/task') || requestPath.endsWith('/growth/school')
         || requestPath.endsWith('/campaigns/claim') || requestPath.endsWith('/campaigns/redeem')
@@ -2161,8 +2162,10 @@ pub fn shim_js() -> &'static str {
     getTravelSchedule: function () { return call('GET', '/api/travel-schedule'); },
     saveTravelSchedule: function (patch) { return call('POST', '/api/travel-schedule', patch); },
     runTravelScheduleNow: function () { return call('POST', '/api/travel-schedule/run', {}); },
-    // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
+    // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）及详情/重置
     runCheckinActivity: function (id, mode) { return call('POST', '/api/checkin-activity', { id: id, mode: mode }); },
+    getCheckinActivityStatus: function (id) { return call('GET', '/api/checkin-activity/status?id=' + encodeURIComponent(String(id || ''))); },
+    resetCheckinActivity: function (id) { return call('POST', '/api/checkin-activity/reset', { id: id }); },
     // 签到中心的聚合快照（与 bridge.rs 的同名方法同一路径）
     getCheckinCenter: function () { return call('GET', '/api/checkin-center'); },
     // Qoder UMID 组件（设备风控身份）的状态与安装（与 bridge.rs 的同名方法成对）。
@@ -2571,6 +2574,22 @@ pub fn shim_js() -> &'static str {
     importDatabase: function (password) { return importDatabase(password); },
     // 恢复进度：网页端与桌面端同一条后端端点（见 api::backup_api）
     getBackupProgress: function () { return call('GET', '/api/backup/progress'); },
+
+    // ── 系统通知（设置页「通知」）──
+    getNotifications: function () { return call('GET', '/api/notifications'); },
+    saveNotifications: function (payload) { return call('PUT', '/api/notifications', payload || {}); },
+    testNotification: function (payload) { return call('POST', '/api/notifications/test', payload || {}); },
+
+    // ── 面板 OAuth 第三方登录（设置页「账户」）──
+    getOauthSettings: function () { return call('GET', '/api/panel/oauth/settings'); },
+    saveOauthSettings: function (payload) { return call('PUT', '/api/panel/oauth/settings', payload || {}); },
+    startOauthBind: function (payload) { return call('POST', '/api/panel/oauth/bind-url', payload || {}); },
+    pollOauthState: function (state) { return call('GET', '/api/panel/oauth/poll' + toQuery({ state: state })); },
+
+    // ── 模型计价 ──
+    getModelPricing: function () { return call('GET', '/api/model-pricing'); },
+    saveModelPricing: function (payload) { return call('PUT', '/api/model-pricing', payload || {}); },
+    refreshFxRate: function () { return call('POST', '/api/model-pricing/fx/refresh', {}); },
   };
 
   // 把筛选条件转成查询串（与桌面 bridge 的 toQuery 同语义：空值跳过）

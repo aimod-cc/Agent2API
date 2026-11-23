@@ -123,6 +123,11 @@ pub fn panel_router(state: ServerState) -> Router {
         // any 而不是 get：探针要与登录**同动词**（POST）—— 有的中转按方法
         // 区别对待 Set-Cookie，只测 GET 会误报「cookie 通道完好」
         .route("/api/panel/cookie-probe", any(api::panel::cookie_probe))
+        .route("/api/panel/oauth/start", get(api::panel_oauth::get_oauth_start))
+        .route("/api/panel/oauth/start-url", post(api::panel_oauth::post_oauth_start_url))
+        .route("/api/panel/oauth/poll", get(api::panel_oauth::get_oauth_poll))
+        .route("/api/panel/oauth/callback", get(api::panel_oauth::get_oauth_callback))
+        .route("/api/panel/oauth/exchange", post(api::panel_oauth::post_oauth_exchange))
         // CatPaw 网页登录的回调路由已随实现搬到插件：它的登录是**双通道**
         // （插件自己 bind 的 loopback 回调 + 上游 poll-token 兜底），回调落在
         // 插件进程的端口上，不再经过网关的 `/api/session/login/*`。
@@ -490,7 +495,7 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/sidebar-layout",
             get(api::sidebar_layout::get_layout).put(api::sidebar_layout::put_layout),
         )
-        // ── 出网代理（Clash Verge 实时读取 + 出口连通性测试 + 代理池）──
+        // ── 出网代理（EasyClash 实时读取 + 出口连通性测试 + 代理池）──
         // /api/proxies 与 /api/proxies/pool* 之外（如 /api/proxies/zzz）不注册
         // → 落到全局 404 兜底，与 Node 版「前缀判定不通过 → 全局兜底」一致。
         // pool 各条都是固定路径（id 走 body / query，不用 {id} 段 ——
@@ -528,8 +533,10 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/checkin-keepalive",
             get(api::billing::get_keepalive).post(api::billing::save_keepalive),
         )
-        // WorkBuddy 国际版日活任务的手动粒度入口（保活 / 领取 / 保活+领取）
+        // WorkBuddy 国际版日活任务的手动粒度入口（保活 / 领取 / 保活+领取）及详情/解锁
         .route("/api/checkin-activity", post(api::billing::run_activity))
+        .route("/api/checkin-activity/status", get(api::billing::activity_status))
+        .route("/api/checkin-activity/reset", post(api::billing::reset_activity))
         // ── 会话与登录 ──
         // 只读动态登录元数据也必须走管理面鉴权；不是任意 admin.action 通道。
         .route("/api/session/login/methods", get(api::session::login_methods))
@@ -802,6 +809,30 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/captcha",
             get(api::captcha::get_captcha).put(api::captcha::put_captcha),
+        )
+        .route(
+            "/api/notifications",
+            get(api::notifications::get_notifications).put(api::notifications::put_notifications),
+        )
+        .route(
+            "/api/notifications/test",
+            post(api::notifications::test_notification),
+        )
+        .route(
+            "/api/panel/oauth/settings",
+            get(api::panel_oauth::get_oauth_settings).put(api::panel_oauth::put_oauth_settings),
+        )
+        .route(
+            "/api/panel/oauth/bind-url",
+            post(api::panel_oauth::post_oauth_bind_url),
+        )
+        .route(
+            "/api/model-pricing",
+            get(api::model_pricing::get_model_pricing).put(api::model_pricing::put_model_pricing),
+        )
+        .route(
+            "/api/model-pricing/fx/refresh",
+            post(api::model_pricing::post_refresh_fx),
         )
         // ── 活动套餐通道的人机验证令牌池 ──
         // 与上面那条**不是一回事**：上面是网关自己的登录门槛（ALTCHA），这条是

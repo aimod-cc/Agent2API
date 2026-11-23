@@ -409,6 +409,13 @@ export type SettingsBridge = {
     cloudSyncUpload?(): Promise<unknown>
     cloudSyncDownload?(): Promise<unknown>
     importCloudSyncKey?(password: string): Promise<unknown>
+    getNotifications?(): Promise<unknown>
+    saveNotifications?(payload: Record<string, unknown>): Promise<unknown>
+    testNotification?(payload: Record<string, unknown>): Promise<unknown>
+    getOauthSettings?(): Promise<unknown>
+    saveOauthSettings?(payload: Record<string, unknown>): Promise<unknown>
+    startOauthBind?(payload: Record<string, unknown>): Promise<unknown>
+    pollOauthState?(state: string): Promise<unknown>
 }
 
 /**
@@ -498,6 +505,7 @@ export async function openExternal(url: string): Promise<void> {
  */
 export const CATEGORIES = [
   { id: 'account', label: t('账户'), icon: 'accounts' },
+  { id: 'notifications', label: t('通知'), icon: 'bell' },
   { id: 'general', label: t('通用'), icon: 'sliders' },
   // 注：AI 助手的配置（对话模型 / 系统提示词 / 工具勾选）已搬到助手页自己的
   // 「助手设置」抽屉（见 assistant-settings-drawer.tsx）—— 那几项都是聊着聊着

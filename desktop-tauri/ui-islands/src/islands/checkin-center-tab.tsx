@@ -169,7 +169,9 @@ export function CheckinStats({ center }: { center: CheckinCenter }): React.React
       />
       <MetricCell
         label={t('累计签到记录')}
-        value={store.recordsLoaded ? store.recordsTotal : <span className='ck-pending'>—</span>}
+        value={typeof center.recordsTotal === 'number'
+          ? center.recordsTotal
+          : store.recordsLoaded ? store.recordsTotal : <span className='ck-pending'>—</span>}
         foot={t('每账号一条明细')}
         onClick={() => goTab('records')}
       />

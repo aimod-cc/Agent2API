@@ -36,14 +36,14 @@ pub(crate) fn resolve_egress_candidates() -> Result<Vec<(String, Option<Resolved
         if let Some(proxy) = resolution.resolved() {
             if proxy.port.is_some() {
                 let label = if proxy.label.is_empty() {
-                    "Clash 混合端口".to_string()
+                    "EasyClash 混合端口".to_string()
                 } else {
                     proxy.label.clone()
                 };
                 candidates.push((label, Some(proxy.clone())));
             }
         } else if let Some(error) = resolution.error() {
-            logging::verbose("[Update]", &format!("Clash 出口不可用（{error}），仅用直连"));
+            logging::verbose("[Update]", &format!("EasyClash 出口不可用（{error}），仅用直连"));
         }
     }
     Ok(candidates)

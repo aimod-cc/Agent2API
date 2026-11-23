@@ -37,7 +37,7 @@ export function updateLabel(update: ScriptUpdate, t: PluginTranslate): string {
  * magpie 源与 npm 源把版本留空 = 让后端取最新（`magpie:` 走官方分发索引的
  * latest、npm 走 dist-tags.latest），GitHub 源带原来的分支/标签（后端按它的
  * 当前提交装）。三处入口（卡片上的「更新」、设置面板的「更新／重装」、
- * 推荐卡的「获取」）必须是同一份请求，别各写一遍。
+ * 推荐卡的「安装」）必须是同一份请求，别各写一遍。
  */
 export function reinstallRequest(pack: ScriptPackage): { id: string; name: string; version: string } {
   return {

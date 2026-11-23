@@ -13,6 +13,12 @@ mod claim;
 
 pub(in crate::server::core::plugin_host::wasm::checkin_call) use claim::DailyRun;
 
+#[derive(Clone)]
+pub(in crate::server::core::plugin_host) struct SubmitRejection {
+    pub(in crate::server::core::plugin_host) code: Option<i64>,
+    pub(in crate::server::core::plugin_host) message: String,
+}
+
 use std::sync::{atomic::{AtomicBool, AtomicU8, Ordering}, Arc, Weak};
 
 use super::{egress::DailyEgress, CheckinCallRef, Source};
@@ -38,6 +44,7 @@ pub(in crate::server::core::plugin_host::wasm) enum DailyError {
     QueryUnknown,
     ResponseInvalid,
     ResponseRejected,
+    SubmitRejected,
     PendingConfirmation,
     NoActivity,
     NoDaily,

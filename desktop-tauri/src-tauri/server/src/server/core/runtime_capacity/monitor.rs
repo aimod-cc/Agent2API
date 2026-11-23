@@ -117,7 +117,7 @@ fn macos_available_memory(total_bytes: u64) -> Option<u64> {
     Some(pages.saturating_mul(page_size as u64).min(total_bytes))
 }
 
-/// 读取 macOS 内核内存压力等级；读取失败或非正值时返回 `None`，退回按可用内存比例判定。
+/// 读取 macOS 内核内存压力等级；读取失败或非正值时返回 `None`。
 #[cfg(target_os = "macos")]
 fn os_pressure_level() -> Option<u8> {
     let name = b"kern.memorystatus_vm_pressure_level\0";

@@ -61,12 +61,7 @@ const config: CapacitorConfig = {
   },
   plugins: {
     Keyboard: {
-      // iOS 默认的 native 模式会把整个 WebView 缩短，页面里的 fixed / flex
-      // 布局会跟着抖一下；body 模式只改 body 高度，配合 visualViewport 的
-      // 键盘判断（Shell.tsx 的 useKeyboardOpen）更稳。
       resize: 'body',
-      // Android 全屏时键盘不会触发 resize，插件需要额外处理
-      resizeOnFullScreen: true,
     },
   },
 }

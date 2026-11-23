@@ -20,6 +20,10 @@ export type SearchProviderRow = {
   auth_type?: 'api_key' | 'account'
   supports_search?: boolean
   supports_fetch?: boolean
+  supports_max_results?: boolean
+  max_results?: number | null
+  default_max_results?: number | null
+  max_results_limit?: number | null
   available?: boolean
   configured: boolean
   enabled: boolean

@@ -43,7 +43,7 @@
 
 mod fill;
 mod refresh;
-mod snapshot;
+pub(crate) mod snapshot;
 
 pub use fill::{apply, mark_user};
 pub use refresh::refresh;

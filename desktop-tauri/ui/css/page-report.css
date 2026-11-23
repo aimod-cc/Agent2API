@@ -62,7 +62,7 @@
 .report-card-meta { color: var(--text-3); font-size: 11px; }
 .report-card-content { padding: 0 16px 12px; }
 .report-header-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
-.report-overview-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; }
+.report-overview-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; }
 .report-stat { position: relative; border: 0; border-radius: 0; background: transparent; padding: 12px 16px; box-shadow: none; }
 .report-stat + .report-stat::before { content: ''; position: absolute; top: 16px; bottom: 16px; left: 0; width: 1px; background: var(--hairline); }
 .report-stat [data-slot='metric-label'] { margin-bottom: 4px; color: var(--text-3); font-size: 11px; line-height: 16px; }

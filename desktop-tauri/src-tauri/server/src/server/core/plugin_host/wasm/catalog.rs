@@ -79,6 +79,11 @@ fn merge(target: &mut Value, source: &Value) {
     for key in ["supportsToolCall", "supportsImages", "supportsVideo", "supportsReasoning"] {
         if source[key] == true { target[key] = Value::Bool(true); }
     }
+    if target.get("toolEmulation").is_none_or(Value::is_null)
+        && source.get("toolEmulation").is_some_and(|value| !value.is_null())
+    {
+        target["toolEmulation"] = source["toolEmulation"].clone();
+    }
     for key in ["maxInputTokens", "maxOutputTokens"] {
         if let Some(value) = source[key].as_u64() {
             if value > target[key].as_u64().unwrap_or(0) { target[key] = Value::from(value); }

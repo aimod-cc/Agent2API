@@ -34,10 +34,11 @@ pub const MAX_ENTRIES: usize = 20;
 /// 读台账（新在前）。非数组 / 缺失都给空表 —— 与 auto_checkin 的 raw_object
 /// 同一兜底口径：旧 config.json 里没有这个字段，读出来必须是合法默认值。
 pub fn list() -> Vec<Value> {
-    match config::current().raw().get(CONFIG_KEY) {
+    config::with_raw(|raw| match raw.get(CONFIG_KEY) {
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
-    }
+    })
+    .unwrap_or_default()
 }
 
 /// 追加一轮签到汇总。`summary` 是 `run_checkin` 的返回值（含 results），

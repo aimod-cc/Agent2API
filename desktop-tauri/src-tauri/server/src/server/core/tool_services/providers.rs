@@ -19,6 +19,40 @@ const FIRECRAWL_SCRAPE: &str = "https://api.firecrawl.dev/v2/scrape";
 const OLLAMA_SEARCH: &str = "https://ollama.com/api/web_search";
 const OLLAMA_FETCH: &str = "https://ollama.com/api/web_fetch";
 
+#[derive(Clone, Copy, Debug)]
+pub struct ApiProviderMeta {
+    pub default_max_results: usize,
+    pub max_results_limit: usize,
+    pub max_query_chars: Option<usize>,
+}
+
+/// 四家内置 API 搜索提供商的真实上游能力边界（条数默认/上限与搜索词字数上限）。
+pub fn api_provider_meta(provider: &str) -> Option<ApiProviderMeta> {
+    match provider {
+        "tavily" => Some(ApiProviderMeta {
+            default_max_results: 20,
+            max_results_limit: 20,
+            max_query_chars: Some(400),
+        }),
+        "querit" => Some(ApiProviderMeta {
+            default_max_results: 10,
+            max_results_limit: 100,
+            max_query_chars: None,
+        }),
+        "firecrawl" => Some(ApiProviderMeta {
+            default_max_results: 20,
+            max_results_limit: 100,
+            max_query_chars: Some(500),
+        }),
+        "ollama" => Some(ApiProviderMeta {
+            default_max_results: 10,
+            max_results_limit: 10,
+            max_query_chars: None,
+        }),
+        _ => None,
+    }
+}
+
 pub fn display_name(provider: &str) -> &'static str {
     match provider {
         "tavily" => "Tavily",
@@ -43,14 +77,14 @@ fn nested<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
 
 /* ─── Tavily ───────────────────────────────────────────────── */
 
-async fn tavily_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+async fn tavily_search(request: &ProviderRequest<'_>, query: &str, max_results: usize) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request.post_json(
         TAVILY_SEARCH,
         json!({
             "query": query,
             "topic": "general",
             "search_depth": "basic",
-            "max_results": 10,
+            "max_results": max_results,
             "include_answer": false,
             "include_raw_content": false,
             "include_images": false,
@@ -145,10 +179,10 @@ fn querit_published_date(item: &Value) -> String {
         .unwrap_or_default()
 }
 
-async fn querit_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+async fn querit_search(request: &ProviderRequest<'_>, query: &str, max_results: usize) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request.post_json(
         QUERIT_SEARCH,
-        json!({ "query": query, "count": 10 }),
+        json!({ "query": query, "count": max_results }),
     )
     .await?;
     let results = nested(&body, &["results", "result"]).and_then(Value::as_array);
@@ -217,10 +251,10 @@ async fn querit_fetch(
 
 /* ─── Firecrawl ────────────────────────────────────────────── */
 
-async fn firecrawl_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+async fn firecrawl_search(request: &ProviderRequest<'_>, query: &str, max_results: usize) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request.post_json(
         FIRECRAWL_SEARCH,
-        json!({ "query": query, "limit": 10, "sources": ["web"] }),
+        json!({ "query": query, "limit": max_results, "sources": ["web"] }),
     )
     .await?;
     let results = nested(&body, &["data", "web"]).and_then(Value::as_array);
@@ -324,10 +358,10 @@ async fn firecrawl_fetch(
 
 /* ─── Ollama Web Search ────────────────────────────────────── */
 
-async fn ollama_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+async fn ollama_search(request: &ProviderRequest<'_>, query: &str, max_results: usize) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request.post_json(
         OLLAMA_SEARCH,
-        json!({ "query": query, "max_results": 10 }),
+        json!({ "query": query, "max_results": max_results }),
     )
     .await?;
     Ok(array_of(&body, "results")
@@ -404,16 +438,19 @@ async fn ollama_fetch(
 
 /* ─── 分发 ─────────────────────────────────────────────────── */
 
-pub async fn search(provider: &str, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
-    search_with_request(provider, &ProviderRequest::new(provider, "search", timeout), query).await
+pub async fn search(provider: &str, query: &str, timeout: u64, max_results: usize) -> Result<Vec<SourceDraft>, SearchError> {
+    search_with_request(provider, &ProviderRequest::new(provider, "search", timeout), query, max_results).await
 }
 
-async fn search_with_request(provider: &str, request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+async fn search_with_request(provider: &str, request: &ProviderRequest<'_>, query: &str, max_results: usize) -> Result<Vec<SourceDraft>, SearchError> {
+    let limit = api_provider_meta(provider)
+        .map(|meta| max_results.clamp(1, meta.max_results_limit))
+        .unwrap_or(max_results.max(1));
     match provider {
-        "tavily" => tavily_search(request, query).await,
-        "querit" => querit_search(request, query).await,
-        "firecrawl" => firecrawl_search(request, query).await,
-        "ollama" => ollama_search(request, query).await,
+        "tavily" => tavily_search(request, query, limit).await,
+        "querit" => querit_search(request, query, limit).await,
+        "firecrawl" => firecrawl_search(request, query, limit).await,
+        "ollama" => ollama_search(request, query, limit).await,
         _ => Err(SearchError::new(SearchErrorCode::ProviderUnavailable, "Unknown search provider")),
     }
 }
@@ -448,7 +485,10 @@ pub async fn test_provider(provider: &str, key_id: Option<&str>, operation: &str
             _ => json!({ "url": "https://example.com" }),
         }).await.map(|_| 1)
     } else {
-        search_with_request(provider, &request, "Agent2API connectivity check").await
+        let test_limit = api_provider_meta(provider)
+            .map(|meta| meta.default_max_results.min(5))
+            .unwrap_or(5);
+        search_with_request(provider, &request, "Agent2API connectivity check", test_limit).await
             .and_then(|sources| if sources.is_empty() {
                 Err(SearchError::new(SearchErrorCode::NoResults, "The search provider returned no results"))
             } else { Ok(sources.len()) })

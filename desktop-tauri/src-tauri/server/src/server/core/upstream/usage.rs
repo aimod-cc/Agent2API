@@ -69,6 +69,8 @@ pub struct UsageTokens {
     pub completion: i64,
     pub total: i64,
     pub cache_read: i64,
+    pub cache_creation: i64,
+    pub cache_creation_1h: i64,
     pub credit: Option<f64>,
 }
 
@@ -111,6 +113,8 @@ pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
         completion: tokens.completion.unwrap_or(0).saturating_add(tokens.deferred_completion.unwrap_or(0)),
         total: tokens.total_tokens().saturating_add(tokens.deferred_prompt.unwrap_or(0)).saturating_add(tokens.deferred_completion.unwrap_or(0)),
         cache_read: tokens.cache_read.unwrap_or(0).saturating_add(tokens.deferred_cache_read.unwrap_or(0)),
+        cache_creation: tokens.cache_creation.unwrap_or(0).saturating_add(tokens.deferred_cache_write.unwrap_or(0)),
+        cache_creation_1h: tokens.cache_creation_1h.unwrap_or(0),
         credit: usage.as_object().and_then(|object| first_amount(object, CREDIT_KEYS)),
     })
 }
@@ -267,6 +271,8 @@ pub struct TelemetrySnapshot {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
     /// 上游按请求上报的**积分消耗**（WorkBuddy 的 `usage.credit`；`None` = 这一家
     /// 不提供该读数，落库为 NULL，前端显示「—」而不是 0）。
     ///
@@ -946,6 +952,8 @@ impl RequestTelemetry {
         guard.completion_tokens = tokens.completion;
         guard.total_tokens = tokens.total;
         guard.cache_read_tokens = tokens.cache_read;
+        guard.cache_creation_tokens = tokens.cache_creation;
+        guard.cache_creation_1h_tokens = tokens.cache_creation_1h;
         guard.credit = tokens.credit;
     }
 

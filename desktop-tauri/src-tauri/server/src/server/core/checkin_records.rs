@@ -128,6 +128,29 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
         (OUTCOME_FAILED, message)
     };
     let kept_active = kept_active_of(row);
+    let activity_detail = row.get("activity").and_then(crate::server::core::billing::keepalive::activity_failure_detail);
+    let mut message = claim
+        .get("msg")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    if !kept_active {
+        if let Some(detail) = activity_detail.as_deref() {
+            message = Some(match message {
+                Some(base) if !base.contains(detail) => format!("{base}（{detail}）"),
+                Some(base) => base,
+                None => detail.to_string(),
+            });
+        }
+    }
+    let error = match outcome {
+        OUTCOME_FAILED => match (error, activity_detail) {
+            (Some(err), Some(detail)) if !err.contains(&detail) => Some(format!("{err}（{detail}）")),
+            (Some(err), _) => Some(err),
+            (None, detail) => detail,
+        },
+        _ => error,
+    };
     insert(Entry {
         account_id: text_or(row.get("id"), ""),
         account_name: text_or(row.get("name"), &text_or(row.get("id"), "")),
@@ -136,11 +159,7 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
         reason,
         outcome,
         ok: outcome == OUTCOME_SUCCESS || outcome == OUTCOME_ALREADY,
-        message: claim
-            .get("msg")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string),
+        message,
         error,
         kept_active,
     });
@@ -149,12 +168,11 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
 /// 国际版活动的手动领取 / 保活（`api::billing::run_activity` 的返回行，
 /// `{id, name, mode, claim, activity}`）。
 ///
-/// 判定按 mode 分两条：`keepalive` 看「上报 / 保活对话 / 网页会话」任一成功
-/// —— 它的 claim 是 `{success:false, msg:"活跃保活完成"}` 的形态，走 claim
-/// 判据会被误判成 failed，而这一颗按钮的本意就是「维持账号活跃」，三件事
-/// 任一做成即算数；`full` / `claim` 与签到同判据（claim），
-/// 「活动未开启但活跃上报成功（或网页会话建成）」按 `record_row` 同款落到 already。
-/// reason 用人话（界面的「来源/说明」列直接展示）。
+/// 判定按 mode 分两条：`keepalive` 看实际保活（桌面模型探测或网页会话）是否
+/// 至少做成一项（`kept_active`），均失败时即使活跃上报通过也记为 `failed` 并带上
+/// 逐模型失败明细；`full` / `claim` 与签到同判据（claim），
+/// 「活动未开启但活跃上报成功（或网页会话建成）」按 `record_row` 同款落到 already，
+/// 若保活未达成则附带具体失败原因。reason 用人话（界面的「来源/说明」列直接展示）。
 pub fn record_activity(row: &Value, provider: &str, mode: &str) {
     let reason = match mode {
         "keepalive" => "手动保活",
@@ -164,20 +182,22 @@ pub fn record_activity(row: &Value, provider: &str, mode: &str) {
     let claim = row.get("claim").cloned().unwrap_or(Value::Null);
     let kept_active = kept_active_of(row);
     let report_ok = activity_report_ok(row) || web_conversation_ok(row);
+    let activity_detail = row.get("activity").and_then(crate::server::core::billing::keepalive::activity_failure_detail);
+    let claim_msg = claim
+        .get("msg")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
     let (outcome, error, ok) = if mode == "keepalive" {
-        match kept_active || report_ok {
-            true => (OUTCOME_SUCCESS, None, true),
-            false => (
-                OUTCOME_FAILED,
-                Some(
-                    claim
-                        .get("msg")
-                        .and_then(Value::as_str)
-                        .unwrap_or("活跃保活失败")
-                        .to_string(),
-                ),
-                false,
-            ),
+        if kept_active {
+            (OUTCOME_SUCCESS, None, true)
+        } else {
+            let err = activity_detail
+                .clone()
+                .or_else(|| claim_msg.clone())
+                .unwrap_or_else(|| "活跃保活失败".to_string());
+            (OUTCOME_FAILED, Some(err), false)
         }
     } else if checkin_completed_today(&claim) {
         let outcome = if claim.get("success").and_then(Value::as_bool) == Some(true) {
@@ -193,15 +213,23 @@ pub fn record_activity(row: &Value, provider: &str, mode: &str) {
     } else if claim_pending(&claim) {
         (OUTCOME_PENDING, None, false)
     } else {
-        (
-            OUTCOME_FAILED,
-            claim
-                .get("msg")
-                .and_then(Value::as_str)
-                .filter(|text| !text.trim().is_empty())
-                .map(str::to_string),
-            false,
-        )
+        let err = match (claim_msg.clone(), activity_detail.as_deref()) {
+            (Some(msg), Some(detail)) if !msg.contains(detail) => Some(format!("{msg}（{detail}）")),
+            (Some(msg), _) => Some(msg),
+            (None, Some(detail)) => Some(detail.to_string()),
+            (None, None) => None,
+        };
+        (OUTCOME_FAILED, err, false)
+    };
+    let message = if outcome != OUTCOME_FAILED && !kept_active {
+        match (claim_msg, activity_detail) {
+            (Some(msg), Some(detail)) if !msg.contains(&detail) => Some(format!("{msg}（{detail}）")),
+            (Some(msg), _) => Some(msg),
+            (None, Some(detail)) => Some(detail),
+            (None, None) => None,
+        }
+    } else {
+        claim_msg
     };
     insert(Entry {
         account_id: text_or(row.get("id"), ""),
@@ -211,11 +239,7 @@ pub fn record_activity(row: &Value, provider: &str, mode: &str) {
         reason,
         outcome,
         ok,
-        message: claim
-            .get("msg")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string),
+        message,
         error,
         kept_active,
     });
@@ -373,10 +397,36 @@ impl Query {
     }
 }
 
+/// 签到记录总条数（供签到中心统计卡直接展示总数，避免进入页面时整页查询）。
+pub fn count_all() -> i64 {
+    let Some(db) = database() else {
+        return 0;
+    };
+    db.with(|conn| conn.query_row("SELECT COUNT(*) FROM checkin_records", [], |row| row.get::<_, i64>(0)))
+        .and_then(Result::ok)
+        .unwrap_or(0)
+}
+
 /// 查询一页明细（`offset` 真分页，`limit` 缺省 200、上限 1000）。
 /// 响应形状 `{records: [...], total}`：total 是**同条件**的总数（分页器用），
 /// records 按时间倒序（新的在前）。库不可用给空表（界面显示空态，不报错）。
 pub fn query(query: &Query, limit: usize, offset: usize) -> Value {
+    struct RawRecord {
+        row_id: i64,
+        ts: i64,
+        date: String,
+        source: String,
+        reason: String,
+        account_id: String,
+        account_name: String,
+        provider_id: String,
+        outcome: String,
+        ok: bool,
+        message: Option<String>,
+        error: Option<String>,
+        kept_active: bool,
+    }
+
     let limit = limit.clamp(1, 1000);
     let Some(db) = database() else {
         return json!({ "records": [], "total": 0 });
@@ -391,7 +441,7 @@ pub fn query(query: &Query, limit: usize, offset: usize) -> Value {
     );
     let sql_count = format!("SELECT COUNT(*) FROM checkin_records{where_clause}");
     let loaded = db
-        .with(|conn| -> Result<Value, rusqlite::Error> {
+        .with(|conn| -> Result<(Vec<RawRecord>, i64), rusqlite::Error> {
             let params_from_json = |values: &[Value]| -> Vec<String> {
                 values.iter().map(value_to_text).collect()
             };
@@ -404,36 +454,61 @@ pub fn query(query: &Query, limit: usize, offset: usize) -> Value {
             let rows = statement.query_map(
                 rusqlite::params_from_iter(params_from_json(&filter_params)),
                 |row| {
-                    Ok(json!({
-                        "rowId": row.get::<_, i64>("row_id")?,
-                        "ts": row.get::<_, i64>("ts")?,
-                        "date": row.get::<_, String>("date")?,
-                        "source": row.get::<_, String>("source")?,
-                        "reason": row.get::<_, String>("reason")?,
-                        "accountId": row.get::<_, String>("account_id")?,
-                        "accountName": row.get::<_, String>("account_name")?,
-                        // 存的是 provider id，读出来换成展示名（`qoder-intl`
-                        // → 「Qoder 国际版」）：界面上直接展示这一列，而 id
-                        // 只有开发者认得出。历史记录同样受益 —— 转换在读侧做，
-                        // 不改库（改库要迁移，且旧行本来也只需换名字）。
-                        "provider": crate::server::core::providers::label_of(
-                            &row.get::<_, String>("provider")?
-                        ),
-                        "providerId": row.get::<_, String>("provider")?,
-                        "outcome": row.get::<_, String>("outcome")?,
-                        "ok": row.get::<_, i64>("ok").unwrap_or(0) != 0,
-                        "message": row.get::<_, Option<String>>("message")?,
-                        "error": row.get::<_, Option<String>>("error")?,
-                        "keptActive": row.get::<_, i64>("kept_active").unwrap_or(0) != 0,
-                    }))
+                    Ok(RawRecord {
+                        row_id: row.get("row_id")?,
+                        ts: row.get("ts")?,
+                        date: row.get("date")?,
+                        source: row.get("source")?,
+                        reason: row.get("reason")?,
+                        account_id: row.get("account_id")?,
+                        account_name: row.get("account_name")?,
+                        provider_id: row.get("provider")?,
+                        outcome: row.get("outcome")?,
+                        ok: row.get::<_, i64>("ok").unwrap_or(0) != 0,
+                        message: row.get("message")?,
+                        error: row.get("error")?,
+                        kept_active: row.get::<_, i64>("kept_active").unwrap_or(0) != 0,
+                    })
                 },
             )?;
-            let records: Vec<Value> = rows.filter_map(|item| item.ok()).collect();
-            Ok(json!({ "records": records, "total": total }))
+            let records: Vec<RawRecord> = rows.filter_map(|item| item.ok()).collect();
+            Ok((records, total))
         })
-        .and_then(|result| result.ok())
-        .unwrap_or_else(|| json!({ "records": [], "total": 0 }));
-    loaded
+        .and_then(|result| result.ok());
+    let Some((raw_rows, total)) = loaded else {
+        return json!({ "records": [], "total": 0 });
+    };
+    let mut label_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let records: Vec<Value> = raw_rows
+        .into_iter()
+        .map(|row| {
+            let label = label_cache
+                .entry(row.provider_id.clone())
+                .or_insert_with(|| crate::server::core::providers::label_of(&row.provider_id))
+                .clone();
+            json!({
+                "rowId": row.row_id,
+                "ts": row.ts,
+                "date": row.date,
+                "source": row.source,
+                "reason": row.reason,
+                "accountId": row.account_id,
+                "accountName": row.account_name,
+                // 存的是 provider id，读出来换成展示名（`qoder-intl`
+                // → 「Qoder 国际版」）：界面上直接展示这一列，而 id
+                // 只有开发者认得出。历史记录同样受益 —— 转换在读侧做，
+                // 不改库（改库要迁移，且旧行本来也只需换名字）。
+                "provider": label,
+                "providerId": row.provider_id,
+                "outcome": row.outcome,
+                "ok": row.ok,
+                "message": row.message,
+                "error": row.error,
+                "keptActive": row.kept_active,
+            })
+        })
+        .collect();
+    json!({ "records": records, "total": total })
 }
 
 /// 按筛选条件删除（「清空筛选结果」）；无筛选条件的调用**必须**由 API 层

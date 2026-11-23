@@ -84,6 +84,8 @@ fn persist(context: &RecordContext, fallback_error: Option<String>) {
     entry.completion_tokens = snapshot.completion_tokens;
     entry.total_tokens = snapshot.total_tokens;
     entry.cache_read_tokens = snapshot.cache_read_tokens;
+    entry.cache_creation_tokens = snapshot.cache_creation_tokens;
+    entry.cache_creation_1h_tokens = snapshot.cache_creation_1h_tokens;
     entry.credit = snapshot.credit;
 
     // 限额沿用上游实际消耗，不能改用失败清零后的报表读数。

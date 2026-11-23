@@ -364,3 +364,8 @@ fn strip_on_object(value: &mut Value) {
         object.retain(|key, _| !key.starts_with(INTERNAL_FIELD_PREFIX));
     }
 }
+
+/// 文本是否非空且仅由换行符（LF/CR）组成（用于识别思考期穿插的保活换行分片）。
+pub(super) fn is_newline_only(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|ch| ch == '\n' || ch == '\r')
+}

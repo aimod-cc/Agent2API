@@ -199,8 +199,7 @@ pub(in crate::server::core::plugin_host) fn conversation(
         public_code(provider, &code)
     } else if crate::server::core::providers::availability::is_qwenwork_family(provider) && upstream.is_some()
         && !codes::known(provider, &code) {
-        if numeric_known_code(provider, upstream) { upstream.map(|value| value.to_string()).unwrap_or_else(|| UNKNOWN.into()) }
-        else { UNKNOWN.into() }
+        upstream.map(|value| value.to_string()).unwrap_or_else(|| UNKNOWN.into())
     } else if code.is_empty() {
         match &class {
             UpstreamErrorClass::QuotaLimited { .. } => "runtime_sdk_quota".into(),
@@ -307,7 +306,7 @@ fn evidenced_action(provider: &str, status: u16, code: &str, class: &UpstreamErr
     let lower = raw.to_lowercase();
     match class {
         UpstreamErrorClass::TokenExpired { .. } => status == 401,
-        UpstreamErrorClass::QuotaLimited { .. } => provider == "copilot-subscription" && status == 429
+        UpstreamErrorClass::QuotaLimited { .. } => status == 429 && !context_too_long(&lower)
             || status < 500 && !context_too_long(&lower) && (quota_words(&lower) || native_limit(provider, &lower)),
         UpstreamErrorClass::ContentBlocked { .. } => provider == "devin" && lower.contains("content policy"),
         UpstreamErrorClass::Fatal { .. } => true,

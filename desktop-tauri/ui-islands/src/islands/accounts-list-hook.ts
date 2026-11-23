@@ -102,7 +102,7 @@ export function useAccountsList(query: AccountListQuery, continuous: boolean, re
   const loadMore = React.useCallback(async () => {
     const { key, contentKey, query, state } = current.current
     const page = state.data
-    if (!continuous || loadingMore.current || shared().wbApp?.currentPage !== 'accounts' || document.hidden || state.loading || state.key !== key || !page || page.accounts.length >= page.displayTotal) return
+    if (!continuous || loadingMore.current || shared().wbApp?.currentPage !== 'accounts' || document.hidden || state.loading || state.key !== key || !page || page.accounts.length >= page.displayTotal || page.offset >= page.displayTotal) return
     loadingMore.current = true
     const run = generation.current
     try {

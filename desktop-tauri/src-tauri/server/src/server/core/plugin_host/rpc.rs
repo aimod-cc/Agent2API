@@ -172,6 +172,7 @@ pub struct RpcAdapter {
     stop_on_error: bool,
     image_editing: bool,
     image_models: Vec<Value>,
+    web_search: Option<crate::server::core::providers::adapter::WebSearchCapability>,
     /// `finish_reason` 拒答集合（握手时取回）。
     ///
     /// ── 为什么存的是 `&'static [&'static str]` 而不是 `Box<[...]>` ──
@@ -208,6 +209,7 @@ impl RpcAdapter {
             image_editing: false,
             image_models: info.default_models.into_iter()
                 .filter(crate::server::core::providers::images::model_is_image).collect(),
+            web_search: None,
             refusal_finishes: leak_slice(info.refusal_finishes),
             refusal_markers: leak_slice(info.refusal_markers),
         }
@@ -265,6 +267,20 @@ impl RpcAdapter {
             && self.host.options.wasm.as_ref().is_none_or(|options| options.allows("images.v1"));
         if !self.image_generation {
             self.image_models.clear();
+        }
+        if self.host.options.wasm.is_some() || self.host.options.script {
+            let mut params = self.with_account("");
+            if let Some(object) = params.as_object_mut() {
+                object.insert("action".into(), Value::String("web-search.capabilities".into()));
+                object.insert("payload".into(), Value::Object(serde_json::Map::new()));
+            }
+            let search = self
+                .control(proto::methods::gateway::ADMIN_ACTION, params)
+                .await
+                .ok()
+                .as_ref()
+                .and_then(crate::server::core::providers::adapter::WebSearchCapability::from_metadata);
+            self.web_search = search;
         }
     }
 
@@ -608,6 +624,12 @@ impl ProviderAdapter for RpcAdapter {
 
     fn supports_image_editing(&self) -> bool {
         self.metadata().image_editing
+    }
+
+    fn web_search_capability(
+        &self,
+    ) -> Option<crate::server::core::providers::adapter::WebSearchCapability> {
+        self.metadata().web_search.clone()
     }
 
     fn forwards_images(&self) -> bool { self.metadata().host.options.wasm.is_some() }
@@ -2206,7 +2228,16 @@ impl RpcAdapter {
             if strict::applies(self.id) {
                 return Err(strict::conversation(self.id, status, class, &error, response_headers.as_ref()));
             }
-            return Err(conversation_error(status, class, &error));
+            let mut failure = conversation_error(status, class, &error);
+            if failure.code.is_none() {
+                if let Some(code) = error.get("code").or_else(|| error.get("providerCode"))
+                    .or_else(|| error.pointer("/error/code")).and_then(Value::as_str)
+                    .filter(|text| !text.is_empty() && text.len() <= 256)
+                {
+                    failure.code = Some(code.to_string());
+                }
+            }
+            return Err(failure);
         }
 
         if self.id == "catpaw" && self.host.options.wasm.is_some()

@@ -121,6 +121,39 @@ pub(super) fn credential_version_mirror(record: &mut StoredAccount, secret: &Val
     }
 }
 
+/// 重新登录或重新导入凭据后清掉旧凭据遗留的续期预约锁，避免新凭据继续被旧状态拦住。
+fn clear_refresh_reservations(record: &mut StoredAccount) {
+    let Some(mut state) = record.get("pluginState").and_then(Value::as_object).cloned() else {
+        return;
+    };
+    let mut changed = false;
+    for key in [
+        "plugin:cline-refresh-control",
+        "plugin:credential-refresh",
+        "plugin:refresh-control",
+        "plugin:accio.renewal",
+        "host.desktop-refresh.v1",
+    ] {
+        let Some(entry) = state.get_mut(key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if entry.get("value").is_some_and(|value| !value.is_null()) {
+            let next_revision = entry
+                .get("revision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .saturating_add(1)
+                .max(1);
+            entry.insert("revision".to_string(), Value::from(next_revision));
+            entry.insert("value".to_string(), Value::Null);
+            changed = true;
+        }
+    }
+    if changed {
+        record.set("pluginState", Value::Object(state));
+    }
+}
+
 /// 无公开序列化出口的任务专用投影；字段只能按值交给宿主内部快照校验。
 pub(crate) struct TaskAccountProjection {
     id: String,
@@ -646,9 +679,10 @@ impl AccountStore {
                 record.set(PUBLIC_KEY, public.clone());
                 super::plugin_identity::remember_identity(&mut record, provider, identity);
                 if let Some(plan) = zcode_plan.filter(|plan| !plan.trim().is_empty()) { record.set_zcode_plan(&plan); }
-                // 重新登录拿到新凭证后，同次清掉旧凭证的重登录标记。
+                // 重新登录拿到新凭证后，同次清掉旧凭证的重登录标记与已失效的续期预约。
                 record.remove("needsRelogin");
                 record.remove("needsReloginReason");
+                clear_refresh_reservations(&mut record);
                 record
             } else {
                 let mut record = account;

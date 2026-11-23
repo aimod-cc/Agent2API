@@ -17,7 +17,10 @@ const CAPABILITY_DESCRIPTIONS: Record<string, { title: string; desc: string; par
     {
       title: t('批量网页搜索'),
       desc: t('批量搜索 1～10 条查询，并发调用后台选中的提供商后合并重复来源。'),
-      params: [{ name: 'queries', type: 'string[]', desc: t('要搜索的查询，每条并发执行（1～10 条）'), required: true }],
+      params: [
+        { name: 'queries', type: 'string[]', desc: t('要搜索的查询，每条并发执行（1～10 条）'), required: true },
+        { name: 'limit', type: 'number', desc: t('每条查询在每家提供商最多返回的结果数（1～100），不填按后台配置'), required: false },
+      ],
     },
     {
       title: t('批量网页抓取'),

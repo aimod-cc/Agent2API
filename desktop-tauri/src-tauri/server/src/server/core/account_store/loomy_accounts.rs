@@ -239,9 +239,10 @@ impl AccountStore {
         let saved = StoredAccount::from_map(merged);
         // 单行落地：`put` = DELETE + INSERT（与别家一致）
         self.with_conn(&guard, |conn| sql::put(conn, &saved))?;
-        logging::log(
+        logging::log_with_level(
             "[Accounts]",
             &format!("✅ Loomy 账号已保存: {record_name}（优先级 {priority}）"),
+            "info",
         );
         Ok(self.public_account(&saved))
     }

@@ -193,6 +193,38 @@ fn is_image_path(path: &Path) -> bool {
 }
 
 
+/// 从已启用包的注册表缓存/清单查找提供商展示名，避免扫描图标与宿主状态。
+pub(super) fn provider_label(id: &str) -> Option<String> {
+    if crate::server::core::providers::availability::is_suspended(id) {
+        return None;
+    }
+    let registry = PackRegistry::load();
+    for pack in registry.packs {
+        if !pack.enabled {
+            continue;
+        }
+        let found = if !pack.manifest_providers.is_empty() {
+            pack.manifest_providers
+                .iter()
+                .find(|item| item.id.as_str() == id)
+                .map(|item| item.label.clone())
+        } else {
+            let dir = plugins_dir().join(&pack.id).join(&pack.version);
+            read_manifest(&dir).ok().and_then(|manifest| {
+                manifest
+                    .providers
+                    .into_iter()
+                    .find(|item| item.id.as_str() == id)
+                    .map(|item| item.label)
+            })
+        };
+        if let Some(label) = found {
+            return Some(label);
+        }
+    }
+    None
+}
+
 /// 列出全部已安装包（含未启用的）。
 ///
 /// 清单读不出来不报错：`InstalledPack` 自己记着 `entry` 与版本，界面照样能

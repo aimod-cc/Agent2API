@@ -1,0 +1,615 @@
+﻿:root {
+  /* Safe areas: native Chromium env(), Capacitor 8 SystemBars CSS vars, and fallback */
+  --fc-safe-top: max(env(safe-area-inset-top, 0px), var(--safe-area-inset-top, 0px), var(--native-safe-top, 0px));
+  --fc-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px), var(--native-safe-bottom, 0px));
+
+  /* FlClash 4-Level Surface Hierarchy (Light Mode) */
+  --fc-page: #eef0f4;
+  --fc-card: #fafbfc;
+  --fc-block: #eef0f4;
+  --fc-inset: #e2e5ec;
+  --fc-dock-bg: rgba(250, 251, 252, 0.86);
+  --fc-dock-lens: rgba(37, 99, 235, 0.13);
+
+  /* Text Hierarchy */
+  --fc-text: #14171c;
+  --fc-text-secondary: #525967;
+  --fc-text-tertiary: #848c9c;
+
+  /* Hairline Divider (Inset rows only) */
+  --fc-divider: rgba(20, 23, 28, 0.09);
+
+  /* Primary Accent (Material 3 Tonal Palette) */
+  --fc-primary: #2563eb;
+  --fc-on-primary: #ffffff;
+  --fc-primary-soft: rgba(37, 99, 235, 0.11);
+  --fc-primary-container: #dbeafe;
+  --fc-on-primary-container: #1d4ed8;
+
+  /* Semantic Tones */
+  --fc-success: #16a34a;
+  --fc-success-soft: rgba(22, 163, 74, 0.12);
+  --fc-warning: #d97706;
+  --fc-warning-soft: rgba(217, 119, 6, 0.13);
+  --fc-danger: #dc2626;
+  --fc-danger-soft: rgba(220, 38, 38, 0.12);
+
+  /* FlClash AppCorner Scale */
+  --fc-r-sm: 8px;
+  --fc-r-md: 16px;
+  --fc-r-lg: 20px;
+  --fc-r-xl: 24px;
+  --fc-r-xxl: 28px;
+  --fc-r-dashboard: 30px;
+  --fc-r-full: 9999px;
+
+  /* Soft elevation shadows */
+  --fc-shadow-card: 0 2px 10px rgba(15, 23, 42, 0.03), 0 8px 24px rgba(15, 23, 42, 0.03);
+  --fc-shadow-dock: 0 10px 32px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(15, 23, 42, 0.06);
+  --fc-shadow-sheet: 0 -8px 36px rgba(15, 23, 42, 0.16);
+
+  /* Spring easing */
+  --fc-ease-spring: cubic-bezier(0.22, 1.15, 0.36, 1);
+  --fc-ease-out: cubic-bezier(0.2, 0.85, 0.3, 1);
+}
+
+[data-theme="dark"] {
+  /* FlClash 4-Level Surface Hierarchy (Dark Mode strictly steps UP in lightness) */
+  --fc-page: #0f1013;
+  --fc-card: #212328;
+  --fc-block: #2e3138;
+  --fc-inset: #3c3f48;
+  --fc-dock-bg: rgba(33, 35, 40, 0.86);
+  --fc-dock-lens: rgba(96, 165, 250, 0.18);
+
+  --fc-text: #f1f3f7;
+  --fc-text-secondary: #a7afbe;
+  --fc-text-tertiary: #737b8c;
+
+  --fc-divider: rgba(241, 243, 247, 0.10);
+
+  --fc-primary: #60a5fa;
+  --fc-on-primary: #081426;
+  --fc-primary-soft: rgba(96, 165, 250, 0.16);
+  --fc-primary-container: #1e3a5f;
+  --fc-on-primary-container: #bfdbfe;
+
+  --fc-success: #4ade80;
+  --fc-success-soft: rgba(74, 222, 128, 0.15);
+  --fc-warning: #fbbf24;
+  --fc-warning-soft: rgba(251, 191, 36, 0.16);
+  --fc-danger: #f87171;
+  --fc-danger-soft: rgba(248, 113, 113, 0.16);
+
+  --fc-shadow-card: 0 2px 10px rgba(0, 0, 0, 0.18), 0 8px 24px rgba(0, 0, 0, 0.16);
+  --fc-shadow-dock: 0 12px 36px rgba(0, 0, 0, 0.45), 0 2px 10px rgba(0, 0, 0, 0.3);
+  --fc-shadow-sheet: 0 -10px 42px rgba(0, 0, 0, 0.55);
+}
+
+/* FlClash ElevatedSurfaceTheme: Bottom sheets in dark mode step up one level */
+[data-theme="dark"] .fc-sheet-surface {
+  --fc-page: #212328;
+  --fc-card: #2e3138;
+  --fc-block: #3c3f48;
+  --fc-inset: #4a4e59;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--fc-page);
+  color: var(--fc-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+input,
+textarea,
+button,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+.fc-mono {
+  font-family: "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+/* ─── CommonScaffold & Top App Bar ───────────────────────── */
+
+.fc-app-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--fc-page);
+  overflow: hidden;
+}
+
+.fc-topbar {
+  flex: none;
+  padding: calc(var(--fc-safe-top) + 10px) 16px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--fc-page);
+  z-index: 20;
+}
+
+.fc-topbar-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fc-page-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--fc-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fc-sticky-header {
+  flex: none;
+  padding: 2px 16px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--fc-page);
+  z-index: 2;
+}
+
+.fc-scroll-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 16px calc(var(--fc-safe-bottom) + 96px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fc-scroll-body.no-dock {
+  padding-bottom: max(var(--fc-safe-bottom), 24px);
+}
+
+.fc-scroll-body > * {
+  flex-shrink: 0;
+}
+
+/* ─── TonalButtonGroup (Top Bar Actions) ─────────────────── */
+
+.fc-tonal-btn-group {
+  display: inline-flex;
+  align-items: center;
+  height: 40px;
+  padding: 3px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-card);
+  gap: 2px;
+  flex: none;
+}
+
+.fc-tonal-icon-btn {
+  border: none;
+  background: transparent;
+  color: var(--fc-text);
+  height: 34px;
+  min-width: 34px;
+  padding: 0 10px;
+  border-radius: var(--fc-r-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms ease, transform 120ms ease;
+}
+
+.fc-tonal-icon-btn:active {
+  background: var(--fc-block);
+  transform: scale(0.95);
+}
+
+.fc-tonal-icon-btn.is-primary {
+  background: var(--fc-primary-soft);
+  color: var(--fc-primary);
+}
+
+/* ─── Floating NavigationDock ────────────────────────────── */
+
+.fc-dock-wrap {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--fc-safe-bottom) + 12px);
+  padding: 0 20px;
+  z-index: 40;
+  pointer-events: none;
+  display: flex;
+  justify-content: center;
+  animation: fcDockIn 180ms var(--fc-ease-out);
+}
+
+@keyframes fcDockIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dock-prehide .fc-dock-wrap,
+.keyboard-open .fc-dock-wrap {
+  display: none !important;
+}
+
+.keyboard-open .fc-scroll-body {
+  padding-bottom: 20px;
+}
+
+.keyboard-open .fc-chat-composer-wrap {
+  padding-bottom: 10px !important;
+}
+
+.fc-dock {
+  pointer-events: auto;
+  position: relative;
+  width: 100%;
+  max-width: 440px;
+  height: 62px;
+  padding: 4px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-dock-bg);
+  backdrop-filter: blur(24px) saturate(1.65);
+  -webkit-backdrop-filter: blur(24px) saturate(1.65);
+  box-shadow: var(--fc-shadow-dock);
+  display: grid;
+  grid-template-columns: repeat(var(--fc-dock-cols, 5), minmax(0, 1fr));
+  align-items: center;
+}
+
+.fc-dock-lens {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc((100% - 8px) / var(--fc-dock-cols, 5));
+  border-radius: var(--fc-r-full);
+  background: var(--fc-dock-lens);
+  transition: transform 280ms var(--fc-ease-spring);
+  pointer-events: none;
+}
+
+.fc-dock-item {
+  position: relative;
+  z-index: 1;
+  border: none;
+  background: transparent;
+  height: 54px;
+  border-radius: var(--fc-r-full);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--fc-text-secondary);
+  cursor: pointer;
+  transition: color 180ms ease, transform 140ms ease;
+  padding: 0;
+}
+
+.fc-dock-item:active {
+  transform: scale(0.93);
+}
+
+.fc-dock-item.is-active {
+  color: var(--fc-primary);
+}
+
+.fc-dock-label {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+}
+
+.fc-dock-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fc-dock-dot {
+  position: absolute;
+  top: -1px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--fc-danger);
+  box-shadow: 0 0 0 1.5px var(--fc-dock-bg);
+}
+
+.fc-dock-item.is-active .fc-dock-label {
+  font-weight: 700;
+}
+
+/* ─── FlClash Cards (DashboardCard, CommonCard, RecordCard) */
+
+.fc-dashboard-card {
+  background: var(--fc-card);
+  border-radius: var(--fc-r-dashboard);
+  padding: 18px;
+  box-shadow: var(--fc-shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fc-dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fc-dashboard-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.fc-icon-badge {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-primary-soft);
+  color: var(--fc-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.fc-card-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fc-text);
+  line-height: 1.25;
+}
+
+.fc-card-subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--fc-text-secondary);
+  line-height: 1.3;
+}
+
+.fc-common-card {
+  background: var(--fc-card);
+  border-radius: var(--fc-r-xl);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fc-record-card {
+  background: var(--fc-card);
+  border-radius: var(--fc-r-xl);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.fc-record-card.is-clickable {
+  cursor: pointer;
+}
+
+.fc-record-card.is-clickable:active {
+  transform: scale(0.985);
+}
+
+/* Inner block surface inside a card */
+.fc-inner-block {
+  background: var(--fc-block);
+  border-radius: var(--fc-r-lg);
+  padding: 12px 14px;
+}
+
+/* ─── InfoHeader & ListGroup / ListItem ──────────────────── */
+
+.fc-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px 0;
+  gap: 8px;
+}
+
+.fc-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fc-text-secondary);
+  letter-spacing: 0.01em;
+}
+
+.fc-list-group {
+  background: var(--fc-card);
+  border-radius: var(--fc-r-xl);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.fc-list-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  min-height: 56px;
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  transition: background 140ms ease;
+}
+
+.fc-list-item.is-clickable {
+  cursor: pointer;
+}
+
+.fc-list-item.is-clickable:active {
+  background: var(--fc-block);
+}
+
+.fc-list-item + .fc-list-item::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 64px;
+  right: 16px;
+  height: 1px;
+  background: var(--fc-divider);
+}
+
+.fc-list-item.no-leading + .fc-list-item.no-leading::before {
+  left: 16px;
+}
+
+.fc-list-icon-well {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: var(--fc-inset);
+  color: var(--fc-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.fc-list-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fc-list-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--fc-text);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fc-list-subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--fc-text-secondary);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fc-list-trailing {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fc-text-secondary);
+  font-size: 13px;
+}
+
+/* ─── SegmentedControl (Sliding Pill) ────────────────────── */
+
+.fc-segmented {
+  position: relative;
+  display: grid;
+  height: 44px;
+  padding: 4px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-card);
+  align-items: center;
+}
+
+.fc-segmented.in-card {
+  background: var(--fc-block);
+  height: 40px;
+}
+
+.fc-segmented-thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  border-radius: var(--fc-r-full);
+  background: var(--fc-primary);
+  transition: transform 250ms var(--fc-ease-spring);
+  pointer-events: none;
+}
+
+.fc-segmented-btn {
+  position: relative;
+  z-index: 1;
+  border: none;
+  background: transparent;
+  height: 100%;
+  border-radius: var(--fc-r-full);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fc-text-secondary);
+  cursor: pointer;
+  transition: color 180ms ease;
+  padding: 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fc-segmented-btn.is-active {
+  color: var(--fc-on-primary);
+  font-weight: 700;
+}

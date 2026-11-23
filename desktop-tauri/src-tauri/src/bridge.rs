@@ -655,8 +655,10 @@ const BRIDGE_JS: &str = r#"
     getTravelSchedule: () => call('GET', '/api/travel-schedule'),
     saveTravelSchedule: patch => call('POST', '/api/travel-schedule', patch),
     runTravelScheduleNow: () => call('POST', '/api/travel-schedule/run', {}),
-    // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
+    // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）及详情/重置
     runCheckinActivity: (id, mode) => call('POST', '/api/checkin-activity', { id, mode }),
+    getCheckinActivityStatus: id => call('GET', '/api/checkin-activity/status?id=' + encodeURIComponent(String(id || ''))),
+    resetCheckinActivity: id => call('POST', '/api/checkin-activity/reset', { id }),
     // 签到中心的聚合快照（每日签到分组 / 自动签到设置 / 签到历史 / 一次性项入口），
     // 见 api::checkin_center 的模块头 —— 页面打开只打这一条
     getCheckinCenter: () => call('GET', '/api/checkin-center'),
@@ -1083,6 +1085,22 @@ const BRIDGE_JS: &str = r#"
     cloudSyncUpload: () => invoke('cloud_sync_upload'),
     cloudSyncDownload: () => invoke('cloud_sync_download'),
     importCloudSyncKey: password => invoke('cloud_sync_import_key', { password }),
+
+    // ── 系统通知（设置页「通知」）──
+    getNotifications: () => call('GET', '/api/notifications'),
+    saveNotifications: payload => call('PUT', '/api/notifications', payload || {}),
+    testNotification: payload => call('POST', '/api/notifications/test', payload || {}),
+
+    // ── 面板 OAuth 第三方登录（设置页「账户」）──
+    getOauthSettings: () => call('GET', '/api/panel/oauth/settings'),
+    saveOauthSettings: payload => call('PUT', '/api/panel/oauth/settings', payload || {}),
+    startOauthBind: payload => call('POST', '/api/panel/oauth/bind-url', payload || {}),
+    pollOauthState: state => call('GET', '/api/panel/oauth/poll' + toQuery({ state })),
+
+    // ── 模型计价 ──
+    getModelPricing: () => call('GET', '/api/model-pricing'),
+    saveModelPricing: payload => call('PUT', '/api/model-pricing', payload || {}),
+    refreshFxRate: () => call('POST', '/api/model-pricing/fx/refresh', {}),
   };
 })();
 "#;

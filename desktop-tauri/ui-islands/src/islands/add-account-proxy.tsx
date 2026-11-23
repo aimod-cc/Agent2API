@@ -8,6 +8,8 @@ type AccountProxyContext = {
   importFields: () => { proxy?: ProxyPayload }
   busy: boolean
   setBusy: (busy: boolean) => void
+  resetProxy: () => void
+  dirty: boolean
 }
 
 type AccountProxyDraftContext = { draft: ProxyDraft; change: (draft: ProxyDraft) => void }
@@ -25,10 +27,20 @@ export function AddAccountProxyProvider({ children }: { children: React.ReactNod
     changed.current = true
     setDraft(next)
   }, [])
+  const resetProxy = React.useCallback(() => {
+    const clean = draftOfProxy(undefined)
+    current.current = clean
+    changed.current = false
+    setDraft(clean)
+  }, [])
   const read = React.useCallback(() => readProxyDraft(current.current), [])
   // 导入文件自带代理时，未改动选择器不覆盖文件中的配置。
   const importFields = React.useCallback(() => changed.current ? { proxy: read() } : {}, [read])
-  const value = React.useMemo(() => ({ read, importFields, busy, setBusy }), [read, importFields, busy])
+  const dirty = draft.mode !== 'none'
+  const value = React.useMemo(
+    () => ({ read, importFields, busy, setBusy, resetProxy, dirty }),
+    [read, importFields, busy, resetProxy, dirty],
+  )
   const editor = React.useMemo(() => ({ draft, change }), [draft, change])
   return <Context.Provider value={value}>
     <DraftContext.Provider value={editor}>{children}</DraftContext.Provider>
@@ -41,6 +53,12 @@ export function useAddAccountProxy(): AccountProxyContext {
   return value
 }
 
+export function useAddAccountProxyDraft(): AccountProxyDraftContext {
+  const value = React.useContext(DraftContext)
+  if (!value) throw new Error('Account proxy draft is unavailable')
+  return value
+}
+
 export function useAccountAddBusy(): [boolean, (busy: boolean) => void] {
   const { busy, setBusy } = useAddAccountProxy()
   return [busy, setBusy]
@@ -50,7 +68,7 @@ export function accountProxySummary(draft: ProxyDraft): string {
   if (draft.mode === 'none') return t('无代理（直连）')
   if (draft.mode === 'pool') return t('已保存的代理')
   if (draft.mode === 'custom') return draft.host && draft.port ? `${draft.host}:${draft.port}` : t('自定义代理')
-  if (draft.mode === 'clash') return 'Clash Verge'
+  if (draft.mode === 'clash') return 'EasyClash'
   return t('请重新选择代理')
 }
 

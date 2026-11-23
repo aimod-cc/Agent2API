@@ -68,6 +68,20 @@ pub async fn entry(State(state): State<ServerState>, request: axum::extract::Req
     dispatch(&state, method, &full_path, &query, &body).await
 }
 
+fn query_current(query: &str) -> String {
+    let raw = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "current")
+        .map(|(_, value)| percent_decode(value))
+        .unwrap_or_default();
+    if raw.trim().is_empty() {
+        crate::server::core::update::CURRENT_VERSION.to_string()
+    } else {
+        raw
+    }
+}
+
 /// 路径分发（判定顺序按既有四条 if 的写法顺延）
 async fn dispatch(
     state: &ServerState,
@@ -77,26 +91,13 @@ async fn dispatch(
     body: &Bytes,
 ) -> Response {
     if method == Method::GET && full_path == "/api/update/policy" {
-        let current = query.split('&').filter_map(|pair| pair.split_once('='))
-            .find(|(key, _)| *key == "current").map(|(_, value)| percent_decode(value)).unwrap_or_default();
-        let current = if current.is_empty() { crate::server::core::update::CURRENT_VERSION } else { &current };
-        return ok_json(state.update().refresh_policy(current).await);
+        let current = query_current(query);
+        return ok_json(state.update().refresh_policy(&current).await);
     }
     if method == Method::GET && full_path == "/api/update/check" {
-        // `url.searchParams.get('current') || ''`：缺省是空串（不是 null）
-        let current = query
-            .split('&')
-            .filter_map(|pair| pair.split_once('='))
-            .find(|(key, _)| *key == "current")
-            .map(|(_, value)| percent_decode(value))
-            .unwrap_or_default();
-        // 网页端（web_shim 注入的面板）不传版本号：它没有「壳打包的版本」这个
-        // 概念，以服务端自己的编译期版本为准。桌面壳始终显式传值，行为不变。
-        let current = if current.trim().is_empty() {
-            crate::server::core::update::CURRENT_VERSION.to_string()
-        } else {
-            current
-        };
+        // 网页端（web_shim 注入的面板）不传版本号：以服务端编译期版本为准；
+        // 桌面壳与手机 App 显式传 ?current=，行为一致。
+        let current = query_current(query);
         return match state.update().check(&current).await {
             Ok(data) => ok_json(data),
             Err(error) => update_error(error),
@@ -130,10 +131,10 @@ async fn dispatch(
     }
 
     if method == Method::GET && full_path == "/api/update/status" {
-        // 最近一次「检查更新」的结果（定时任务与壳命令写入，前端 60 秒轮询
-        // 读这里亮侧栏徽标，自己不再打 GitHub —— 匿名限额 60 次/小时）。
-        // 本进程还没查过时是 {checked:false}，前端按「未知」处理，不亮标。
-        return ok_json(state.update().last_check());
+        // 最近一次「检查更新」的结果（定时任务与壳命令写入，前端轮询或手机端启动
+        // 时读这里亮徽标，不主动触发外网检查）。传 ?current= 时按客户端版本比对。
+        let current = query_current(query);
+        return ok_json(state.update().last_check_for(&current));
     }
 
     if method == Method::POST && full_path == "/api/update/download-plan" {

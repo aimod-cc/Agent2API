@@ -1,10 +1,16 @@
 export type ErrorKind = 'rate_limit' | 'quota' | 'auth' | 'balance' | 'transient' | 'unsupported' | 'bad_request' | 'content' | 'unknown'
 export type ErrorAction = 'switch_account' | 'retry_then_switch' | 'refresh_then_switch' | 'switch_provider' | 'return_error'
-export type CooldownMode = 'upstream' | 'fixed' | 'protection' | 'none'
+export type CooldownMode = 'upstream' | 'fixed' | 'protection' | 'deprioritize' | 'none'
 export type CooldownScope = 'auto' | 'model' | 'account' | 'provider'
 export type ErrorRule = {
   id: string; name: string; kind: ErrorKind; statuses: number[]; code: string; provider: string; model: string; enabled: boolean
   action: ErrorAction; cooldown: CooldownMode; fallbackSeconds: number; exponential: boolean; fallbackCapSeconds: number; scope: CooldownScope
+}
+export type PluginErrorRule = ErrorRule & {
+  pluginRuleId: string; reason: string
+}
+export type ProviderRuleEntry = {
+  id: string; rule: ErrorRule; custom: boolean; pluginDefault?: PluginErrorRule; overridden: boolean; overrideIndex: number
 }
 export type ErrorSettings = {
   resends: number; switches: number; intervalSeconds: number; waitBudgetSeconds: number; cooldownFloorSeconds: number
@@ -14,11 +20,11 @@ export type ErrorSettings = {
 }
 export type ErrorPolicyView = {
   settings: ErrorSettings; defaults: ErrorSettings; revision: string; configured: boolean; legacy: boolean
-  providers: { id: string; label: string }[]
+  providers: { id: string; label: string }[]; providerRules?: PluginErrorRule[]
 }
 export type ErrorPolicyApi = { load(): Promise<ErrorPolicyView>; save(payload: { settings: ErrorSettings; revision: string }): Promise<ErrorPolicyView> }
-export type ErrorPolicyRecord = { ruleId?: string; ruleName?: string; kind?: ErrorKind; action?: ErrorAction; scope?: CooldownScope;
-  resetAt?: number | null; timeSource?: 'upstream' | 'fallback' | 'none'; exception?: boolean; reason?: string }
+export type ErrorPolicyRecord = { ruleId?: string; ruleName?: string; source?: 'override' | 'plugin' | 'global'; kind?: ErrorKind; action?: ErrorAction; scope?: CooldownScope;
+  cooldownMode?: CooldownMode; resetAt?: number | null; timeSource?: 'upstream' | 'fallback' | 'sink' | 'none'; exception?: boolean; reason?: string }
 export type ErrorTranslate = (key: string, variables?: Record<string, string | number>) => string
 export const ERROR_POLICY_CHANGED = 'wb:routing-errors-changed'
 
@@ -36,6 +42,39 @@ export function scopeLabels(t: ErrorTranslate): Record<CooldownScope, string> {
 export function ruleLabel(rule: ErrorRule, t: ErrorTranslate): string {
   return rule.id === rule.kind ? kindLabels(t)[rule.kind] : rule.name
 }
+/** 合并用户自定义覆盖规则与插件默认规则，避免同一插件规则在界面上重复计数。 */
+export function mergeProviderRules(settings: ErrorSettings, providerRules: PluginErrorRule[] = []): ProviderRuleEntry[] {
+  const consumed = new Set<number>()
+  const pluginEntries: ProviderRuleEntry[] = []
+  for (const pluginRule of providerRules) {
+    const overrideIndex = settings.overrides.findIndex(
+      (item, index) => !consumed.has(index) && (item.id === pluginRule.id || (item.provider === pluginRule.provider && item.id === pluginRule.pluginRuleId)),
+    )
+    if (overrideIndex >= 0) consumed.add(overrideIndex)
+    const overrideRule = overrideIndex >= 0 ? settings.overrides[overrideIndex] : undefined
+    pluginEntries.push({
+      id: pluginRule.id,
+      rule: overrideRule ? { ...overrideRule } : { ...pluginRule },
+      custom: false,
+      pluginDefault: pluginRule,
+      overridden: Boolean(overrideRule),
+      overrideIndex,
+    })
+  }
+  const customEntries: ProviderRuleEntry[] = []
+  settings.overrides.forEach((overrideRule, overrideIndex) => {
+    if (!consumed.has(overrideIndex)) {
+      customEntries.push({
+        id: overrideRule.id,
+        rule: overrideRule,
+        custom: true,
+        overridden: false,
+        overrideIndex,
+      })
+    }
+  })
+  return [...customEntries, ...pluginEntries]
+}
 export function duration(seconds: number, t: ErrorTranslate): string {
   if (!seconds) return t('不冷却')
   if (seconds >= 3600 && seconds % 3600 === 0) return t('{n} 小时', { n: seconds / 3600 })
@@ -44,6 +83,7 @@ export function duration(seconds: number, t: ErrorTranslate): string {
 }
 export function cooldownSummary(rule: ErrorRule, settings: ErrorSettings, t: ErrorTranslate): string {
   if (rule.cooldown === 'none') return t('不冷却')
+  if (rule.cooldown === 'deprioritize') return t('优先级调到最低（{time} 后恢复）', { time: duration(rule.fallbackSeconds, t) })
   if (rule.cooldown === 'protection') return settings.backoff ? t('失败后休息 {time}', { time: duration(settings.backoffSeconds, t) }) : t('不冷却')
   if (rule.cooldown === 'fixed') return t('固定 {time}', { time: duration(rule.fallbackSeconds, t) })
   return t('上游时间，缺失用 {time}', { time: duration(rule.fallbackSeconds, t) })

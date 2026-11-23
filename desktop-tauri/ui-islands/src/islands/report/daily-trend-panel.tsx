@@ -4,6 +4,7 @@ import { SearchableSelect } from '../../../../ui-shared/searchable-select'
 import { DailyTrendChart } from './report-recharts'
 import { sourceName } from './source-stats'
 import { formatInt, formatPercent, formatTokens, SLICE_COLORS, type StatsDay, type StatsGroup, type StatsSummary } from '../report-charts'
+import { formatCost, usePricingDisplay } from '../model-pricing'
 import { t } from '../../i18n'
 import { amount, sumUsage } from './usage-data'
 import { CompactValue } from './compact-value'
@@ -18,6 +19,7 @@ const METRICS = [{ value: 'tokens', label: t('Token 用量') }, { value: 'reques
 const TYPES = [{ value: 'bar', label: t('柱状') }, { value: 'line', label: t('折线') }]
 
 export function ReportDailyTrend({ summary, loading }: { summary: StatsSummary | null; loading: React.ReactNode }) {
+  const pricing = usePricingDisplay()
   const [dimension, setDimension] = React.useState<TrendDimension>('models')
   const [metric, setMetric] = React.useState<TrendMetric>('tokens')
   const [type, setType] = React.useState<'bar' | 'line'>('bar')
@@ -82,7 +84,11 @@ export function ReportDailyTrend({ summary, loading }: { summary: StatsSummary |
       </div>
       {summary ? <div className='report-chart-reading'>
         <div><strong><CompactValue value={total} /></strong><span>{metric === 'tokens' ? t('Token') : t('请求数')}</span></div>
-        <span>{t('日均 {value}', { value: metric === 'tokens' ? `${formatTokens(average)} Token` : formatInt(average) })} · {t('成功率 {rate}', { rate: totals.successRate == null ? '—' : formatPercent(totals.successRate) })}</span>
+        <span>
+          {t('日均 {value}', { value: metric === 'tokens' ? `${formatTokens(average)} Token` : formatInt(average) })}
+          {' · '}{t('预估费用 {cost}', { cost: formatCost(Number(totals.costUsd) || 0, pricing.currency, pricing.exchangeRate) })}
+          {' · '}{t('成功率 {rate}', { rate: totals.successRate == null ? '—' : formatPercent(totals.successRate) })}
+        </span>
       </div> : null}
       <div className='chart-wrap' id='report-daily-trend'>
         {summary ? <DailyTrendChart series={series} colors={colors} metric={metric} type={type} unknownLabel={unknown} breakdownLabel={breakdownLabel} /> : loading}

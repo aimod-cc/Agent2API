@@ -35,6 +35,8 @@ pub(crate) struct SnapshotReceipt {
 #[must_use]
 pub(crate) struct UnknownCandidate { identity: Arc<SnapshotIdentity> }
 
+enum WriteTarget<'a> { Unknown, Official(&'a OfficialDailyFact), Clear }
+
 /// 只表明本地固定记忆的COMMIT；官方分支也不表示本次签到/领取/金额或发送成功。
 #[must_use]
 pub(crate) struct CommitReceipt { revision: u64, _snapshot: Arc<SnapshotIdentity> }
@@ -148,14 +150,25 @@ impl SnapshotReceipt {
         if self.state().official.as_ref().is_some_and(|view| view.day == self.snapshot.current_day()) {
             return refused(StateFailure::OfficialAlreadyConfirmed);
         }
-        self.write(None)
+        self.write(WriteTarget::Unknown)
+    }
+
+    /// 仅在本次签到明确被官方拒绝且回查未完成时撤回本轮暂存的 Pending 记录。
+    pub(crate) fn clear_pending(self, candidate: UnknownCandidate) -> SaveOutcome {
+        if !self.pending_reserved || !Arc::ptr_eq(&self.identity, &candidate.identity) {
+            return refused(StateFailure::CandidateChanged);
+        }
+        if self.state().official.as_ref().is_some_and(|view| view.day == self.snapshot.current_day()) {
+            return refused(StateFailure::OfficialAlreadyConfirmed);
+        }
+        self.write(WriteTarget::Clear)
     }
 
     /// 唯一固定官方保存入口，按值消费真实Fact与原Empty快照；无bool/JSON/view构造旁路。
     /// Fact持到真实保存/异常锁外收尾，COMMIT只表示原当日任务官网状态已记住。
     pub(in crate::server::core) fn save_official(self, fact: OfficialDailyFact) -> SaveOutcome {
         if !fact.matches_snapshot(&self) { return refused(StateFailure::CandidateChanged); }
-        self.write(Some(fact))
+        self.write(WriteTarget::Official(&fact))
     }
 
     pub(in crate::server::core) fn checkpoint_pending(&mut self) -> Result<(), StateError> {
@@ -163,7 +176,7 @@ impl SnapshotReceipt {
             || self.state().official.as_ref().is_some_and(|view| view.day == self.snapshot.current_day()) {
             return Err(StateError::State(StateFailure::CandidateChanged));
         }
-        match self.write(None) {
+        match self.write(WriteTarget::Unknown) {
             SaveOutcome::Committed(receipt) => {
                 self.pending_reserved = true;
                 self.snapshot.advance_unknown(receipt.revision())
@@ -176,14 +189,15 @@ impl SnapshotReceipt {
         }
     }
 
-    fn write(&self, fact: Option<OfficialDailyFact>) -> SaveOutcome {
+    fn write(&self, target: WriteTarget<'_>) -> SaveOutcome {
         let key = match cached_key() {
             Ok(key) => key,
             Err(error) => return SaveOutcome::NotEntered { error: StateError::Account(error), storage_closed: true },
         };
-        let prepared = match &fact {
-            Some(fact) => state_sql::RetainedValues::for_official(&self.snapshot, fact),
-            None => state_sql::RetainedValues::for_unknown(&self.snapshot),
+        let prepared = match target {
+            WriteTarget::Official(fact) => state_sql::RetainedValues::for_official(&self.snapshot, fact),
+            WriteTarget::Unknown => state_sql::RetainedValues::for_unknown(&self.snapshot),
+            WriteTarget::Clear => state_sql::RetainedValues::for_clear(&self.snapshot),
         };
         let mut retained = match prepared {
             Ok(retained) => retained,
@@ -196,9 +210,10 @@ impl SnapshotReceipt {
             let _account = self.original.store.guard();
             let db = self.original.store.database().ok_or(CredentialSourceError::Unavailable)?;
             let _ = db.commit_credential_source(&self.original.source, |conn| {
-                let action = catch_unwind(AssertUnwindSafe(|| match &fact {
-                    Some(fact) => state_sql::save_official(conn, &key, &self.original.inner, &self.snapshot, fact, &mut retained, &attempt),
-                    None => state_sql::save(conn, &key, &self.original.inner, &self.snapshot, &mut retained, &attempt),
+                let action = catch_unwind(AssertUnwindSafe(|| match target {
+                    WriteTarget::Official(fact) => state_sql::save_official(conn, &key, &self.original.inner, &self.snapshot, fact, &mut retained, &attempt),
+                    WriteTarget::Unknown => state_sql::save(conn, &key, &self.original.inner, &self.snapshot, &mut retained, &attempt),
+                    WriteTarget::Clear => state_sql::clear(conn, &key, &self.original.inner, &self.snapshot, &mut retained, &attempt),
                 }));
                 match action { Ok(outcome) => observed = Some(outcome), Err(error) => payload = Some(error) }
                 Ok::<_, std::convert::Infallible>(())

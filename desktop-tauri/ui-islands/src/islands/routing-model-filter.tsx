@@ -1,7 +1,6 @@
 import * as React from 'react'
-import { Button, Empty, InputGroup, InputGroupAddon, InputGroupInput, Label, Popover, PopoverContent, PopoverTrigger } from '@ui'
+import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList, ComboboxTrigger, ComboboxValue, Label } from '@ui'
 import { t } from '../i18n'
-import { RouteIcon } from './routing-ui'
 import { sortRoutingModels } from './routing-model-order'
 import { bridge, errorMessage, type RoutingWorkspace } from './routing-types'
 
@@ -46,46 +45,43 @@ export function useRoutingModelFilter(workspace: RoutingWorkspace | undefined, s
 export function RoutingModelFilter({ value, models, lastUsed, disabled, onChange }: {
   value: string; models: string[]; lastUsed?: Record<string, number>; disabled: boolean; onChange(model: string): void
 }) {
-  const [open, setOpen] = React.useState(false)
   const [search, setSearch] = React.useState('')
-  const [openedModels, setOpenedModels] = React.useState<string[]>([])
+  const [openedModels, setOpenedModels] = React.useState<string[] | null>(null)
   const orderedModels = React.useMemo(() => sortRoutingModels(models, model => model, lastUsed), [models, lastUsed])
   const id = React.useId()
-  const query = search.trim().toLowerCase()
-  const matches = React.useMemo(() => (open ? openedModels : orderedModels)
-    .filter(model => model.toLowerCase().includes(query)), [open, openedModels, orderedModels, query])
+  const activeModels = openedModels ?? orderedModels
+  const options = React.useMemo(
+    () => [{ value: '', label: t('全部') }, ...activeModels.map(model => ({ value: model, label: model }))],
+    [activeModels]
+  )
+  const selected = options.find(option => option.value === value) ?? options[0]
   const text = value || t('全部')
-  const choose = (model: string) => { onChange(model); setOpen(false) }
-  const option = (model: string, label: string) => <Button key={model} variant='ghost' className='routing-model-filter-option'
-    aria-pressed={value === model} title={label} onClick={() => choose(model)}>
-    <span>{label}</span>{value === model ? <RouteIcon name='check' size={13} /> : null}
-  </Button>
 
   return <div className='routing-model-filter'>
     <Label htmlFor={id}>{t('筛选模型')}</Label>
-    <Popover open={open} onOpenChange={open => {
-      if (open) {
+    <Combobox items={options} value={selected} disabled={disabled}
+      inputValue={search} onInputValueChange={setSearch}
+      onOpenChange={open => {
         setSearch('')
         // 展开期间固定顺序，后台刷新不能挪动用户正准备点击的选项。
-        setOpenedModels(orderedModels)
-      }
-      setOpen(open)
-    }}>
-      <PopoverTrigger id={id} render={<Button variant='outline' disabled={disabled} />} className='routing-model-filter-trigger'
-        aria-label={t('筛选模型')} title={text}>
-        <span>{text}</span><RouteIcon name='chevronDown' size={13} />
-      </PopoverTrigger>
-      <PopoverContent className='routing-model-filter-popover' sideOffset={4}>
-        <InputGroup><InputGroupInput type='search' autoFocus autoComplete='off' value={search}
-          placeholder={t('搜索模型')} aria-label={t('搜索模型')} onChange={event => setSearch(event.currentTarget.value)} />
-          <InputGroupAddon><RouteIcon name='search' size={14} /></InputGroupAddon></InputGroup>
-        <div className='routing-model-filter-options'>
-          {option('', t('全部'))}
-          {matches.map(model => option(model, model))}
-          {query && !matches.length ? <Empty>{t('没有匹配的模型')}</Empty> : null}
-        </div>
-      </PopoverContent>
-    </Popover>
+        setOpenedModels(open ? orderedModels : null)
+      }}
+      itemToStringLabel={item => item.label} itemToStringValue={item => item.value}
+      isItemEqualToValue={(item, current) => item.value === current.value}
+      onValueChange={item => { if (item) onChange(item.value) }}>
+      <ComboboxTrigger id={id} className='w-full' aria-label={t('筛选模型')} title={text}>
+        <ComboboxValue>{text}</ComboboxValue>
+      </ComboboxTrigger>
+      <ComboboxContent>
+        <ComboboxInput placeholder={t('搜索模型')} aria-label={t('搜索模型')} autoComplete='off' />
+        <ComboboxEmpty>{t('没有匹配的模型')}</ComboboxEmpty>
+        <ComboboxList>
+          {(item: (typeof options)[number]) => <ComboboxItem key={item.value || '__all'} value={item} title={item.label}>
+            {item.label}
+          </ComboboxItem>}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
     <p className='routing-config-note'>{t('仅筛选右侧账号列表，不改变路由配置。')}</p>
   </div>
 }

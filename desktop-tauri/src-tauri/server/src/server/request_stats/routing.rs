@@ -67,8 +67,9 @@ impl RequestStats {
                 );
                 let mut stmt = conn.prepare(&query)?;
                 let mut rows = stmt.query(params![model, limit as i64, offset as i64])?;
+                let pricing = crate::server::core::model_pricing::settings();
                 let mut entries = Vec::new();
-                while let Some(row) = rows.next()? { entries.push(entry_json(&sql::decode_request(row)?)); }
+                while let Some(row) = rows.next()? { entries.push(entry_json(&sql::decode_request(row)?, &pricing)); }
                 Ok(json!({ "entries": entries, "matched": matched, "offset": offset, "limit": limit }))
             })
         };

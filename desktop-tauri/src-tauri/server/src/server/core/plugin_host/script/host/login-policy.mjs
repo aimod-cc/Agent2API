@@ -309,6 +309,8 @@ const loopback = host => ["127.0.0.1", "localhost", "[::1]"].includes(host)
 export function authorizationPolicy(provider, method, authorization) {
   const url = authorization.url ? new URL(authorization.url) : null
   const targets = []
+  const localPage = url && url.protocol === "http:" && loopback(url.hostname) && url.port
+    && !url.username && !url.password ? `${url.hostname}:${url.port}` : null
   if (url && authorization.method === "auto") {
     for (const key of ["redirect_uri", "redirect_url", "callback_url", "auth_callback_url", "return_url"]) {
       try {
@@ -335,6 +337,8 @@ export function authorizationPolicy(provider, method, authorization) {
   }
   const hosts = provider.id === "wps-lingxi" ? ["wps.cn", "kdocs.cn"]
     : provider.id === "joycode" ? ["jd.com", "jd.com.cn"] : []
+  const allowedHosts = targets.length ? [] : hosts
+  if (localPage) allowedHosts.push(localPage)
   return {
     targets,
     ui: {
@@ -344,7 +348,7 @@ export function authorizationPolicy(provider, method, authorization) {
       cookieCapture: method.cookieCapture || null,
       loopbackTargets: targets.map(target => target.href),
     },
-    allowedHosts: targets.length ? [] : hosts,
+    allowedHosts,
   }
 }
 

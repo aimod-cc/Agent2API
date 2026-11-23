@@ -19,6 +19,10 @@ pub const CDN_COMMUNITY_DISTRIBUTION_URL: &str = "https://cdn.agent2api.dev/agen
 pub const CDN_COMMUNITY_REGISTRY_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/community/registry.json";
 pub const CDN_UPSTREAM_VERSIONS_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/providers/upstream-versions.json";
 pub const API_UPSTREAM_VERSIONS_URL: &str = "https://agent2api.dev/api/providers/upstream-versions";
+pub const CDN_MODELS_METADATA_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/providers/models-metadata.json";
+pub const API_MODELS_METADATA_URL: &str = "https://agent2api.dev/api/providers/models-metadata";
+pub const CDN_MODELS_CATALOG_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/providers/models-catalog.json";
+pub const API_MODELS_CATALOG_URL: &str = "https://agent2api.dev/api/providers/models-catalog";
 
 pub struct JsonResponse {
     pub value: Value,

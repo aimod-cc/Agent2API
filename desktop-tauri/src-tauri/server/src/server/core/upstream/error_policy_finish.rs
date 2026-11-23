@@ -16,14 +16,21 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     let decision = error.routing_error.clone().unwrap_or_else(|| error_policy::for_error_with(&ctx.error_policy, &target.provider, &model, error, false));
     error_policy::attach(error, &decision);
     error_policy::note(ctx.telemetry, &decision, None);
-    if decision.hard_stop || ctx.telemetry.replay_guard().blocked() || ctx.telemetry.is_cancelled() || ctx.telemetry.response_started() { return false; }
+    let replay_or_started = ctx.telemetry.replay_guard().blocked() || ctx.telemetry.response_started();
+    if decision.hard_stop || ctx.telemetry.is_cancelled() { return false; }
     if let Some(account) = target.account_id.as_deref() {
-        if let Some(entry) = error_policy::remember_cooldown(service, settings, account, &model, error, &decision) {
+        if decision.deprioritizes() {
+            let until = service.route.deprioritize_mark_scoped(account, &target.provider, &model, decision.scope, &decision.rule, logging::now_ms());
+            if until > logging::now_ms() {
+                error.retry_after_secs.get_or_insert(until.saturating_sub(logging::now_ms()).max(0) as u64 / 1000 + 1);
+            }
+            ctx.telemetry.note_error_policy(json!({ "resetAt": until, "timeSource": "sink" }));
+        } else if let Some(entry) = error_policy::remember_cooldown(service, settings, account, &model, error, &decision) {
             let reset = entry["resetAt"].as_i64().unwrap_or(0);
             if reset > logging::now_ms() { error.retry_after_secs = Some(reset.saturating_sub(logging::now_ms()).max(0) as u64 / 1000 + 1); }
             ctx.telemetry.note_error_policy(json!({ "resetAt": entry["resetAt"], "timeSource": entry["timeSource"] }));
         }
-        if matches!(decision.kind, ErrorKind::RateLimit | ErrorKind::Quota) && settings.sink && ctx.pinned_account.is_none() {
+        if !decision.deprioritizes() && matches!(decision.kind, ErrorKind::RateLimit | ErrorKind::Quota) && settings.sink && ctx.pinned_account.is_none() {
             service.route.sink_mark_for(account, logging::now_ms(), settings.sink_seconds);
         }
         if decision.kind == ErrorKind::Transient && decision.rule.cooldown == crate::server::config::error_policy::CooldownMode::Protection {
@@ -36,6 +43,7 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             ctx.telemetry.note_error_policy(json!({ "reason": "该账号需要重新登录" }));
         }
     }
+    if replay_or_started { return false; }
     if !decision.switches() { return false; }
     if decision.scope == crate::server::config::error_policy::CooldownScope::Account {
         if let Some(id) = target.account_id.as_deref() {

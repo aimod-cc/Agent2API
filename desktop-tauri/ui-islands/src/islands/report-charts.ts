@@ -10,6 +10,7 @@ export type StatsUsage = {
   requests?: number; success?: number | null; failures?: number | null; totalTokens?: number
   successRate?: number | null; promptTokens?: number | null; completionTokens?: number | null
   cacheReadTokens?: number | null; cacheRate?: number | null; tokenDetailsComplete?: boolean
+  costUsd?: number; unpricedRequests?: number
 }
 export type StatsSlice = StatsUsage & { id?: string; model?: string; label?: string; tokens?: number }
 export type StatsDay = StatsUsage & {
@@ -27,6 +28,7 @@ export type StatsGroup = {
   successRate?: number | null; promptTokens?: number | null; completionTokens?: number | null
   cacheReadTokens?: number | null; cacheRate?: number | null; lastUsedAt?: number | null
   tokenDetailsComplete?: boolean
+  costUsd?: number; unpricedRequests?: number
   source?: string; filterValue?: string; state?: 'enabled' | 'disabled' | 'deleted'
 }
 export type StatsOverview = StatsUsage & {
@@ -36,13 +38,15 @@ export type StatsOverview = StatsUsage & {
 export type CacheRateWindow = { inputTokens?: number; hitTokens?: number; rate?: number }
 export type StatsSummary = {
   range?: string; startDate?: string; endDate?: string
+  currency?: 'usd' | 'cny'; exchangeRate?: number
+  fx?: { rate: number; updatedAt: number; stale: boolean; fallback: boolean }
   overview?: StatsOverview
   providers?: StatsGroup[]
   accounts?: StatsGroup[]
   models?: StatsGroup[]
   clients?: StatsGroup[]
   apiKeys?: StatsGroup[]
-  apiKeyDetail?: { filterValue?: string; label?: string; requests?: number; totalTokens?: number; detailsComplete?: boolean; clients?: StatsGroup[]; models?: StatsGroup[] } | null
+  apiKeyDetail?: { filterValue?: string; label?: string; requests?: number; totalTokens?: number; costUsd?: number; unpricedRequests?: number; detailsComplete?: boolean; clients?: StatsGroup[]; models?: StatsGroup[] } | null
   heatmap?: StatsDay[]
   cacheRates?: Record<string, CacheRateWindow>
   cacheTrend24h?: StatsHour[]
@@ -200,6 +204,7 @@ export type RankRowView = {
   key: string; id: string; name: string
   full: string; tip: string
   tokensText: string; percentText: string; barWidth: string
+  costUsd: number; unpricedRequests: number
 }
 
 /** null 表示契约没有这一维；空数组表示这个区间没有用量。 */
@@ -211,6 +216,8 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
       id: String(item?.id ?? '').trim(),
       label: String(item?.label ?? '').trim(),
       tokens: Number(item?.totalTokens ?? item?.tokens) || 0,
+      costUsd: Number(item?.costUsd) || 0,
+      unpricedRequests: Number(item?.unpricedRequests) || 0,
     }))
     .filter(item => item.tokens > 0)
 
@@ -234,6 +241,8 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
       tokensText: text,
       percentText: `${percent.toFixed(1)}%`,
       barWidth: `${percent.toFixed(1)}%`,
+      costUsd: item.costUsd,
+      unpricedRequests: item.unpricedRequests,
     }
   })
 }

@@ -84,6 +84,7 @@
 .req-head .req-dur { text-align: right; }
 .req-head .req-speed { text-align: center; }
 .req-head .req-credit { text-align: center; }
+.req-head .req-cost { text-align: right; }
 
 /* 失败行轻微着色，与事件日志 error 行同一手法（不干扰阅读的淡底） */
 .req-row.failed { background: color-mix(in srgb, var(--danger-soft) 45%, transparent); }
@@ -387,6 +388,7 @@
   .req-head .req-dur,
   .req-head .req-speed,
   .req-head .req-credit,
+  .req-head .req-cost,
   .req-head .req-usage,
   .req-head .req-error-cell { display: none; }
 
@@ -406,7 +408,8 @@
      客户端不挤进第二行 —— 那一行右侧已经给了用时，96px 装不下「GitHub Copilot」 */
   .req-row .req-client { grid-row: 4; grid-column: 1 / 4; }
   .req-row .req-api-key { grid-row: 5; grid-column: 1 / 3; }
-  .req-row .req-speed { grid-row: 5; grid-column: 3 / 5; }
+  .req-row .req-speed { grid-row: 5; grid-column: 3 / 4; }
+  .req-row .req-cost { grid-row: 5; grid-column: 4 / 5; text-align: right; }
   .req-row .req-detail { grid-row: 4; grid-column: 4 / 5; justify-self: end; }
   /* 「-」占位不再独占一行：窄窗口下空行比省略号更难解释 */
   .req-row .req-error-cell { display: none; }

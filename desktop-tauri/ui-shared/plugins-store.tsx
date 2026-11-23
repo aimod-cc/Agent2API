@@ -22,10 +22,10 @@ export function PluginSettingsButton({ name, onClick, t }: { name: string; onCli
   </Button>
 }
 
-export function PluginGetButton({ disabled, onClick, t }: { disabled: boolean; onClick: () => void; t: PluginTranslate }) {
+export function PluginInstallButton({ disabled, onClick, t }: { disabled: boolean; onClick: () => void; t: PluginTranslate }) {
   return <Button variant='secondary' size='sm' disabled={disabled} onClick={onClick}
     className='rounded-sm border-primary-bd bg-primary-soft px-3 font-medium text-primary-fg hover:bg-primary-tint'>
-    {t('获取')}
+    {t('安装')}
   </Button>
 }
 

@@ -22,8 +22,9 @@ import { errorMessage, shared, toast } from './settings-model'
 import { t } from '../i18n'
 import { Alert } from '@ui'
 import {
-  emptyForm, formFromView, formatDateText, formatTime, payloadOf, PROVIDER_S3, PROVIDER_WEBDAV,
-  S3_PRESETS, WEBDAV_PRESETS, type CloudSyncView, type Form, type RemoteInfo,
+  detectS3PresetId, emptyForm, formFromView, formatDateText, formatTime, payloadOf,
+  PROVIDER_S3, PROVIDER_WEBDAV, S3_PRESETS, S3_URL_STYLE_OPTIONS, WEBDAV_PRESETS,
+  type CloudSyncView, type Form, type RemoteInfo,
 } from './settings-cloud-sync-model'
 
 /**
@@ -69,10 +70,13 @@ export function CloudSyncPanel() {
   const [remote, setRemote] = React.useState<RemoteInfo | null>(null)
   const [dialog, setDialog] = React.useState<DialogKind>(null)
   const [keyPassword, setKeyPassword] = React.useState('')
+  const [s3PresetOverride, setS3PresetOverride] = React.useState<string | null>(null)
 
   const isWebDav = form.provider === PROVIDER_WEBDAV
   const webdavPreset = WEBDAV_PRESETS.find(item => item.baseUrl && form.webdavBaseUrl.includes(new URL(item.baseUrl).host))
-  const s3Preset = S3_PRESETS.find(item => item.id !== 'custom' && item.label === 'Cloudflare R2' && form.s3Region === 'auto') ?? S3_PRESETS[0]
+  const detectedS3PresetId = s3PresetOverride ?? detectS3PresetId(form.s3Endpoint, form.s3Region)
+  const s3Preset = S3_PRESETS.find(item => item.id === detectedS3PresetId) ?? S3_PRESETS[0]
+  const s3UrlStyleOption = S3_URL_STYLE_OPTIONS.find(item => item.id === form.s3UrlStyle) ?? S3_URL_STYLE_OPTIONS[0]
 
   /** 取一次设置并铺进表单（保留用户正在编辑的密码输入） */
   const load = React.useCallback((keepPassword = false, silent = false): Promise<void> => {
@@ -420,7 +424,10 @@ export function CloudSyncPanel() {
                           disabled={disabled}
                           onValueChange={value => {
                             const preset = S3_PRESETS.find(item => item.id === value)
-                            if (preset) patch({ s3Region: preset.regionPlaceholder })
+                            if (preset) {
+                              setS3PresetOverride(preset.id)
+                              patch({ s3Region: preset.regionPlaceholder })
+                            }
                           }}
                         >
                           <SelectTrigger className='min-w-[220px]'>
@@ -484,8 +491,34 @@ export function CloudSyncPanel() {
                         value={form.s3Endpoint}
                         disabled={disabled}
                         placeholder={t('留空使用 AWS 官方地址')}
-                        onChange={event => patch({ s3Endpoint: event.target.value })}
+                        onChange={event => {
+                          setS3PresetOverride(null)
+                          patch({ s3Endpoint: event.target.value })
+                        }}
                       />
+                    </div>
+                    <div className='retention-row'>
+                      <Label htmlFor='cloud-s3-url-style'>{t('地址风格')}</Label>
+                      <div className='routing-row'>
+                        <Select
+                          value={s3UrlStyleOption.id}
+                          disabled={disabled}
+                          onValueChange={value => {
+                            if (value) patch({ s3UrlStyle: String(value) })
+                          }}
+                        >
+                          <SelectTrigger id='cloud-s3-url-style' className='min-w-[220px]'>
+                            <SelectValue>{s3UrlStyleOption.label}</SelectValue>
+                          </SelectTrigger>
+                          <SelectContent>
+                            {S3_URL_STYLE_OPTIONS.map(item => (
+                              <SelectItem key={item.id} value={item.id}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                     <div className='retention-row'>
                       <Label htmlFor='cloud-s3-ua'>{t('自定义 User-Agent')}</Label>

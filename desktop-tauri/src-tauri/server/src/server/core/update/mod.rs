@@ -34,8 +34,8 @@ use crate::server::{config, logging};
 pub use version::{
     api_base, asset_suffixes, assert_downloadable, compare_versions, desktop_shell,
     installer_kind, installer_suffixes, is_prerelease_version, parse_version, pick_android_apk,
-    pick_asset_by_name, pick_installer, safe_file_name, server_bundle_name, set_desktop_shell,
-    UpdateError, DEFAULT_REPO, MAX_INSTALLER_BYTES, SOURCE_REPO,
+    pick_asset_by_name, pick_installer, pick_ios_ipa, safe_file_name, server_bundle_name,
+    set_desktop_shell, UpdateError, DEFAULT_REPO, MAX_INSTALLER_BYTES, SOURCE_REPO,
 };
 pub use integrity::download_plan;
 
@@ -304,6 +304,8 @@ impl UpdateManager {
             // 手机端自行连接官网，不经网关中转安装包。
             // 该版本没挂 apk 时是 null，手机端据此藏起「立即更新」。
             "androidAsset": downloadable(latest.as_ref().and_then(|value| value.get("androidAsset")))
+                .unwrap_or(Value::Null),
+            "iosAsset": downloadable(latest.as_ref().and_then(|value| value.get("iosAsset")))
                 .unwrap_or(Value::Null),
             // ── 容器内更新（Linux / Docker）──────────────────────
             // selfUpdate 说的是「这个部署能不能原地更新」（平台 + 环境开关），

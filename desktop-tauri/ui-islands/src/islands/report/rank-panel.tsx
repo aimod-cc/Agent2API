@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Card, CardContent, CardHeader, CardTitle, Empty, Meter, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
 import { formatInt, rankRows, rankTotalText, type StatsGroup } from '../report-charts'
+import { formatCost, usePricingDisplay } from '../model-pricing'
 import { t } from '../../i18n'
 
 const COUNTS = [5, 10, 20, 0] as const
@@ -9,6 +10,7 @@ export function RankPanel({ panelId, listId, labelId, title, tip, rows, badge, e
   panelId: string; listId: string; labelId: string; title: string; tip: string
   rows: StatsGroup[]; badge?: (id: string) => React.ReactNode; emptyText: string
 }) {
+  const pricing = usePricingDisplay()
   const [count, setCount] = React.useState('5')
   const ranked = rankRows(rows) || []
   const shown = count === '0' ? ranked : ranked.slice(0, Number(count))
@@ -32,7 +34,10 @@ export function RankPanel({ panelId, listId, labelId, title, tip, rows, badge, e
           <div className='report-rank-name'><span title={row.full}>{row.name}</span>{badge?.(row.id)}</div>
           <Meter value={Number.parseFloat(row.barWidth) || 0} className='report-rank-meter'
             trackClassName='report-rank-track' indicatorClassName='report-rank-fill' aria-label={row.full} />
-          <strong className='report-rank-amount' title={row.tokensText}>{row.tokensText}</strong>
+          <strong className='report-rank-amount' title={row.tokensText}>
+            {row.tokensText}
+            {row.costUsd > 0 ? <small className='ml-1.5 font-normal text-[var(--text-3)]'>{formatCost(row.costUsd, pricing.currency, pricing.exchangeRate)}</small> : null}
+          </strong>
           <small className='report-rank-share'>{row.percentText}</small>
         </div>) : <Empty>{emptyText}</Empty>}
       </div>

@@ -369,18 +369,11 @@ impl Runtime {
                     && crate::server::core::usage_query::is_account_query(&self.shared.options.provider, &context.account);
             context.desktop_selected = super::desktop_credentials::selected_import(&self.shared.options.provider)
                 && (method == "login.start" || method == proto::methods::gateway::ACCOUNT_NORMALIZE);
-            if method == proto::methods::gateway::ACCOUNT_NORMALIZE && super::desktop_credentials::supplied_import() {
-                if super::legacy_credentials::selected(&self.shared.options.provider, &params)? {
-                    context.permission("credentials.legacy-import.v1")?;
-                    let credentials = super::legacy_credentials::prepare(&self.shared.options.provider)?;
-                    if matches!(self.shared.options.provider.as_str(), "autoclaw" | "autoclaw-intl") {
-                        context.supplied_credentials = Some(super::desktop_credentials::supplied_tokens(
-                            &json!({ "source": { "kind": "manual", "payload": credentials } }))?);
-                    }
-                    context.supplied_legacy_credentials = Some(credentials);
-                } else if matches!(self.shared.options.provider.as_str(), "autoclaw" | "autoclaw-intl") {
-                    context.supplied_credentials = Some(super::desktop_credentials::supplied_tokens(&params)?);
-                }
+            if method == proto::methods::gateway::ACCOUNT_NORMALIZE
+                && super::desktop_credentials::supplied_import()
+                && matches!(self.shared.options.provider.as_str(), "autoclaw" | "autoclaw-intl")
+            {
+                context.supplied_credentials = Some(super::desktop_credentials::supplied_tokens(&params)?);
             }
             if method == proto::methods::gateway::ACCOUNT_NORMALIZE && super::desktop_credentials::supplied_import()
                 && self.shared.options.provider == "kuku" && params["source"]["kind"] == "file_base64" {

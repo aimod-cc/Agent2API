@@ -2,7 +2,10 @@
 
 use std::sync::atomic::Ordering;
 
-use super::{gate, network, parse, DailyBinding, ObservationOutcome, ObservedFalse, OfficialConfirmation};
+use super::{
+    gate, network::{self, SubmitOutcome}, parse, DailyBinding, DailyError, ObservationOutcome,
+    ObservedFalse, OfficialConfirmation, SubmitRejection,
+};
 use super::super::CheckinCallRef;
 use crate::server::core::account_store::credential_version::doubao_state::SnapshotReceipt;
 
@@ -11,18 +14,27 @@ pub(in crate::server::core::plugin_host::wasm::checkin_call) struct DailyRun {
     pub(in crate::server::core::plugin_host::wasm::checkin_call) binding: DailyBinding,
     pub(in crate::server::core::plugin_host::wasm::checkin_call) submitted: bool,
     pub(in crate::server::core::plugin_host::wasm::checkin_call) claimed: bool,
+    pub(in crate::server::core::plugin_host::wasm::checkin_call) rollback_pending: bool,
+    pub(in crate::server::core::plugin_host::wasm::checkin_call) rejection: Option<SubmitRejection>,
 }
 
 impl ObservedFalse {
     pub(in crate::server::core::plugin_host::wasm::checkin_call) async fn claim_once(
         self, binding: DailyBinding, call: &CheckinCallRef, snapshot: &mut SnapshotReceipt,
     ) -> DailyRun {
-        let mut output = DailyRun { outcome: ObservationOutcome::Unknown(super::DailyError::QueryUnknown), binding, submitted: false, claimed: false };
+        let mut output = DailyRun {
+            outcome: ObservationOutcome::Unknown(DailyError::QueryUnknown),
+            binding,
+            submitted: false,
+            claimed: false,
+            rollback_pending: false,
+            rejection: None,
+        };
         let today = self.selection.selection.owner.day.clone();
         let state = snapshot.state();
         if state.unknown.as_ref().is_some_and(|pending| pending.day == today)
             || state.official.as_ref().is_some_and(|official| official.day == today) {
-            output.outcome = ObservationOutcome::Unknown(super::DailyError::PendingConfirmation);
+            output.outcome = ObservationOutcome::Unknown(DailyError::PendingConfirmation);
             return output;
         }
         if !self.selection.selection.owner.egress.matches(call)
@@ -35,10 +47,23 @@ impl ObservedFalse {
         if gate::checkpoint(&selection.selection.owner, None).await.is_err() { return output; }
         let response = network::submit_checkin(&selection.selection.owner, &selection.selection.target.scene).await;
         output.submitted = selection.selection.owner.phase.load(Ordering::Acquire) >= 6;
-        if let Ok(value) = &response {
-            output.claimed = parse::successful(value, true, true).is_ok()
-                && value["data"]["checked_in"] == true && value["data"].get("idempotent")
-                    .is_none_or(|value| value.as_bool() == Some(false));
+        let mut rejection = None;
+        match &response {
+            Ok(SubmitOutcome::Accepted(value)) => {
+                output.claimed = parse::successful(value, true, true).is_ok()
+                    && value["data"]["checked_in"] == true && value["data"].get("idempotent")
+                        .is_none_or(|value| value.as_bool() == Some(false));
+            }
+            Ok(SubmitOutcome::Rejected(info)) => {
+                rejection = Some(info.clone());
+            }
+            Err(DailyError::ResponseRejected) => {
+                rejection = Some(SubmitRejection {
+                    code: None,
+                    message: "官方活动接口拒绝了本次签到请求".to_string(),
+                });
+            }
+            Err(_) => {}
         }
         let owner = &selection.selection.owner;
         if owner.phase.load(Ordering::Acquire) == 6 {
@@ -59,14 +84,22 @@ impl ObservedFalse {
                             Err(error) => Err(error),
                         }
                     }
-                    Ok(_) => Err(super::DailyError::MissingOriginalTask),
+                    Ok(_) => Err(DailyError::MissingOriginalTask),
                     Err(error) => Err(error),
                 }
             }
             Err(error) => Err(error),
         };
-        if let Ok((true, observed_at)) = checked {
-            output.outcome = ObservationOutcome::OfficialConfirmation(OfficialConfirmation { selection, observed_at });
+        match checked {
+            Ok((true, observed_at)) => {
+                output.outcome = ObservationOutcome::OfficialConfirmation(OfficialConfirmation { selection, observed_at });
+            }
+            Ok((false, _)) if rejection.is_some() => {
+                output.rejection = rejection;
+                output.rollback_pending = snapshot.pending_reserved();
+                output.outcome = ObservationOutcome::NotEntered(DailyError::SubmitRejected);
+            }
+            _ => {}
         }
         output
     }

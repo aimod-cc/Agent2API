@@ -1,6 +1,8 @@
 import * as React from 'react'
-import { Combobox as ComboboxPrimitive } from '@base-ui/react/combobox'
-import { cn } from './lib/cn'
+import {
+  Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput,
+  ComboboxItem, ComboboxList, ComboboxTrigger,
+} from './combobox'
 import { t } from './i18n'
 
 /**
@@ -85,6 +87,7 @@ function MultiSelect<Value extends string = string>({
    * 调用方每次 render 重建 options 数组时，Object.is 会认不出「还是那一项」，
    * 选中态会闪没。
    */
+  const [search, setSearch] = React.useState('')
   const selected = React.useMemo(
     () => options.filter(option => value.includes(option.value)),
     [options, value]
@@ -95,121 +98,49 @@ function MultiSelect<Value extends string = string>({
     : placeholder
 
   return (
-    <ComboboxPrimitive.Root
+    <Combobox
       items={options}
       multiple
       value={selected}
+      inputValue={search}
+      onInputValueChange={setSearch}
+      onOpenChange={() => setSearch('')}
       onValueChange={next => onValueChange(next.map(option => option.value))}
+      itemToStringLabel={option => option.label}
+      itemToStringValue={option => option.value}
       isItemEqualToValue={(a, b) => a?.value === b?.value}
       disabled={disabled}
     >
-      <ComboboxPrimitive.Trigger
-        data-slot='multi-select-trigger'
+      <ComboboxTrigger
         id={id}
-        title={title}
+        title={title ?? summary}
         aria-label={props['aria-label']}
-        className={cn(
-          'inline-flex h-[30px] min-w-0 cursor-pointer items-center justify-between gap-1.5 rounded-md border border-control-border bg-control px-2.5',
-          'text-[12.5px] font-normal text-foreground',
-          'transition-colors duration-150 ease-out',
-          'hover:border-control-border-hover hover:bg-control-hover',
-          'focus-visible:border-primary focus-visible:shadow-focus focus-visible:outline-none',
-          'data-disabled:cursor-not-allowed data-disabled:bg-control data-disabled:text-muted-foreground data-disabled:opacity-60',
-          className
-        )}
+        className={className}
       >
-        {/* 一项都没选时走 data-placeholder 的弱化色，与 Select 的占位观感一致 */}
         <span
           data-slot='multi-select-value'
-          className='min-w-0 flex-1 truncate text-left data-[placeholder]:text-muted-foreground'
           data-placeholder={selected.length ? undefined : ''}
-          title={summary}
         >
           {summary}
         </span>
-        <ComboboxPrimitive.Icon className='flex flex-none text-muted-foreground transition-transform duration-[180ms] data-popup-open:rotate-180'>
-          <svg viewBox='0 0 10 6' className='size-2.5' aria-hidden='true'>
-            <path
-              d='M1 1l4 4 4-4'
-              stroke='currentColor'
-              strokeWidth='1.4'
-              fill='none'
-              strokeLinecap='round'
-              strokeLinejoin='round'
-            />
-          </svg>
-        </ComboboxPrimitive.Icon>
-      </ComboboxPrimitive.Trigger>
-
-      <ComboboxPrimitive.Portal>
-        <ComboboxPrimitive.Positioner sideOffset={4} className='z-[35]'>
-          <ComboboxPrimitive.Popup
-            data-slot='multi-select-content'
-            className={cn(
-              // 宽度跟随触发器（--anchor-width），但给一个下限：触发器常常很窄，
-              // 而选项文字（提供商全名 / 模型名）比触发器长得多
-              'flex max-h-[280px] w-[max(var(--anchor-width),220px)] flex-col overflow-hidden',
-              'rounded-lg border border-border-strong bg-raised shadow-3 outline-none',
-              'data-open:animate-in data-open:fade-in-0',
-              'data-closed:animate-out data-closed:fade-out-0'
-            )}
-          >
-            {/* 搜索框在浮层里（input-inside-popup）：触发器保持「选择器」的样子，
-                而不是变成一个能打字的输入框 —— 那会让人以为可以随便填。 */}
-            <div className='flex flex-none items-center gap-1.5 border-b border-hairline px-2.5 py-1.5'>
-              <svg viewBox='0 0 12 12' className='size-3 flex-none text-muted-foreground' aria-hidden='true'>
-                <circle cx='5' cy='5' r='3.4' stroke='currentColor' strokeWidth='1.3' fill='none' />
-                <path d='M7.6 7.6 10.5 10.5' stroke='currentColor' strokeWidth='1.3' strokeLinecap='round' />
-              </svg>
-              <ComboboxPrimitive.Input
-                placeholder={searchPlaceholder}
-                className='min-w-0 flex-1 border-0 bg-transparent p-0 text-[12.5px] text-foreground outline-none placeholder:text-muted-foreground'
-              />
-            </div>
-            <ComboboxPrimitive.Empty>
-              <div className='px-2.5 py-3 text-[11.5px] leading-[1.5] text-muted-foreground'>
-                {emptyHint}
-              </div>
-            </ComboboxPrimitive.Empty>
-            <ComboboxPrimitive.List className='min-h-0 flex-1 overflow-y-auto overscroll-contain p-[5px]'>
-              {(option: MultiSelectOption<Value>) => (
-                <ComboboxPrimitive.Item
-                  key={option.value}
-                  value={option}
-                  disabled={option.disabled === true}
-                  className={cn(
-                    'grid cursor-pointer grid-cols-[14px_minmax(0,1fr)] items-center gap-2 rounded-sm px-[9px] py-[5px]',
-                    'text-[12.5px] leading-[1.4] text-foreground select-none outline-none',
-                    'transition-colors duration-[120ms] ease-out',
-                    'data-[highlighted]:bg-nav-hover',
-                    // 选中项走品牌浅底 + 字重（与 SelectItem 同一观感）。
-                    // 用 data-[selected] 而不是 shadcn 的 data-selected 变体：
-                    // Base UI 输出的是 data-selected=""，空串匹配不上 true。
-                    'data-[selected]:bg-primary-soft data-[selected]:font-semibold data-[selected]:text-primary-fg',
-                    'data-[highlighted]:data-[selected]:bg-primary-tint',
-                    'data-disabled:pointer-events-none data-disabled:text-muted-foreground'
-                  )}
-                >
-                  <ComboboxPrimitive.ItemIndicator className='col-start-1 flex text-primary'>
-                    <svg viewBox='0 0 12 12' className='size-3' aria-hidden='true'>
-                      <path
-                        d='M2.5 6.2 4.8 8.5 9.5 3.8'
-                        stroke='currentColor'
-                        strokeWidth='1.8'
-                        fill='none'
-                        strokeLinecap='round'
-                        strokeLinejoin='round'
-                      />
-                    </svg>
-                  </ComboboxPrimitive.ItemIndicator>
-                  <span className='col-start-2 min-w-0 truncate'>{option.label}</span>
-                </ComboboxPrimitive.Item>
-              )}
-            </ComboboxPrimitive.List>
-          </ComboboxPrimitive.Popup>
-        </ComboboxPrimitive.Positioner>
-      </ComboboxPrimitive.Portal>
-    </ComboboxPrimitive.Root>
+      </ComboboxTrigger>
+      <ComboboxContent>
+        <ComboboxInput placeholder={searchPlaceholder} aria-label={searchPlaceholder} autoComplete='off' />
+        <ComboboxEmpty>{emptyHint}</ComboboxEmpty>
+        <ComboboxList>
+          {(option: MultiSelectOption<Value>) => (
+            <ComboboxItem
+              key={option.value}
+              value={option}
+              disabled={option.disabled === true}
+              title={option.label}
+            >
+              {option.label}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   )
 }
 

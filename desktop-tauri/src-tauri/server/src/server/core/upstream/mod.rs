@@ -351,6 +351,21 @@ impl UpstreamService {
         (snapshot.sunk, snapshot.resting, snapshot.open)
     }
 
+    pub fn route_queue_facts_for(
+        &self,
+        accounts: &[Value],
+        keys: &crate::server::core::routing::CooldownKeys<'_>,
+        now: i64,
+    ) -> (
+        HashMap<String, i64>,
+        HashMap<String, i64>,
+        std::collections::HashSet<String>,
+    ) {
+        let mut snapshot = self.route.snapshot("", now, 0);
+        self.route.merge_scoped_sunk(accounts, keys, now, &mut snapshot.sunk);
+        (snapshot.sunk, snapshot.resting, snapshot.open)
+    }
+
     pub fn route_sticky_sessions(&self, model: Option<&str>, now: i64) -> Vec<Value> {
         self.route.sticky_list(model, now)
     }

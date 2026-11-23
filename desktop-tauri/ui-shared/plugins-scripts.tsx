@@ -6,7 +6,7 @@ import {
 import type { ScriptOperation, ScriptPackage, ScriptPluginsState, ScriptRecommendation } from './plugins'
 import { matchesPluginStatus, matchesScriptPublisher, scriptPublisher, type PluginStatusFilter, type ScriptPublisherFilter } from './plugins-filters'
 import { ScriptOperationCard, ScriptOperationProgress, scriptOperationMatches } from './plugins-script-progress'
-import { PLUGIN_GRID_CLASS, PluginGetButton, PluginSectionHeading, PluginSettingsButton, PluginStoreCard, type PluginTranslate } from './plugins-store'
+import { PLUGIN_GRID_CLASS, PluginInstallButton, PluginSectionHeading, PluginSettingsButton, PluginStoreCard, type PluginTranslate } from './plugins-store'
 import { ScriptPluginSettings } from './plugins-script-settings'
 import { PluginDetailsDialog, type PluginDetailsPane } from './plugins-details'
 import { ScriptPluginInstallNotice } from './plugins-script-install-notice'
@@ -194,7 +194,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
               metadata={<ScriptRepository item={item} onOpenExternal={onOpenExternal} t={t} />}
               feedback={<>{unavailable ? <p className='m-0 break-words text-xs text-muted-foreground'>{unavailable}</p> : null}{progress}</>}
               actions={unavailable ? <Badge variant='secondary' shape='tag'>{t('暂不可安装')}</Badge>
-                : <PluginGetButton t={t} disabled={locked} onClick={() => openInstall({ name: item.source || item.name, version: item.selector ?? item.version })} />} />
+                : <PluginInstallButton t={t} disabled={locked} onClick={() => openInstall({ name: item.source || item.name, version: item.selector ?? item.version })} />} />
           }
           const pack = entry.value
           const startup = startupForPack(pack.id, pack.startup)
@@ -243,7 +243,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
         <ScriptRepository item={detailsItem} onOpenExternal={onOpenExternal} t={t} />
         {detailsItem.installable === false ? <p className='m-0 text-xs text-warning'>{scriptUnavailableReason(detailsItem, t)}</p> : null}
       </>}
-      primaryAction={<PluginGetButton t={t} disabled={locked || detailsItem.installable === false}
+      primaryAction={<PluginInstallButton t={t} disabled={locked || detailsItem.installable === false}
         onClick={() => openInstall({ name: detailsItem.source || detailsItem.name, version: detailsItem.selector ?? detailsItem.version })} />} /> : null}
     {settingsPack ? <ScriptPluginSettings key={settingsPack.id} pack={settingsPack} icon={iconUrl(settingsPack.icon)} recommended={recommended} t={t}
       initialPane={detailsPane}

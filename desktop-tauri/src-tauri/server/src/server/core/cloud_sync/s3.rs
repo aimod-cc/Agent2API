@@ -5,13 +5,15 @@
 //! 自己的运行时；而项目约定「不新增第三方依赖」（见 `server/Cargo.toml`）。
 //! `hmac` / `sha2` 已在依赖里（ALTCHA 与账号加密），签名本身是 60 行纯函数。
 //!
-//! ── URL 风格 ────────────────────────────────────────────────
-//!   · AWS 官方（endpoint 为空或含 `amazonaws.com`）→ 虚拟主机风格
-//!     `https://{bucket}.s3.{region}.amazonaws.com/{key}`
-//!   · 自定义端点（MinIO / R2 / OSS / COS / OBS）→ path-style
-//!     `{scheme}://{host}/{bucket}/{key}`
-//! R2 也走 path-style（`https://{account}.r2.cloudflarestorage.com/{bucket}/{key}`），
-//! 与官方文档给的 S3 API 端点一致。
+//! ── URL 风格（`url_style`：auto / virtual_host / path）──────
+//!   · `virtual_host`（虚拟主机风格）：`{scheme}://{bucket}.{host}/{key}`
+//!   · `path`（路径风格）：`{scheme}://{host}/{bucket}/{key}`
+//!   · `auto`（默认，按端点域名自动识别）：
+//!     - AWS 官方（endpoint 为空或含 `amazonaws.com`）以及强制/默认要求虚拟主机
+//!       域名的主流云厂商（腾讯云 COS、阿里云 OSS、华为云 OBS、火山引擎 TOS、
+//!       百度云 BOS、七牛云 Kodo、天翼云 OOS、移动云 EOS、Backblaze B2、
+//!       DigitalOcean Spaces、Wasabi 等）→ 虚拟主机风格
+//!     - 其余自定义端点（Cloudflare R2、MinIO、自建服务等）→ 路径风格
 //!
 //! ── 签名只覆盖需要的头 ──────────────────────────────────────
 //! 参与签名的是 `host` / `x-amz-date` / `x-amz-content-sha256`（+ 可选的
@@ -30,6 +32,19 @@ use reqwest::StatusCode;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const TRANSFER_TIMEOUT_SECS: u64 = 300;
 
+pub(crate) const URL_STYLE_AUTO: &str = "auto";
+pub(crate) const URL_STYLE_VIRTUAL_HOST: &str = "virtual_host";
+pub(crate) const URL_STYLE_PATH: &str = "path";
+
+/// 归一地址风格配置值（未识别或空串一律归为 `auto`）
+pub(crate) fn normalize_url_style(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "virtual_host" | "virtual-host" | "virtualhost" | "vhost" => URL_STYLE_VIRTUAL_HOST,
+        "path" | "path_style" | "path-style" => URL_STYLE_PATH,
+        _ => URL_STYLE_AUTO,
+    }
+}
+
 /// S3 凭据（解密后的明文）
 pub(crate) struct S3Credentials {
     pub access_key_id: String,
@@ -38,6 +53,8 @@ pub(crate) struct S3Credentials {
     pub bucket: String,
     /// 自定义端点；空 = AWS 官方
     pub endpoint: String,
+    /// 地址风格：`auto` / `virtual_host` / `path`
+    pub url_style: String,
     /// 自定义 User-Agent；空 = 用 reqwest 默认。**不参与签名**，可以安全覆盖
     pub user_agent: String,
 }
@@ -62,7 +79,52 @@ fn client(credentials: &S3Credentials) -> Result<reqwest::Client, String> {
 
 fn is_aws_endpoint(endpoint: &str) -> bool {
     let trimmed = endpoint.trim();
-    trimmed.is_empty() || trimmed.contains("amazonaws.com")
+    trimmed.is_empty() || trimmed.to_ascii_lowercase().contains("amazonaws.com")
+}
+
+/// 判断自定义端点域名是否属于要求或默认使用虚拟主机风格（`{bucket}.{host}`）的云厂商。
+///
+/// 例如腾讯云 COS 自 2024-01-01 起新建桶禁用 path-style（返回 403 `PathStyleDomainForbidden`），
+/// 阿里云 OSS、华为云 OBS 等公有云同样要求虚拟主机风格；而 Cloudflare R2、MinIO 等使用 path-style。
+fn is_virtual_host_provider(host_or_path: &str) -> bool {
+    let authority = host_or_path.split('/').next().unwrap_or(host_or_path);
+    let host = authority.split(':').next().unwrap_or(authority).to_ascii_lowercase();
+    const VIRTUAL_HOST_SUFFIXES: &[&str] = &[
+        "amazonaws.com",
+        "amazonaws.com.cn",
+        "myqcloud.com",
+        "tencentcos.cn",
+        "aliyuncs.com",
+        "myhuaweicloud.com",
+        "myhuaweicloud.cn",
+        "volces.com",
+        "ibytedtos.com",
+        "bcebos.com",
+        "qiniucs.com",
+        "ctyunapi.cn",
+        "cmecloud.cn",
+        "backblazeb2.com",
+        "digitaloceanspaces.com",
+        "wasabisys.com",
+    ];
+    VIRTUAL_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+}
+
+fn uses_virtual_host_style(credentials: &S3Credentials) -> bool {
+    match normalize_url_style(&credentials.url_style) {
+        URL_STYLE_VIRTUAL_HOST => true,
+        URL_STYLE_PATH => false,
+        _ => {
+            if is_aws_endpoint(&credentials.endpoint) {
+                true
+            } else {
+                let (_, host) = split_scheme_host(&credentials.endpoint);
+                is_virtual_host_provider(host)
+            }
+        }
+    }
 }
 
 /// `(scheme, host[:port])`
@@ -77,29 +139,50 @@ fn split_scheme_host(endpoint: &str) -> (&str, &str) {
     }
 }
 
-/// 对象 URL（见模块头两种风格）
-fn object_url(credentials: &S3Credentials, key: &str) -> String {
-    let key = key.trim_start_matches('/');
-    if is_aws_endpoint(&credentials.endpoint) {
-        format!(
-            "https://{}.s3.{}.amazonaws.com/{}",
-            credentials.bucket, credentials.region, key
+/// 解析基准 `(scheme, host_and_optional_path)`（当 endpoint 为空时回落到 AWS 官方区域域名）
+fn resolve_base_endpoint(credentials: &S3Credentials) -> (String, String) {
+    if credentials.endpoint.trim().is_empty() {
+        (
+            "https".to_string(),
+            format!("s3.{}.amazonaws.com", credentials.region),
         )
     } else {
         let (scheme, host) = split_scheme_host(&credentials.endpoint);
-        format!("{scheme}://{host}/{}/{}", credentials.bucket, key)
+        (scheme.to_string(), host.to_string())
+    }
+}
+
+/// 组装虚拟主机风格的 host（若用户已在 Endpoint 中带了 `{bucket}.` 前缀则自动去重）
+fn build_virtual_host(bucket: &str, host: &str) -> String {
+    let prefix = format!("{bucket}.");
+    if host.len() > prefix.len() && host[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+        host.to_string()
+    } else if let Some((authority, path_rest)) = host.split_once('/') {
+        format!("{bucket}.{authority}/{path_rest}")
+    } else {
+        format!("{bucket}.{host}")
+    }
+}
+
+/// 对象 URL（见模块头两种风格）
+fn object_url(credentials: &S3Credentials, key: &str) -> String {
+    let key = key.trim_start_matches('/');
+    let (scheme, host) = resolve_base_endpoint(credentials);
+    if uses_virtual_host_style(credentials) {
+        let vhost = build_virtual_host(&credentials.bucket, &host);
+        format!("{scheme}://{vhost}/{key}")
+    } else {
+        format!("{scheme}://{host}/{}/{key}", credentials.bucket)
     }
 }
 
 /// 桶级 URL（测试连接用 HEAD bucket）
 fn bucket_url(credentials: &S3Credentials) -> String {
-    if is_aws_endpoint(&credentials.endpoint) {
-        format!(
-            "https://{}.s3.{}.amazonaws.com/",
-            credentials.bucket, credentials.region
-        )
+    let (scheme, host) = resolve_base_endpoint(credentials);
+    if uses_virtual_host_style(credentials) {
+        let vhost = build_virtual_host(&credentials.bucket, &host);
+        format!("{scheme}://{vhost}/")
     } else {
-        let (scheme, host) = split_scheme_host(&credentials.endpoint);
         format!("{scheme}://{host}/{}/", credentials.bucket)
     }
 }
@@ -392,6 +475,7 @@ mod tests {
             region: "us-east-1".to_string(),
             bucket: "examplebucket".to_string(),
             endpoint: String::new(),
+            url_style: URL_STYLE_AUTO.to_string(),
             user_agent: String::new(),
         }
     }

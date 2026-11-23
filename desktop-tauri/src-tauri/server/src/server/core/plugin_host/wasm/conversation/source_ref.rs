@@ -189,6 +189,16 @@ impl SourceRef {
     }
 }
 
+impl SourceRef {
+    pub(in crate::server::core::plugin_host::wasm) fn confirm_unsubmitted_rejection(&self) {
+        self.source.preparation.confirm_unsubmitted_http_rejection();
+    }
+
+    pub(in crate::server::core::plugin_host::wasm) fn lock_permanent_replay(&self) {
+        self.source.preparation.lock_permanent_replay_block();
+    }
+}
+
 impl SourceGate<'_> {
     pub(in crate::server::core::plugin_host::wasm) fn freeze_replay(&self) -> Result<(), proto::WireError> {
         if self.state.consumer || self.state.execution.is_some() || self.source.deadline <= Instant::now()

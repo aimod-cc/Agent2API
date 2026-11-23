@@ -101,7 +101,7 @@ pub(in crate::server::core::plugin_host::wasm) async fn invoke(context: &mut Con
         let current = source::Source::read(&job.provider,&job.reference)?;
         if current.revision() != source.revision() { return Ok(json!({"updated":false,"sourceRevision":current.revision()})); }
         if !current.refreshable() { return Err(proto::WireError::with_code("本机登录态缺少续期材料，请重新登录官方客户端", "desktop_refresh_material_missing")); }
-        if matches!(job.provider.as_str(), "autoclaw" | "autoclaw-intl") {
+        if matches!(job.provider.as_str(), "autoclaw" | "autoclaw-intl" | "cline-free") {
             // 本机文件锁已串行化换证和写回，历史失败不限制后续调度。
             let next = protocols::refresh(&job, &current.credentials).await?;
             job.current()?;

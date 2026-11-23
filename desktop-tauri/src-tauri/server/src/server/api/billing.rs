@@ -20,9 +20,10 @@
 //!      `BillingError::to_gateway_error().into_response()`。
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use crate::server::core::billing::{WorkbuddyActivity, BillingError};
 use crate::server::core::providers::workbuddy::Region;
@@ -112,6 +113,41 @@ pub async fn get_keepalive() -> Response {
     ok_json(crate::server::core::billing::keepalive::state())
 }
 
+fn resolve_workbuddy_intl(state: &ServerState, raw_id: &str) -> Result<(String, Value, Value, String), Response> {
+    let id = raw_id.trim().to_string();
+    if id.is_empty() {
+        return Err(GatewayError::with_status(400, "缺少账号 id").into_response());
+    }
+    let account = state
+        .store()
+        .list_accounts()
+        .get("accounts")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|account| account.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        })
+        .cloned();
+    let Some(account) = account else {
+        return Err(GatewayError::with_status(404, "账号不存在").into_response());
+    };
+    let provider = account.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
+    if provider != Region::Intl.provider_id() {
+        return Err(GatewayError::with_status(400, "该账号不是 WorkBuddy 国际版账号").into_response());
+    }
+    let Some(entry) = state.store().get_session_by_id(&id) else {
+        return Err(GatewayError::with_status(400, "没有可用凭证").into_response());
+    };
+    let name = account
+        .get("displayName")
+        .filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+        .cloned()
+        .or_else(|| account.get("name").cloned())
+        .unwrap_or(Value::Null);
+    Ok((id, name, entry.session, provider))
+}
+
 /// POST /api/checkin-activity —— WorkBuddy 国际版日活任务的**手动粒度入口**。
 ///
 /// body：`{id, mode}`，`mode ∈ full | claim | keepalive`（缺省 full）。
@@ -125,50 +161,15 @@ pub async fn run_activity(State(state): State<ServerState>, body: Bytes) -> Resp
             return GatewayError::new(format!("请求体不是合法 JSON：{error}")).into_response()
         }
     };
-    let id = payload
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if id.is_empty() {
-        return GatewayError::with_status(400, "缺少账号 id").into_response();
-    }
+    let raw_id = payload.get("id").and_then(Value::as_str).unwrap_or("");
+    let (id, name, session, provider) = match resolve_workbuddy_intl(&state, raw_id) {
+        Ok(resolved) => resolved,
+        Err(response) => return response,
+    };
     let mode = WorkbuddyActivity::parse(payload.get("mode").and_then(Value::as_str));
-
-    // 账号必须存在且属于 WorkBuddy 国际版 —— 别的家的会话打进国际版的活跃
-    // 接口只会稳定报错（与 checkin_for 按提供商分派是同一条理由）
-    let account = state
-        .store()
-        .list_accounts()
-        .get("accounts")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|account| account.get("id").and_then(Value::as_str) == Some(id.as_str()))
-        })
-        .cloned();
-    let Some(account) = account else {
-        return GatewayError::with_status(404, "账号不存在").into_response();
-    };
-    if account.get("provider").and_then(Value::as_str) != Some(Region::Intl.provider_id()) {
-        return GatewayError::with_status(400, "该账号不是 WorkBuddy 国际版账号").into_response();
-    }
-    // 展示名快照：统一展示名优先（与账号页 / 请求日志同口径，见
-    // `store_view::display_name_of`），缺键（旧快照）按旧口径回落 name
-    let name = account
-        .get("displayName")
-        .filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
-        .cloned()
-        .or_else(|| account.get("name").cloned())
-        .unwrap_or(Value::Null);
-    let Some(entry) = state.store().get_session_by_id(&id) else {
-        return GatewayError::with_status(400, "没有可用凭证").into_response();
-    };
     let activity = state
         .billing()
-        .workbuddy_daily_activity(&entry.session, mode)
+        .workbuddy_daily_activity(&session, mode)
         .await;
     let row = json!({
         "id": id,
@@ -183,7 +184,7 @@ pub async fn run_activity(State(state): State<ServerState>, body: Bytes) -> Resp
     // 不影响本响应。
     crate::server::core::checkin_records::record_activity(
         &row,
-        account.get("provider").and_then(Value::as_str).unwrap_or(""),
+        &provider,
         mode.as_str(),
     );
     // 落 `checkinAt`：手动粒度入口与批量/定时（`run_checkin`）必须同口径 ——
@@ -201,6 +202,41 @@ pub async fn run_activity(State(state): State<ServerState>, body: Bytes) -> Resp
         );
     }
     ok_json(row)
+}
+
+/// GET /api/checkin-activity/status?id= —— 读取国际版最近一次保活执行详情与步骤锁定状态。
+pub async fn activity_status(
+    State(state): State<ServerState>,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let raw_id = params.get("id").map(String::as_str).unwrap_or("");
+    let (_, _, session, _) = match resolve_workbuddy_intl(&state, raw_id) {
+        Ok(resolved) => resolved,
+        Err(response) => return response,
+    };
+    match state.billing().workbuddy_activity_status(&session).await {
+        Ok(data) => ok_json(data),
+        Err(error) => billing_error(error),
+    }
+}
+
+/// POST /api/checkin-activity/reset —— 解除国际版保活待确认锁定，允许立即重试。
+pub async fn reset_activity(State(state): State<ServerState>, body: Bytes) -> Response {
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return GatewayError::new(format!("请求体不是合法 JSON：{error}")).into_response()
+        }
+    };
+    let raw_id = payload.get("id").and_then(Value::as_str).unwrap_or("");
+    let (_, _, session, _) = match resolve_workbuddy_intl(&state, raw_id) {
+        Ok(resolved) => resolved,
+        Err(response) => return response,
+    };
+    match state.billing().workbuddy_activity_reset(&session).await {
+        Ok(data) => ok_json(data),
+        Err(error) => billing_error(error),
+    }
 }
 
 /// POST /api/checkin-keepalive —— 保存保活模型链。

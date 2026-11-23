@@ -194,6 +194,10 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 与上面的 `modelCatalogCache` 是两码事：那个存各家上游的**模型清单**，
     // 这个存模型的**元数据**（能力位 / 思考档位），刷新链路与失效语义各不同。
     "modelsDevCatalog",
+    // 模型计价模块本地缓存（USD→CNY 汇率、models.dev 完整价格索引、历史费用回填标记），不进云同步。
+    "fxRateCache",
+    "modelsDevProviderPrices",
+    "modelPricingBackfilled",
     // 云同步的配置与同步状态（core::cloud_sync）：整份
     // `{provider, webdav:{…}, s3:{…}, syncPassword(信封), enabled, autoSync,
     //   remoteRoot, profile, status:{lastSyncAt, lastSnapshotId, …}}` 一个键。
@@ -355,7 +359,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 32;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1096,6 +1100,8 @@ fn apply_version(
         28 => conn.execute_batch(include_str!("schema_model_recency.sql")),
         29 => conn.execute_batch(include_str!("schema_usage_query.sql")),
         30 => conn.execute_batch(include_str!("schema_usage_diagnostics.sql")),
+        31 => conn.execute_batch(include_str!("schema_checkin_records_index.sql")),
+        32 => conn.execute_batch(include_str!("schema_model_pricing.sql")),
         _ => Ok(()),
     }
 }

@@ -12,6 +12,7 @@ import {
 } from '@ui'
 import { t } from '../i18n'
 import { HtmlContent } from '@ui'
+import { formatCost, pricingSourceLabel, usePricingDisplay, type ModelPricingInfo } from './model-pricing'
 import {
   PreviewPane, RawPane, RequestDebugSwitch, RequestEmpty as Empty, hasDebugTraffic,
   type RawState, type DebugState, type DebugTraffic,
@@ -126,6 +127,11 @@ type RequestRow = {
   completionTokens?: unknown
   totalTokens?: unknown
   cacheReadTokens?: unknown
+  cacheCreationTokens?: unknown
+  cacheCreation1hTokens?: unknown
+  costUsd?: number | null
+  costPriced?: boolean
+  priceSource?: ModelPricingInfo['source']
   /** 模型名与推理等级：下游 / 上游各一份 */
   model?: unknown
   clientModel?: unknown
@@ -505,6 +511,7 @@ export function RequestRoutePane({ row }: { row: RequestRow & { route: RouteDeci
 /* ─── 标签 ①：请求详情（数据全部来自 row）────── */
 
 export function RequestDetailPane({ row, loadingDetail = false }: { row: RequestRow | null; loadingDetail?: boolean }) {
+  const pricing = usePricingDisplay()
   if (!row && loadingDetail) return <Empty text={t('正在加载请求详情…')} />
   // 列表在点开前恰好刷新过：行对象按 id 反查不到。
   if (!row) return <Empty text={t('列表数据已刷新，请重试（关闭后重新打开这条详情）')} />
@@ -545,6 +552,16 @@ export function RequestDetailPane({ row, loadingDetail = false }: { row: Request
             total: fmtTokens(row.totalTokens),
             cache: fmtTokens(row.cacheReadTokens),
           })}
+          {Number(row.cacheCreationTokens) > 0 ? ` · ${t('缓存写 {cw}', { cw: fmtTokens(row.cacheCreationTokens) })}` : ''}
+        </Field>
+        <Field label={t('预估费用')}>
+          {row.costUsd !== null && row.costUsd !== undefined && Number.isFinite(Number(row.costUsd)) ? (
+            <span className='font-mono'>
+              {formatCost(Number(row.costUsd), pricing.currency, pricing.exchangeRate)}
+              {pricing.currency === 'cny' ? <span className='ml-1.5 text-[11.5px] text-muted-foreground'>(${Number(row.costUsd).toFixed(5)})</span> : null}
+              {row.priceSource ? <span className='ml-1.5 text-[11.5px] text-muted-foreground'>· {pricingSourceLabel(row.priceSource)}</span> : null}
+            </span>
+          ) : '—'}
         </Field>
         <Field label={t('速度')}><span title={SPEED_TIP}>{isRunning(row) ? '—' : speed || '—'}</span></Field>
         {/* 测试发起的请求**按需多一行**：它是这一条明细的性质（走的是真实转发链路、但不进报表），

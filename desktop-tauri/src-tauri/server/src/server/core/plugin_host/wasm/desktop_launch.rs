@@ -3,6 +3,7 @@ pub(super) mod binding;
 mod lock;
 pub(crate) mod operations;
 mod paths;
+pub(crate) mod proxy;
 pub(crate) mod recovery;
 mod secret;
 mod storage;

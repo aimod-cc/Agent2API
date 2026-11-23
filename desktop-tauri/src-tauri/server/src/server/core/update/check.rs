@@ -8,8 +8,8 @@ use crate::server::core::task_state::{self, Claim, TaskState};
 use crate::server::logging;
 
 use super::{
-    api_base, pick_android_apk, pick_asset_by_name, pick_installer, server_bundle_name,
-    version, UpdateError, UpdateManager, CURRENT_VERSION,
+    api_base, pick_android_apk, pick_asset_by_name, pick_installer, pick_ios_ipa,
+    server_bundle_name, version, UpdateError, UpdateManager, CURRENT_VERSION,
 };
 
 /// 官网版本查询请求的超时，安装包下载另有逐块读取超时。
@@ -91,8 +91,14 @@ impl UpdateManager {
     /// **不触发任何网络请求**：本进程还没查过时返回 `checked:false`，
     /// 界面据此显示「未检查」—— 与改造前「前端自己打一次 GitHub」的差别正在这里。
     pub fn last_check(&self) -> Value {
-        match self.check_state(CURRENT_VERSION) {
-            Ok(state) => self.checked_result(CURRENT_VERSION, &state),
+        self.last_check_for(CURRENT_VERSION)
+    }
+
+    pub fn last_check_for(&self, current_version: &str) -> Value {
+        let current = current_version.trim();
+        let current = if current.is_empty() { CURRENT_VERSION } else { current };
+        match self.check_state(current) {
+            Ok(state) => self.checked_result(current, &state),
             Err(error) => json!({ "checked": false, "lastError": error }),
         }
     }
@@ -435,9 +441,10 @@ fn release_json(payload: &Value, repository: &str) -> Value {
         // 「asset 为空」时界面据此说明原因，见 [`asset_probe`] 的注释与
         // `build_check_result` 里补 expected* 的那一段
         "assetProbe": asset_probe,
-        // 手机端（APK）的安装包。与 `asset` 并列而不是二选一：网关可能同时被
+        // 手机端（APK / IPA）的安装包。与 `asset` 并列而不是二选一：网关可能同时被
         // 电脑和手机访问，两边各自挑自己那份，谁都不该把对方的那条藏起来。
         "androidAsset": pick_android_apk(assets),
+        "iosAsset": pick_ios_ipa(assets),
         "serverBundle": bundle_asset.unwrap_or(Value::Null),
         "serverChecksums": bundle_checksums.unwrap_or(Value::Null),
     })

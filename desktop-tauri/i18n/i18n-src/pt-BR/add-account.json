@@ -863,7 +863,7 @@
   "读本机客户端当前登录的 OAuth 令牌（明文 JSON，无需解密）。导入后由网关自动续期，无需跟随客户端的 2 小时时效手动换令牌。": "Lê o token OAuth com que o cliente local está logado (JSON em texto claro, sem descriptografia). Após importar, o gateway renova automaticamente — não é preciso acompanhar a expiração de 2 horas do cliente.",
   "读本机客户端当前的登录态。客户端的 Cookies 是 DPAPI 加密的（Chromium os_crypt），因此<strong>仅 Windows 可用</strong>；客户端正在运行时可能读不到该文件，先退出客户端再试即可（也可改用「填写凭证」粘贴令牌）。": "Lê o estado de login atual do cliente local. Os cookies do cliente são criptografados com DPAPI (Chromium os_crypt), portanto isto funciona <strong>somente no Windows</strong>; o arquivo pode ficar ilegível enquanto o cliente está aberto — feche o cliente e tente de novo (ou use \"Preencher credenciais\" para colar um token).",
   "豆包工作": "Doubao Work",
-  "账号代理": "",
+  "账号代理": "Proxy da conta",
   "账号保存未确认，请查询本次状态；不会再次保存。": "O salvamento da conta não foi confirmado. Consulte o status desta tentativa; a conta não será salva novamente.",
   "账号信息": "Informações da conta",
   "账号信息不完整，请刷新后重试": "Informações da conta incompletas; atualize e tente novamente",

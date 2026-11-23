@@ -86,7 +86,8 @@ impl FilterPlan {
         //     的 matches 会再滤一次），所以 SQL 只做「排除 debug」。
         //   · debug 视图不下推 —— 旧插件那批 info 行读出来才改判 debug，
         //     SQL 先按 level='debug' 过滤会漏掉它们。
-        //   · warn / error 只会从 info 改判出来，不会从 warn/error 改走，精确。
+        //   · warn / error 同样是超集（历史误判成 error 的账号配置变更会在
+        //     `prepare` 还原为 info，再由 Rust 侧 matches 滤掉）。
         match query.view {
             LogView::Important => fragments.push("level <> 'debug'"),
             LogView::Debug | LogView::All => {}

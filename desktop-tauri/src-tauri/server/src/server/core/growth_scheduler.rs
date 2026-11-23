@@ -32,18 +32,8 @@ fn normalize_time(value: Option<&Value>) -> Option<String> {
     schedules::normalize_time(value?.as_str()?)
 }
 
-/// 用户明确保存的值优先；缺失字段采用已加载插件的默认值。
-pub fn settings() -> (bool, Vec<String>) {
-    if let Some(state) = plugin_host::wasm::tasks::travel_state() {
-        return (state["enabled"].as_bool().unwrap_or(false), state["times"].as_array().into_iter()
-            .flatten().filter_map(Value::as_str).map(str::to_string).collect());
-    }
+fn legacy_settings_from(raw: &Value) -> (bool, Vec<String>) {
     let declared = schedules::definition(PROVIDER, SCHEDULE_ID);
-    let raw = config::current()
-        .raw()
-        .get(CONFIG_KEY)
-        .cloned()
-        .unwrap_or(Value::Null);
     let enabled = raw
         .get("enabled")
         .and_then(Value::as_bool)
@@ -70,6 +60,18 @@ pub fn settings() -> (bool, Vec<String>) {
     times.sort();
     times.dedup();
     (enabled, times)
+}
+
+/// 用户明确保存的值优先；缺失字段采用已加载插件的默认值。
+pub fn settings() -> (bool, Vec<String>) {
+    if let Some(state) = plugin_host::wasm::tasks::travel_state() {
+        return (state["enabled"].as_bool().unwrap_or(false), state["times"].as_array().into_iter()
+            .flatten().filter_map(Value::as_str).map(str::to_string).collect());
+    }
+    let raw = config::with_raw(|raw| raw.get(CONFIG_KEY).cloned())
+        .flatten()
+        .unwrap_or(Value::Null);
+    legacy_settings_from(&raw)
 }
 
 /// 写配置（`{enabled?, times?}`，只改传进来的字段）。
@@ -133,13 +135,26 @@ pub fn configure(patch: &Value) -> Result<Value, String> {
 
 /// 对外状态（设置页 / 签到页读它）。
 pub fn state() -> Value {
-    if let Some(state) = plugin_host::wasm::tasks::travel_state() { return state; }
-    let (enabled, times) = settings();
-    let raw = config::current()
-        .raw()
-        .get(CONFIG_KEY)
-        .cloned()
+    if let Some(state) = plugin_host::wasm::tasks::travel_state() {
+        return state;
+    }
+    legacy_state_view()
+}
+
+pub(crate) fn state_with_task_records(
+    records: &Result<std::collections::HashMap<String, crate::server::core::task_state::TaskState>, String>,
+) -> Value {
+    if let Some(state) = plugin_host::wasm::tasks::travel_state_with(records) {
+        return state;
+    }
+    legacy_state_view()
+}
+
+fn legacy_state_view() -> Value {
+    let raw = config::with_raw(|raw| raw.get(CONFIG_KEY).cloned())
+        .flatten()
         .unwrap_or(Value::Null);
+    let (enabled, times) = legacy_settings_from(&raw);
     let today = beijing::today_key();
     let last_fired_date = raw
         .get("lastFiredDate")

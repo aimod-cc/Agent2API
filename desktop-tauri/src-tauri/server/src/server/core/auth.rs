@@ -234,7 +234,7 @@ impl AuthService {
                 .cloned()
                 .unwrap_or(Value::Null),
             "authSource": if refresh_token.is_empty() {
-                "环境变量/静态 token"
+                "静态 token"
             } else {
                 "auth.json（可自动刷新）"
             },

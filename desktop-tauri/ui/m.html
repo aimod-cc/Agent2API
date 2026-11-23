@@ -7,8 +7,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <!-- 两条 theme-color 按系统深浅各取其一：PWA 里它决定状态栏 / 地址栏配色。
      脚本还会在主题切换时改写第一条，覆盖用户手选的浅色 / 深色。 -->
-<meta name="theme-color" content="#f3f3f6" media="(prefers-color-scheme: light)" />
-<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#eef0f4" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0f1013" media="(prefers-color-scheme: dark)" />
 <meta name="color-scheme" content="light dark" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -74,7 +74,7 @@
     // 它就会无条件命中，第二条随之失效。
     var metas = document.querySelectorAll('meta[name="theme-color"]');
     for (var i = 0; i < metas.length; i++) {
-      metas[i].setAttribute('content', dark ? '#0a0a0a' : '#f3f3f6');
+      metas[i].setAttribute('content', dark ? '#0f1013' : '#eef0f4');
       if (i === 0) metas[i].removeAttribute('media');
     }
   })();

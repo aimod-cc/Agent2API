@@ -204,9 +204,72 @@
         return '/?from=login';
       }
 
-      // 已登录探测：桌面形态问壳（它会用存好的令牌真的打一次 /api/session，
-      // 顺带完成续期）；网页端照旧带头打一次。
+      // 已登录探测：先检查 OAuth 回调参数，再探桌面壳 / 会话。
+      var oauthSection = $('oauth-section');
+      var oauthGoogleBtn = $('oauth-google');
+      var oauthGithubBtn = $('oauth-github');
+      var oauthBusy = false;
+
+      function completeLoginSuccess(data) {
+        var hasTokens = data && typeof data.accessToken === 'string' && data.accessToken
+          && typeof data.refreshToken === 'string' && data.refreshToken;
+        if (headerMode && hasTokens) {
+          storePanelTokens(data.accessToken, data.refreshToken, data.expiresIn);
+          if (desktop && typeof desktop.panelSessionStore === 'function') {
+            desktop.panelSessionStore(data.accessToken, data.refreshToken, data.expiresIn)
+              .catch(function () {});
+          }
+        } else if (data && Number(data.expiresIn) > 0) {
+          try {
+            localStorage.setItem(PANEL_AUTH, JSON.stringify({
+              expiresAt: Date.now() + Number(data.expiresIn) * 1000,
+            }));
+          } catch (e) {}
+        }
+        window.location.href = postLoginTarget();
+      }
+
+      var initialParams = (function () {
+        try { return new URLSearchParams(window.location.search); } catch (e) { return null; }
+      })();
+      var callbackTicket = initialParams ? (initialParams.get('oauth_ticket') || '') : '';
+      var callbackError = initialParams ? (initialParams.get('oauth_error') || '') : '';
+      if (initialParams && (callbackTicket || callbackError)) {
+        try {
+          initialParams.delete('oauth_ticket');
+          initialParams.delete('oauth_error');
+          var cleaned = initialParams.toString();
+          window.history.replaceState(null, '', window.location.pathname + (cleaned ? '?' + cleaned : ''));
+        } catch (e) {}
+      }
+
+      if (callbackError) {
+        errorEl.textContent = callbackError;
+      }
+
       (function () {
+        if (callbackTicket) {
+          Promise.all([probeDone, gatewayReady]).then(function () {
+            return panelFetch('/api/panel/oauth/exchange', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ticket: callbackTicket }),
+            }).then(function (resp) {
+              return resp.json().then(function (payload) { return { ok: resp.ok, payload: payload }; });
+            });
+          }).then(function (res) {
+            if (res.ok && res.payload && res.payload.data) {
+              completeLoginSuccess(res.payload.data);
+            } else {
+              var msg = res.payload && res.payload.error;
+              if (msg && typeof msg === 'object') msg = msg.message;
+              errorEl.textContent = msg || '第三方登录票据校验失败，请重试';
+            }
+          }).catch(function () {
+            errorEl.textContent = '无法连接网关完成登录验证';
+          });
+          return;
+        }
         if (desktop && typeof desktop.panelSessionStatus === 'function') {
           desktop.panelSessionStatus().then(function (state) {
             if (state && state.authenticated) window.location.href = postLoginTarget();
@@ -272,6 +335,12 @@
           turnstileSiteKey: data.turnstileSiteKey,
           gatewayBase: result[1],
         });
+        var oauth = data.oauth || {};
+        if (!isSetup && oauthSection && (oauth.google || oauth.github)) {
+          oauthSection.style.display = '';
+          if (oauthGoogleBtn) oauthGoogleBtn.style.display = oauth.google ? '' : 'none';
+          if (oauthGithubBtn) oauthGithubBtn.style.display = oauth.github ? '' : 'none';
+        }
         statusKnown = true;
       }).catch(function () {
         tip.textContent = t('无法读取登录验证设置，请刷新页面重试');
@@ -351,6 +420,96 @@
           if (captchaRequired) widget.reset();
         });
       }
+
+      function startOauthLogin(provider) {
+        if (oauthBusy || button.disabled) return;
+        errorEl.textContent = '';
+        if (!desktop) {
+          var next = '';
+          try { next = new URLSearchParams(window.location.search).get('next') || ''; } catch (e) {}
+          var startUrl = '/api/panel/oauth/start?provider=' + encodeURIComponent(provider)
+            + '&origin=' + encodeURIComponent(window.location.origin);
+          if (next === '/m') startUrl += '&next=%2Fm';
+          window.location.href = startUrl;
+          return;
+        }
+        oauthBusy = true;
+        if (oauthGoogleBtn) oauthGoogleBtn.disabled = true;
+        if (oauthGithubBtn) oauthGithubBtn.disabled = true;
+        var currentState = '';
+        Promise.all([probeDone, gatewayReady]).then(function (results) {
+          var base = results[1];
+          return panelFetch('/api/panel/oauth/start-url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: provider, origin: base }),
+          }).then(function (resp) {
+            return resp.json().then(function (payload) { return { ok: resp.ok, payload: payload }; });
+          });
+        }).then(function (res) {
+          if (!res.ok || !res.payload || !res.payload.data || !res.payload.data.authorizeUrl) {
+            var msg = res.payload && res.payload.error;
+            if (msg && typeof msg === 'object') msg = msg.message;
+            throw new Error(msg || '无法发起第三方登录');
+          }
+          currentState = res.payload.data.state;
+          var authUrl = res.payload.data.authorizeUrl;
+          if (desktop.openReleasePage) {
+            return desktop.openReleasePage(authUrl);
+          }
+          window.open(authUrl, '_blank');
+        }).then(function () {
+          var startedAt = Date.now();
+          var timer = setInterval(function () {
+            if (Date.now() - startedAt > 180000) {
+              clearInterval(timer);
+              oauthBusy = false;
+              if (oauthGoogleBtn) oauthGoogleBtn.disabled = false;
+              if (oauthGithubBtn) oauthGithubBtn.disabled = false;
+              errorEl.textContent = '第三方登录超时，请重试';
+              return;
+            }
+            panelFetch('/api/panel/oauth/poll?state=' + encodeURIComponent(currentState), { cache: 'no-store' })
+              .then(function (resp) { return resp.json(); })
+              .then(function (payload) {
+                var data = payload && payload.data;
+                if (!data || data.status === 'pending') return;
+                clearInterval(timer);
+                if (data.status === 'done' && data.ticket) {
+                  panelFetch('/api/panel/oauth/exchange', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ticket: data.ticket }),
+                  }).then(function (resp) {
+                    return resp.json().then(function (p) { return { ok: resp.ok, payload: p }; });
+                  }).then(function (ex) {
+                    if (ex.ok && ex.payload && ex.payload.data) {
+                      completeLoginSuccess(ex.payload.data);
+                    } else {
+                      oauthBusy = false;
+                      if (oauthGoogleBtn) oauthGoogleBtn.disabled = false;
+                      if (oauthGithubBtn) oauthGithubBtn.disabled = false;
+                      errorEl.textContent = '换取登录会话失败，请重试';
+                    }
+                  });
+                } else {
+                  oauthBusy = false;
+                  if (oauthGoogleBtn) oauthGoogleBtn.disabled = false;
+                  if (oauthGithubBtn) oauthGithubBtn.disabled = false;
+                  errorEl.textContent = (data && data.error) || '第三方登录失败';
+                }
+              }).catch(function () {});
+          }, 1200);
+        }).catch(function (err) {
+          oauthBusy = false;
+          if (oauthGoogleBtn) oauthGoogleBtn.disabled = false;
+          if (oauthGithubBtn) oauthGithubBtn.disabled = false;
+          errorEl.textContent = (err && err.message) || '无法发起第三方登录';
+        });
+      }
+
+      if (oauthGoogleBtn) oauthGoogleBtn.addEventListener('click', function () { startOauthLogin('google'); });
+      if (oauthGithubBtn) oauthGithubBtn.addEventListener('click', function () { startOauthLogin('github'); });
 
       // capture：先于官方 widget 的 form 集成逻辑跑，未验证时给出明确提示
       $('form').addEventListener('submit', function (event) {

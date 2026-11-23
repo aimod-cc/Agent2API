@@ -20,7 +20,7 @@ pub const CAPABILITIES: &[&str] = &[
     "resources.inbound-images.v1", "login.desktop.chatglm.v1", "http.catpaw-turn.v1",
     "claim.doubao-tasks.v1", "http.managed-task.v1",
     "http.codearts-session.v1", "login.codearts.v1", "desktop.credentials.v1", "http.doubao-turn.v1",
-    "crypto.deepseek-pow.v1", "crypto.monkeycode-cap.v1", "desktop.launch.v1", "resources.cookie-file.v1", "credential.kiro-external-refresh.v1", "credentials.legacy-import.v1",
+    "crypto.deepseek-pow.v1", "crypto.monkeycode-cap.v1", "desktop.launch.v1", "resources.cookie-file.v1", "credential.kiro-external-refresh.v1",
 ];
 
 #[derive(Clone, Debug, Deserialize)]
@@ -116,7 +116,6 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         ("settings.schema.v1", &["settings.v1"][..]),
         ("resources.fetch-public.v1", &["resources.v1"][..]),
         ("credential.kiro-external-refresh.v1", &["accounts.cas.v1", "accounts.identity.v1", "locks.v1"][..]),
-        ("credentials.legacy-import.v1", &["accounts.cas.v1", "login.forms.v1"][..]),
         ("resources.cookie-file.v1", &["accounts.cas.v1", "login.forms.v1"][..]),
         ("resources.inbound-images.v1", &["resources.v1", "chat.stream.v1"][..]),
         ("login.desktop.chatglm.v1", &["login.forms.v1", "accounts.cas.v1"][..]),
@@ -177,10 +176,6 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     }
     if requires("credential.kiro-external-refresh.v1") && manifest.providers[0].id.as_str() != "kiro" {
         return Err("Kiro外部授权续期只能由对应插件使用".into());
-    }
-    if requires("credentials.legacy-import.v1") && !matches!(manifest.providers[0].id.as_str(),
-        "raccoon" | "autoclaw" | "autoclaw-intl" | "catpaw" | "workbuddy" | "workbuddy-intl") {
-        return Err("旧环境凭据导入仅允许已迁移的固定提供商".into());
     }
     if requires("resources.cookie-file.v1") && manifest.providers[0].id.as_str() != "kuku" {
         return Err("Cookie数据库文件解析只能由库库插件使用".into());

@@ -88,6 +88,7 @@ impl Host {
             })?;
             let value = unwrap_reply(reply).map_err(|error| error.message)?;
             let settings = super::super::provider_settings::parse(self, &value)?;
+            let error_rules = super::super::error_rules::parse(&value);
             super::desktop_launch::validate_metadata(&runtime.shared.options, &value)?;
             let providers: Vec<proto::ProviderInfo> = serde_json::from_value(value).map_err(|_| "Wasm 握手返回无效提供商信息")?;
             if providers.len() != 1 || providers[0].id.as_str() != runtime.shared.options.provider {
@@ -110,10 +111,10 @@ impl Host {
                 return Err("Wasm 对话必须声明受控账号访问能力".into());
             }
             runtime.shared.system_proxy_when_unset.store(provider.capabilities.system_proxy_when_unset, Ordering::Release);
-            Ok((providers, settings, runtime))
+            Ok((providers, settings, error_rules, runtime))
         }.await;
         match result {
-            Ok((providers, settings, runtime)) => {
+            Ok((providers, settings, error_rules, runtime)) => {
                 let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
                 if self.closing.load(Ordering::Acquire) || super::super::runtime::admission_closed()
                     || runtime.shared.cancel.is_cancelled() {
@@ -128,6 +129,7 @@ impl Host {
                 // 当前Shared仍保持弱登记，关闭时不依赖可能正被借用的Runtime锁。
                 *self.providers.lock().unwrap_or_else(|error| error.into_inner()) = providers.clone();
                 *self.provider_settings.lock().unwrap_or_else(|error| error.into_inner()) = settings;
+                *self.error_rules.lock().unwrap_or_else(|error| error.into_inner()) = error_rules;
                 self.generation.fetch_add(1, Ordering::AcqRel);
                 self.running.store(true, Ordering::Release);
                 self.ready.store(true, Ordering::Release);

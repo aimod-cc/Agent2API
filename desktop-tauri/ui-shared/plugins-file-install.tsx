@@ -1,9 +1,10 @@
 import * as React from 'react'
-import { Alert, Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, Label, Progress, Spinner } from '@ui'
+import { Alert, Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, Label, Progress, SegmentedControl, Spinner } from '@ui'
 import type { PluginMutation, PluginOperation, PluginsPayload } from './plugins'
 import { PluginOperationUnconfirmed, waitPackOperation, type PluginRequest } from './plugins-batch-runner'
 import type { PluginTranslate } from './plugins-store'
 import { readFileAsDataUrl } from './file-read'
+import { DIALOG_SEG_CLASS } from './dialog-segmented'
 
 const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : String(cause)
 const formatSize = (bytes: number) => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MiB` : `${Math.max(1, Math.round(bytes / 1024))} KiB`
@@ -222,20 +223,34 @@ export function PluginFileInstallProgress({ model, t }: { model: ReturnType<type
   </div>
 }
 
+type FileFilter = 'all' | 'ready' | 'installed'
+const isPendingFile = (item: PluginFileResult) => item.state === 'ready' || item.state === 'installing'
+const isInstalledFile = (item: PluginFileResult) => item.state === 'installed' || item.state === 'warning'
+
 export function PluginFileInstallDialog({ model, maxPackBytes, t }: { model: ReturnType<typeof usePluginFileInstall>; maxPackBytes: number; t: PluginTranslate }) {
   const input = React.useRef<HTMLInputElement>(null)
+  const rowsRef = React.useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = React.useState(false)
   const [trusted, setTrusted] = React.useState(false)
   const [trustKey, setTrustKey] = React.useState('')
+  const [filter, setFilter] = React.useState<FileFilter>('all')
+  React.useEffect(() => { if (!model.results.length) setFilter('all') }, [model.results.length])
   const { ready, failed, succeeded, done, total, skipped, current, unconfirmed } = summarizeFileInstall(model.results)
+  const pendingCount = model.results.filter(isPendingFile).length
+  const installedCount = model.results.filter(isInstalledFile).length
+  const visibleResults = filter === 'ready'
+    ? model.results.filter(isPendingFile)
+    : filter === 'installed'
+      ? model.results.filter(isInstalledFile)
+      : model.results
   const unsigned = model.results.filter(item => (item.state === 'ready' || item.state === 'failed') && item.preview?.signed === false)
   const unsignedKey = JSON.stringify(unsigned.map(item => [item.key, item.preview?.sha256]))
   const canInstall = !unsigned.length || trusted && trustKey === unsignedKey
   const labels: Record<FileState, string> = { preparing: t('正在校验包内容…'), ready: t('待安装'), installing: t('正在安装…'), installed: t('已安装'), warning: t('已安装，需检查'), unconfirmed: t('结果待确认'), failed: t('安装失败'), invalid: t('无法安装'), duplicate: t('已跳过') }
   return <Dialog open={model.open} onOpenChange={next => { if (next) model.setOpen(true); else model.close() }}>
-    <DialogContent className='w-[min(860px,calc(100vw-48px))]'>
-      <DialogHeader><div><DialogTitle>{model.phase === 'done' ? t('本地安装结果') : t('批量安装插件包')}</DialogTitle><p className='m-0 mt-1 text-xs text-muted-foreground'>{t('先确认文件清单，再逐个校验并安装')}</p></div></DialogHeader>
-      <DialogBody className='min-h-0 gap-4'>
+    <DialogContent className={model.results.length ? 'h-[min(720px,calc(100vh-48px))] w-[min(860px,calc(100vw-48px))]' : 'w-[min(860px,calc(100vw-48px))]'}>
+      <DialogHeader className='shrink-0'><div><DialogTitle>{model.phase === 'done' ? t('本地安装结果') : t('批量安装插件包')}</DialogTitle><p className='m-0 mt-1 text-xs text-muted-foreground'>{t('先确认文件清单，再逐个校验并安装')}</p></div></DialogHeader>
+      <DialogBody className={model.results.length ? 'min-h-0 flex-1 gap-3.5' : 'min-h-0 gap-3.5'}>
         {model.phase === 'ready' || model.phase === 'preparing' ? <>
           <Input type='file' ref={input} multiple accept='.zip,application/zip' className='hidden' onChange={event => { const files = Array.from(event.currentTarget.files || []); event.currentTarget.value = ''; void model.addFiles(files) }} />
           <Button variant='outline' className={`plugins-file-drop ${dragging ? 'is-dragging' : ''}`} disabled={model.running}
@@ -245,29 +260,48 @@ export function PluginFileInstallDialog({ model, maxPackBytes, t }: { model: Ret
             <span><span className='block text-sm'>{t('拖入插件包，或选择文件')}</span><span className='mt-1 block text-xs font-normal text-muted-foreground'>{t('支持多个 zip · 单个不超过 {n} MiB', { n: maxPackBytes / MIB })}</span></span>
           </Button>
         </> : null}
-        <div className='plugins-file-list'>
+        {model.results.length ? <div className='shrink-0'>
+          <SegmentedControl<FileFilter>
+            aria-label={t('按状态筛选')}
+            className={DIALOG_SEG_CLASS}
+            value={filter}
+            onValueChange={next => {
+              setFilter(next)
+              if (rowsRef.current) rowsRef.current.scrollTop = 0
+            }}
+            options={[
+              { value: 'all', label: t('全部'), count: model.results.length },
+              { value: 'ready', label: t('待安装'), count: pendingCount },
+              { value: 'installed', label: t('已安装'), count: installedCount },
+            ]}
+          />
+        </div> : null}
+        <div className={model.results.length ? 'plugins-file-list min-h-[160px] flex-1' : 'plugins-file-list'}>
           <div className='plugins-file-list-head'><span>{t('已选 {count} 个文件', { count: model.results.length })}{skipped ? ` · ${t('跳过 {count} 个', { count: skipped })}` : ''}</span>
             {!model.running && model.phase !== 'done' && model.results.length ? <Button variant='link' size='xs' onClick={model.reset}>{t('清空列表')}</Button> : null}
           </div>
-          {model.results.map(item => <div key={item.key} className='plugins-file-row'>
-            <svg viewBox='0 0 24 24' className='size-5 shrink-0 text-muted-foreground' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden='true'><path d='M6 3h7l5 5v13H6V3ZM13 3v5h5' /></svg>
-            <div className='min-w-0 flex-1'><p className='m-0 flex flex-wrap items-center gap-2 text-sm'>{item.preview?.name || item.file.name}{item.preview ? <Badge variant={item.preview.signed ? 'outline' : 'warning'} shape='tag'>{item.preview.signed ? t('已签名') : t('未签名')}</Badge> : null}</p>
-              <p className='m-0 mt-1 break-all text-xs text-muted-foreground'>{item.preview && !item.preview.previousVersion ? `${t('版本')} ${item.preview.version} · ` : ''}{item.file.name}</p>
-              {item.preview?.previousVersion ? <p className='m-0 mt-1 text-xs text-muted-foreground'>{t('已装版本 {current} · 文件版本 {next}', { current: item.preview.previousVersion, next: item.preview.version })}</p> : null}
-              {item.preview?.enabled === false ? <p className='m-0 mt-1 text-xs text-muted-foreground'>{t('安装后保留原有停用状态')}</p> : null}
-              {item.error ? <p className={`m-0 mt-1 break-words text-xs ${item.state === 'failed' || item.state === 'invalid' ? 'text-destructive' : 'text-warning'}`}>{item.error}</p> : null}
-            </div>
-            <div className='plugins-file-state'><span className={item.state === 'installed' ? 'text-success' : item.state === 'failed' || item.state === 'invalid' ? 'text-destructive' : item.state === 'unconfirmed' || item.state === 'warning' ? 'text-warning' : 'text-muted-foreground'}>{item.state === 'preparing' || item.state === 'installing' ? <Spinner className='inline-block size-3' /> : null} {labels[item.state]}</span><span className='mt-1 block text-muted-foreground'>{formatSize(item.file.size)}</span></div>
-            {!model.running && model.phase !== 'done' ? <Button variant='ghost' size='icon-sm' aria-label={t('移除文件 {name}', { name: item.file.name })} onClick={() => model.remove(item.key)}><svg viewBox='0 0 16 16' className='size-3' fill='none' stroke='currentColor' strokeWidth='1.7' strokeLinecap='round' aria-hidden='true'><path d='m4 4 8 8M12 4l-8 8' /></svg></Button> : null}
-          </div>)}
-          {!model.results.length ? <p className='m-0 py-8 text-center text-xs text-muted-foreground'>{t('选择插件包后，文件清单会显示在这里')}</p> : null}
+          <div ref={rowsRef} className='plugins-file-rows'>
+            {visibleResults.map(item => <div key={item.key} className='plugins-file-row'>
+              <svg viewBox='0 0 24 24' className='size-5 shrink-0 text-muted-foreground' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden='true'><path d='M6 3h7l5 5v13H6V3ZM13 3v5h5' /></svg>
+              <div className='min-w-0 flex-1'><p className='m-0 flex flex-wrap items-center gap-2 text-sm'>{item.preview?.name || item.file.name}{item.preview ? <Badge variant={item.preview.signed ? 'outline' : 'warning'} shape='tag'>{item.preview.signed ? t('已签名') : t('未签名')}</Badge> : null}</p>
+                <p className='m-0 mt-1 break-all text-xs text-muted-foreground'>{item.preview && !item.preview.previousVersion ? `${t('版本')} ${item.preview.version} · ` : ''}{item.file.name}</p>
+                {item.preview?.previousVersion ? <p className='m-0 mt-1 text-xs text-muted-foreground'>{t('已装版本 {current} · 文件版本 {next}', { current: item.preview.previousVersion, next: item.preview.version })}</p> : null}
+                {item.preview?.enabled === false ? <p className='m-0 mt-1 text-xs text-muted-foreground'>{t('安装后保留原有停用状态')}</p> : null}
+                {item.error ? <p className={`m-0 mt-1 break-words text-xs ${item.state === 'failed' || item.state === 'invalid' ? 'text-destructive' : 'text-warning'}`}>{item.error}</p> : null}
+              </div>
+              <div className='plugins-file-state'><span className={item.state === 'installed' ? 'text-success' : item.state === 'failed' || item.state === 'invalid' ? 'text-destructive' : item.state === 'unconfirmed' || item.state === 'warning' ? 'text-warning' : 'text-muted-foreground'}>{item.state === 'preparing' || item.state === 'installing' ? <Spinner className='inline-block size-3' /> : null} {labels[item.state]}</span><span className='mt-1 block text-muted-foreground'>{formatSize(item.file.size)}</span></div>
+              {!model.running && model.phase !== 'done' ? <Button variant='ghost' size='icon-sm' aria-label={t('移除文件 {name}', { name: item.file.name })} onClick={() => model.remove(item.key)}><svg viewBox='0 0 16 16' className='size-3' fill='none' stroke='currentColor' strokeWidth='1.7' strokeLinecap='round' aria-hidden='true'><path d='m4 4 8 8M12 4l-8 8' /></svg></Button> : null}
+            </div>)}
+            {!model.results.length ? <p className='m-0 py-8 text-center text-xs text-muted-foreground'>{t('选择插件包后，文件清单会显示在这里')}</p>
+              : !visibleResults.length ? <p className='m-0 py-8 text-center text-xs text-muted-foreground'>{t('没有符合筛选条件的插件')}</p> : null}
+          </div>
         </div>
-        {unsigned.length && !model.running ? <Label className='flex items-start gap-3 text-xs font-normal leading-5'><Checkbox checked={trusted && trustKey === unsignedKey}
+        {unsigned.length && !model.running ? <Label className='flex shrink-0 items-start gap-3 text-xs font-normal leading-5'><Checkbox checked={trusted && trustKey === unsignedKey}
           onCheckedChange={value => { setTrusted(value === true); setTrustKey(unsignedKey) }} />{t('我信任本次所选的未签名插件包，并确认继续安装。')}</Label> : null}
-        {unconfirmed ? <Alert variant='warning'>{t('本批已暂停，请先确认插件状态，再处理剩余文件。')}</Alert> : null}
-        <p className='m-0 text-xs leading-5 text-muted-foreground'>{t('单项失败不会中断其余插件。账号和原有设置均保留。')}</p>
+        {unconfirmed ? <Alert variant='warning' className='shrink-0'>{t('本批已暂停，请先确认插件状态，再处理剩余文件。')}</Alert> : null}
+        <p className='m-0 shrink-0 text-xs leading-5 text-muted-foreground'>{t('单项失败不会中断其余插件。账号和原有设置均保留。')}</p>
       </DialogBody>
-      <DialogFooter className='flex-wrap'>
+      <DialogFooter className='shrink-0 flex-wrap'>
         <div className='mr-auto min-w-[180px] text-xs text-muted-foreground'>{model.phase === 'running' ? <><p className='mb-2'>{current?.preview?.name || current?.file.name} · {done}/{total}</p><Progress value={done} max={Math.max(1, total)} aria-label={t('插件安装进度')} /></> : model.phase === 'done' ? t('安装结束：{done} 个完成，{failed} 个失败', { done: succeeded, failed }) : model.phase === 'preparing' ? t('正在校验包内容…') : t('待安装 {count} 个插件包', { count: ready })}</div>
         <Button variant='outline' onClick={model.close}>{model.installing ? t('收起') : model.phase === 'done' ? t('完成') : t('取消')}</Button>
         {!model.running && failed && !unconfirmed ? <Button variant='outline' disabled={!canInstall} onClick={() => void model.start(true)}>{t('重试失败项')}</Button> : null}

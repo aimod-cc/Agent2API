@@ -1,4 +1,4 @@
-//! 账号出网代理轮询，候选来自手动地址与 Clash Verge 端点。
+//! 账号出网代理轮询，候选来自手动地址与 EasyClash 端点。
 //! 游标按账号存于进程内；展示只读取候选，不推进游标。
 
 use std::collections::HashMap;

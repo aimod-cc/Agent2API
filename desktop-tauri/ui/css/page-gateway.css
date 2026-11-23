@@ -228,6 +228,37 @@
   background: color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
+/* 模型管理表：单元格防内容撑溢 + 最后一列「操作」固定在右侧（桌面端） */
+@media (min-width: 768px) {
+  .page[data-page="gateway"] .models-table td {
+    overflow: hidden;
+  }
+  .page[data-page="gateway"] .models-table thead th[data-col="act"] {
+    position: sticky;
+    top: 0;
+    right: 0;
+    z-index: 3;
+    background: var(--table-head-bg);
+    box-shadow: -1px 0 0 var(--hairline);
+  }
+  .page[data-page="gateway"] .models-table tbody td.cell-act {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    background: var(--surface);
+    box-shadow: -1px 0 0 var(--hairline);
+  }
+  .page[data-page="gateway"] .models-table tbody tr:hover td.cell-act {
+    background: color-mix(in srgb, var(--row-hover) 100%, var(--surface));
+  }
+  .page[data-page="gateway"] .models-table tbody tr.sel td.cell-act {
+    background: color-mix(in srgb, var(--primary) 7%, var(--surface));
+  }
+  .page[data-page="gateway"] .models-table tbody tr.sel:hover td.cell-act {
+    background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+  }
+}
+
 /* 列宽（合计 100%，table-layout: fixed 下按 colgroup 分配） */
 /* 选择列：一整列只有一枚复选框，给 3.5% 的窄档（46px 上下，照账号页勾选列的量级）；
    多出的宽度从映射列（chips 有弹性）与操作列（按钮定宽、无长文案）各挪一点 ——
@@ -236,30 +267,42 @@
 /* 勾选列的表头 / 单元格都居中：一整列只有复选框，居中才与账号页勾选列同一观感
    （数据行走列设置的 ta-center；th 上的 text-align 是全局 left，这里单独补） */
 .models-table th[data-col="check"] { text-align: center; }
-.models-table .c-model { width: 17%; }
-.models-table .c-rate { width: 5.5%; }
-/* 可见性列：「可见 / 不展示」两个短词，6% 够放下。宽度从「上游模型」列匀来
-   （那一列原来 19%，长模型名的截断阈值本来也够宽） */
-.models-table .c-visibility { width: 6%; }
-.models-table .c-source { width: 6.5%; }
-/* 能力位两列：数值一格（上下文 / 最大输出）、四枚图标圆点一格。
-   并入映射列的宽度从这里来 —— 五列会把它挤到装不下 chips（见 models-page
-   文件头的列数取舍） */
-.models-table .c-budget { width: 10%; }
-.models-table .c-caps { width: 11.5%; }
-.models-table .c-alias { width: 33%; }
-.models-table .c-act { width: 11%; }
+.models-table .c-model { width: 15.5%; }
+.models-table .c-rate { width: 5%; }
+.models-table .c-pricing { width: 10.5%; }
+/* 可见性列：「可见 / 不展示」两个短词，6% 够放下。 */
+.models-table .c-visibility { width: 5.5%; }
+.models-table .c-source { width: 6%; }
+/* 能力位两列：数值一格（上下文 / 最大输出）、四枚图标圆点一格。 */
+.models-table .c-budget { width: 9%; }
+.models-table .c-caps { width: 10.5%; }
+.models-table .c-alias { width: 25%; }
+.models-table .c-act { width: 9.5%; }
 .keys-table .k-name { width: 22%; }
 .keys-table .k-key { width: 44%; }
 .keys-table .k-time { width: 16%; }
 .keys-table .k-state { width: 8%; }
 .keys-table .k-act { width: 10%; }
-.proxies-table .p-pick { width: 36px; }
-.proxies-table .p-addr { width: 24%; }
-.proxies-table .p-usage { width: 14%; }
-.proxies-table .p-state { width: 58px; }
-.proxies-table .p-test { width: 23%; }
-.proxies-table .p-act { width: 150px; }
+.proxies-table .p-pick { width: 38px; }
+.proxies-table .p-addr { width: 19%; }
+.proxies-table .p-usage { width: 13%; }
+.proxies-table .p-state { width: 64px; }
+.proxies-table .p-test { width: 26%; }
+.proxies-table .p-act { width: 164px; }
+@media (min-width: 768px) {
+  .proxies-table { min-width: 780px; }
+}
+.page[data-page="proxies"] .panel-head .head-actions .colset-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+  font-size: 12.5px;
+}
+.page[data-page="proxies"] .row-actions {
+  gap: 6px;
+  align-items: center;
+}
+.page[data-page="proxies"] .row-actions button { opacity: 1; }
 .page[data-page="proxies"] .models-table th { font-size: 11px; }
 /* 行高：原来上下各 14px 内边距，一行近 67px，一屏只看得到十来条出口。
    收到 8px（与表头同一档）后行高约 46px —— 名称与最近检测仍是两行读数，
@@ -444,11 +487,11 @@
    横向 wrap 会挤成变宽的迷宫，竖着读每行一条才对得上「绑定列表」的心智。
    第一行是例外：默认那条与「＋ 映射」并排（.alias-row）—— 入口按钮不是绑定，
    让它独占一行会把每个模型行都撑高三行。 */
-.aliases { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.aliases { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; max-width: 100%; }
 /* 默认 chip + 「＋ 映射」。max-width: 100% 让这一行在最宽处收住，放不下时
    按钮自己折到第二行，而不是把 chip 挤扁或把列顶宽（.mm 是 minmax(0,1fr)，
    列一被顶宽，横向滚动条就挂到面板上了）。 */
-.alias-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; max-width: 100%; }
+.alias-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
 .alias {
   display: inline-flex;
   align-items: center;
@@ -456,6 +499,7 @@
   height: auto;
   min-height: 26px;
   max-width: 100%;
+  box-sizing: border-box;
   padding: 3px 5px;
   border: 1px solid var(--border);
   border-radius: var(--r-pill);

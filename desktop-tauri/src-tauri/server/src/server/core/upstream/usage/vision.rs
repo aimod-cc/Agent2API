@@ -61,6 +61,8 @@ impl RequestTelemetry {
         guard.completion_tokens = 0;
         guard.total_tokens = 0;
         guard.cache_read_tokens = 0;
+        guard.cache_creation_tokens = 0;
+        guard.cache_creation_1h_tokens = 0;
         guard.credit = None;
         self.enter_phase(&mut guard, super::LogPhase::Connecting);
         self.flush_live(&guard);

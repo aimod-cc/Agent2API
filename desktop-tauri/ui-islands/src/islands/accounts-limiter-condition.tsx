@@ -67,8 +67,9 @@ function metricsFor(source: QuotaSource | undefined): LimiterMetric[] {
   return result.length ? result : ['tokens', 'requests']
 }
 
-export function LimiterConditionDialog({ account, value, allowBalance = true, onSave, onClose }: {
+export function LimiterConditionDialog({ account, provider, value, allowBalance = true, onSave, onClose }: {
   account?: AccountRecord
+  provider?: string
   value: LimiterCondition
   allowBalance?: boolean
   onSave: (condition: LimiterCondition) => void
@@ -77,8 +78,9 @@ export function LimiterConditionDialog({ account, value, allowBalance = true, on
   const [draft, setDraft] = React.useState(() => draftOf(value))
   const [error, setError] = React.useState('')
   const condition = draft.condition
-  const sources = sourcesOf(account).filter(source => (allowBalance || source.id === 'local')
-    && (providerOf(account) !== 'codearts' || source.id === 'account' || isCreditUnit(source.unit || '')))
+  const providerId = account ? providerOf(account) : String(provider || '')
+  const sources = sourcesOf(account, providerId).filter(source => (allowBalance || source.id === 'local')
+    && (providerId !== 'codearts' || source.id === 'account' || isCreditUnit(source.unit || '')))
   if (condition.source && !sources.some(source => source.id === condition.sourceId)) sources.push(condition.source)
   const source = sources.find(source => source.id === condition.sourceId)
   const aggregate = sources.find(source => source.id === 'account' && isCreditUnit(source.unit || ''))
@@ -92,7 +94,7 @@ export function LimiterConditionDialog({ account, value, allowBalance = true, on
   const aggregateView = aggregate?.unlimited ? t('不限') : aggregate?.remaining == null ? t('暂无读数')
     : `${numberText(aggregate.remaining)} ${t('积分')}`
   const modelOptions = source?.models?.length
-    ? source.models.map(model => ({ value: model, label: model })) : modelsOf(account)
+    ? source.models.map(model => ({ value: model, label: model })) : modelsOf(account, providerId)
   for (const model of condition.models) if (!modelOptions.some(option => option.value === model)) modelOptions.push({ value: model, label: model })
   const metrics = [...new Set([...metricsFor(source), condition.metric])]
     .filter(metric => providerOf(account) !== 'codearts' || metric !== 'tokens' && metric !== 'requests')

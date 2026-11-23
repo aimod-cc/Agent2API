@@ -330,6 +330,64 @@ pub enum UpstreamErrorClass {
     },
 }
 
+/// 账号型网页搜索插件声明的能力边界（由 `web-search.capabilities` 返回）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebSearchCapability {
+    pub max_query_chars: usize,
+    pub supports_max_results: bool,
+    pub default_max_results: Option<usize>,
+    pub max_results_limit: Option<usize>,
+}
+
+impl WebSearchCapability {
+    /// 解析插件返回的 `web-search.capabilities` 元数据；旧版未申报条数参数时保持兼容关闭。
+    pub fn from_metadata(metadata: &Value) -> Option<Self> {
+        if metadata.get("version").and_then(Value::as_u64) != Some(1)
+            || metadata.get("search").and_then(Value::as_bool) != Some(true)
+        {
+            return None;
+        }
+        let max_query_chars = metadata
+            .get("max_query_chars")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| (1..=16000).contains(value))?;
+        let supports_max_results = metadata
+            .get("supports_max_results")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let max_results_limit = if supports_max_results {
+            metadata
+                .get("max_results_limit")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| (1..=1000).contains(value))
+                .or(Some(10))
+        } else {
+            None
+        };
+        let default_max_results = if supports_max_results {
+            let limit = max_results_limit.unwrap_or(10);
+            Some(
+                metadata
+                    .get("default_max_results")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .map(|value| value.clamp(1, limit))
+                    .unwrap_or_else(|| limit.min(10)),
+            )
+        } else {
+            None
+        };
+        Some(Self {
+            max_query_chars,
+            supports_max_results,
+            default_max_results,
+            max_results_limit,
+        })
+    }
+}
+
 /// 一次「可退避重试」的建议（见模块头扩展 1）。
 ///
 /// 适配器把「要不要退避重试」连同**原因**一起给出，编排层负责睡这一觉、
@@ -516,6 +574,10 @@ pub trait ProviderAdapter: Send + Sync {
 
     fn supports_image_editing(&self) -> bool {
         false
+    }
+
+    fn web_search_capability(&self) -> Option<WebSearchCapability> {
+        None
     }
 
     fn forwards_images(&self) -> bool { false }
@@ -1962,6 +2024,10 @@ impl ProviderAdapter for BuiltinAdapter {
 
     fn supports_image_editing(&self) -> bool {
         adapter_for(self.0).supports_image_editing()
+    }
+
+    fn web_search_capability(&self) -> Option<WebSearchCapability> {
+        adapter_for(self.0).web_search_capability()
     }
 
     fn build_image_request_async<'a>(

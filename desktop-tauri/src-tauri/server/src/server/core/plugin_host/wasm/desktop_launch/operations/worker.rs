@@ -23,6 +23,7 @@ pub(super) async fn run(operation: Arc<Operation>) {
 async fn execute(operation: Arc<Operation>) -> Result<(), String> {
     operation.check()?;
     operation.binding.origin()?.check(operation.binding.origin()?.initial())?;
+    operation.check_proxy()?;
     let call = Call::new(&operation.binding, operation.manager.clone(), Some(operation.executable.clone()), Some(operation.targets.clone()))
         .with_cancel(operation.cancel.clone());
     let result = Secret(operation.binding.invoke(call.clone(), declaration::PREPARE).await?);
@@ -82,6 +83,7 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
     let _lock = super::super::lock::client_lock(&operation.executable, &operation.targets)?;
     operation.check()?;
     operation.binding.origin()?.check(&accepted)?;
+    operation.check_proxy()?;
     if Journal::pending(&operation.executable, &operation.targets)?.is_some() { return Err("上次本机切换未完整结束，请先恢复原凭证".into()); }
     let running = windows::running(&operation.executable)?;
     if running && !operation.initial_running { return Err("客户端在准备后已启动，请重新确认".into()); }
@@ -125,9 +127,12 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
     if let Err(error) = prepared {
         let applied = journal.phase == "writing";
         let message = rollback_after_error(error, &mut journal, applied);
+        if matches!(journal.phase.as_str(), "not_applied" | "rolled_back") {
+            if let Ok(mut state) = operation.state.lock() { state.backup = None; }
+        }
         if journal.phase == "rolled_back" && running && operation.manager.is_current()
             && operation.binding.current().is_ok() && windows::running(&operation.executable) == Ok(false) {
-            if windows::start(&operation.executable).is_ok() {
+            if windows::start(&operation.executable, None).is_ok() {
                 if let Ok(mut state) = operation.state.lock() { state.client_running = true; }
             }
         }
@@ -142,15 +147,16 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
         operation.finish("committed", format!("凭证已切换；{error}"), false);
         return Ok(());
     }
-    match windows::start(&operation.executable) {
+    match operation.check_proxy().and_then(|_| windows::start(&operation.executable, operation.proxy.resolved.as_ref())) {
         Ok(()) => {
             {
                 let mut state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;
                 state.started = true; state.client_running = true;
             }
             journal.phase = "started".into();
+            let message = if operation.proxy.resolved.is_some() { "已切换凭证并使用账号代理启动客户端" } else { "已切换凭证并启动客户端" };
             match journal.save() {
-                Ok(()) => operation.finish("started", "已切换凭证并启动客户端", false),
+                Ok(()) => operation.finish("started", message, false),
                 Err(_) => operation.finish("started", "客户端已启动，但备份状态保存失败，备份已保留", true),
             }
         }

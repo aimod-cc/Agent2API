@@ -1,6 +1,15 @@
 export type LaunchClient = { id: string; label: string; platform: 'windows' }
 export type LaunchSelection = { provider: string; account: string; client: string }
 export type LaunchPhase = 'awaiting_confirmation' | 'preparing' | 'closing' | 'writing' | 'reloading' | 'starting' | 'started' | 'switched' | 'committed' | 'failed' | 'canceled' | 'restored' | 'recovery_required'
+export type LaunchProxy = {
+  supported: boolean
+  configured: boolean
+  enabled: boolean
+  available: boolean
+  label: string
+  address: string
+  error: string | null
+}
 export type LaunchResult = {
   intent: string
   provider: string
@@ -15,6 +24,7 @@ export type LaunchResult = {
   running: boolean
   requiresRestart: boolean
   hotSwitch: boolean
+  proxy: LaunchProxy
   executable: string
   resources: Array<{ id: string; label: string; location: string }>
   backup: string | null
@@ -49,6 +59,11 @@ export function readLaunchResult(raw: unknown): LaunchResult {
     || typeof raw.remainingMs !== 'number' || !Number.isFinite(raw.remainingMs) || raw.remainingMs < 0
     || ['error', 'committed', 'started', 'restored', 'running', 'requiresRestart', 'hotSwitch', 'canRestore', 'canRetryStart'].some(key => typeof raw[key] !== 'boolean')
     || ['backup', 'pendingBackup'].some(key => raw[key] !== null && !string(raw[key], 48))) throw new Error('本机启动状态返回格式无效')
+  const proxy = raw.proxy
+  if (!object(proxy)
+    || ['supported', 'configured', 'enabled', 'available'].some(key => typeof proxy[key] !== 'boolean')
+    || !string(proxy.label, 256) || !string(proxy.address, 512)
+    || proxy.error !== null && !string(proxy.error)) throw new Error('本机启动状态返回格式无效')
   return raw as unknown as LaunchResult
 }
 

@@ -134,20 +134,31 @@ export function ModelsFetchTable({
 
   function intlBody() {
     if (status === 'loading') return stateRow(t('正在获取…'))
-    if (!rows.length) return stateRow(t('还没有可刷新的提供商：先在账号页添加一个账号'))
+    if (!rows.length) return stateRow(
+      keyword.trim()
+        ? t('没有匹配的提供商')
+        : t('当前筛选条件下没有提供商'),
+    )
     return rows.map(row => {
       const item = row.item
       if (!item) {
-        const at = formatTime(refreshedAt(row.provider))
+        const ts = refreshedAt(row.provider)
+        const at = formatTime(ts)
         return (
           <TableRow key={row.provider}>
             <TableCell>{nameCell(row.label)}</TableCell>
             <TableCell>{sourceCell(row.provider)}</TableCell>
-            <TableCell><Badge variant='outline'>{t('待获取')}</Badge></TableCell>
+            <TableCell>
+              {ts > 0 ? (
+                <Badge variant='outline'>{t('已获取')}</Badge>
+              ) : (
+                <Badge variant='warning'>{t('未获取')}</Badge>
+              )}
+            </TableCell>
             <TableCell>{rateCell('—')}</TableCell>
             <TableCell>{rateCell('—')}</TableCell>
             <TableCell>{rateCell(at || '—')}</TableCell>
-            <TableCell>{rowFetchButton(row)}</TableCell>
+            <TableCell className='sticky right-0 z-[1] bg-surface shadow-[-1px_0_0_var(--hairline)]'>{rowFetchButton(row)}</TableCell>
           </TableRow>
         )
       }
@@ -168,7 +179,7 @@ export function ModelsFetchTable({
             <span className='text-[11.5px] leading-[1.5] text-muted-foreground [overflow-wrap:anywhere]'>{t(note)}</span>
           </TableCell>
           <TableCell>{rateCell(at || '—')}</TableCell>
-          <TableCell>{rowFetchButton(row)}</TableCell>
+          <TableCell className='sticky right-0 z-[1] bg-surface shadow-[-1px_0_0_var(--hairline)]'>{rowFetchButton(row)}</TableCell>
         </TableRow>
       )
     })
@@ -185,7 +196,10 @@ export function ModelsFetchTable({
       <TableHeader>
         <TableRow>
           {cols.map(key => (
-            <TableHead key={key} data-col={key}>{HEAD_LABEL[key]}</TableHead>
+            <TableHead key={key} data-col={key}
+              className={key === 'op' ? 'sticky right-0 top-0 z-[3] bg-[var(--ui-table-head-bg)] shadow-[-1px_0_0_var(--hairline)]' : undefined}>
+              {HEAD_LABEL[key]}
+            </TableHead>
           ))}
         </TableRow>
       </TableHeader>

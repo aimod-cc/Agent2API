@@ -4,6 +4,7 @@ import { signSingle, store } from './checkin-store'
 import { MODE_LABEL, MODE_TITLE, formatShort, modesOf, type CheckinAccount, type ProviderGroup } from './checkin-types'
 import { ProviderLogo } from './checkin-row'
 import { DetailLine, StatusBadge } from './checkin-shared'
+import { CheckinActivityDialog } from './checkin-activity-dialog'
 import { t } from '../i18n'
 import { accountCheckinStatus, checkinActionLabel, checkinPlanProgress } from '../../../ui-shared/checkin-result'
 
@@ -19,9 +20,10 @@ import { accountCheckinStatus, checkinActionLabel, checkinPlanProgress } from '.
  * 承担（见 CenterTab）。
  */
 
-export function AccountLine({ account, group }: {
+export function AccountLine({ account, group, onInspect }: {
   account: CheckinAccount
   group: ProviderGroup
+  onInspect?: (account: CheckinAccount) => void
 }): React.ReactElement {
   const busy = (mode: string) => store.signing.has(`${account.id}:${mode}`)
   const status = accountCheckinStatus(account)
@@ -56,20 +58,30 @@ export function AccountLine({ account, group }: {
       </span>
       <StatusBadge status={status} />
       <span className='flex shrink-0 items-center gap-0.5'>
-        {dailyActivity
-          ? modes.map(mode => (
+        {dailyActivity ? (
+          <>
+            {modes.map(mode => (
+              <Button
+                key={mode}
+                size='xs'
+                variant='ghost'
+                disabled={busy(mode) || !account.available}
+                title={MODE_TITLE[mode]}
+                onClick={() => void signSingle(account.id, mode)}
+              >
+                {busy(mode) ? `${MODE_LABEL[mode] ?? mode}中…` : (MODE_LABEL[mode] ?? mode)}
+              </Button>
+            ))}
             <Button
-              key={mode}
               size='xs'
               variant='ghost'
-              disabled={busy(mode) || !account.available}
-              title={MODE_TITLE[mode]}
-              onClick={() => void signSingle(account.id, mode)}
+              title={t('查看上次保活详情与解除锁定')}
+              onClick={() => onInspect?.(account)}
             >
-              {busy(mode) ? `${MODE_LABEL[mode] ?? mode}中…` : (MODE_LABEL[mode] ?? mode)}
+              {t('详情')}
             </Button>
-          ))
-          : (
+          </>
+        ) : (
             <Button
               size='xs'
               variant='ghost'
@@ -96,24 +108,28 @@ export function DailyAccountList({ entries, showProvider }: {
   entries: Array<{ group: ProviderGroup; accounts: CheckinAccount[] }>
   showProvider: boolean
 }): React.ReactElement {
+  const [inspectAccount, setInspectAccount] = React.useState<CheckinAccount | null>(null)
   const rows = entries.filter(entry => entry.accounts.length > 0)
   if (!rows.length) return <p className='ck-list-empty'>{t('没有符合条件的账号。')}</p>
   return (
-    <div className='ck-account-list'>
-      {rows.map(entry => (
-        <React.Fragment key={entry.group.id}>
-          {showProvider ? <div className='ck-account-group'>
-            <ProviderLogo id={entry.group.id} label={entry.group.label} />
-            <span>{t(entry.group.label)}</span>
-            <span className='text-muted-foreground'>{t('{done} / {total} 个账号已签', {
-              done: entry.group.doneCount, total: entry.group.totalCount,
-            })}</span>
-          </div> : null}
-          {entry.accounts.map(account => (
-            <AccountLine key={account.id} account={account} group={entry.group} />
-          ))}
-        </React.Fragment>
-      ))}
-    </div>
+    <>
+      <div className='ck-account-list'>
+        {rows.map(entry => (
+          <React.Fragment key={entry.group.id}>
+            {showProvider ? <div className='ck-account-group'>
+              <ProviderLogo id={entry.group.id} label={entry.group.label} />
+              <span>{t(entry.group.label)}</span>
+              <span className='text-muted-foreground'>{t('{done} / {total} 个账号已签', {
+                done: entry.group.doneCount, total: entry.group.totalCount,
+              })}</span>
+            </div> : null}
+            {entry.accounts.map(account => (
+              <AccountLine key={account.id} account={account} group={entry.group} onInspect={setInspectAccount} />
+            ))}
+          </React.Fragment>
+        ))}
+      </div>
+      <CheckinActivityDialog account={inspectAccount} onClose={() => setInspectAccount(null)} />
+    </>
   )
 }

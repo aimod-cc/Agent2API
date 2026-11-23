@@ -89,7 +89,7 @@ export function RuntimeCapacityPanel({ api, t, identity = '', onSaved }: {
   const effective = snapshot?.effective
   const usage = snapshot?.usage
   return <div className='space-y-4'>
-    <p className='text-[12px] leading-5 text-subtle'>{t('自动管理按可用内存调节容量；手动设置仍保留内存保护和上游账号限制。')}</p>
+    <p className='text-[12px] leading-5 text-subtle'>{t('自动管理按运行内存预算调节容量；手动设置仍保留内存保护和上游账号限制。')}</p>
     <Select value={draft?.mode || 'auto'} disabled={!draft || busy} onValueChange={value => patch('mode', value)}>
       <SelectTrigger className='w-full' aria-label={t('运行容量')}><SelectValue>{modes.find(mode => mode.value === (draft?.mode || 'auto'))?.label}</SelectValue></SelectTrigger>
       <SelectContent>{modes.map(mode => <SelectItem key={mode.value} value={mode.value}>{mode.label}</SelectItem>)}</SelectContent>

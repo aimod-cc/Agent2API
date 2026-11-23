@@ -15,16 +15,17 @@ pub(super) fn filter_candidates(
     let Some(native) = ctx.native.filter(|native| native.requires_native()) else {
         return Ok(candidates);
     };
+    let requested = ctx
+        .direct_model
+        .as_deref()
+        .unwrap_or_else(|| ctx.body["model"].as_str().unwrap_or(""));
     candidates.retain(|provider| {
-        crate::server::core::custom_providers::get(provider).and_then(|owner| {
-            owner
-                .get("protocol")
-                .and_then(Value::as_str)
-                .and_then(WireProtocol::from_provider)
-        }) == Some(native.protocol)
+        crate::server::core::custom_providers::effective_protocol_for(provider, Some(requested))
+            .as_deref()
+            .and_then(WireProtocol::from_provider)
+            == Some(native.protocol)
             || crate::server::core::providers::subscriptions::native_protocol(provider) == Some(native.protocol)
-            || crate::server::core::plugin_host::script::native::protocol(provider,
-                ctx.direct_model.as_deref().unwrap_or_else(|| ctx.body["model"].as_str().unwrap_or(""))) == Some(native.protocol)
+            || crate::server::core::plugin_host::script::native::protocol(provider, requested) == Some(native.protocol)
             || crate::server::core::plugin_host::script::native::has_protocol(provider, native.protocol)
     });
     if candidates.is_empty() {
@@ -38,16 +39,23 @@ pub(super) fn filter_candidates(
     Ok(candidates)
 }
 
-pub(super) fn eligible(ctx: &ProviderContext<'_>, provider: &str) -> Result<bool, GatewayError> {
+pub(super) fn eligible(
+    ctx: &ProviderContext<'_>,
+    provider: &str,
+    account: Option<&Value>,
+) -> Result<bool, GatewayError> {
     let Some(native) = ctx.native else {
         return Ok(false);
     };
-    let protocol = crate::server::core::custom_providers::get(provider).and_then(|owner| {
-        owner
-            .get("protocol")
-            .and_then(Value::as_str)
-            .and_then(WireProtocol::from_provider)
-    });
+    let requested = ctx
+        .direct_model
+        .as_deref()
+        .or_else(|| account.and_then(crate::server::core::routing_groups::candidate_model))
+        .or_else(|| ctx.body.get("model").and_then(Value::as_str))
+        .unwrap_or("");
+    let protocol = crate::server::core::custom_providers::effective_protocol_for(provider, Some(requested))
+        .as_deref()
+        .and_then(WireProtocol::from_provider);
     let same = protocol == Some(native.protocol);
     if native.requires_native() && !same {
         return Err(GatewayError::bad_request(format!(

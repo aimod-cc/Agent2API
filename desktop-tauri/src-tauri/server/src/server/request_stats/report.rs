@@ -142,6 +142,8 @@ pub(super) struct RangeTotals {
     pub requests: i64,
     pub successful: i64,
     pub tokens: i64,
+    pub cost_usd: f64,
+    pub unpriced_requests: i64,
     pub active_days: i64,
     pub model_totals: Vec<ModelAccum>,
     pub provider_totals: Vec<ProviderAccum>,
@@ -159,6 +161,8 @@ pub(super) fn range_totals(
         requests: 0,
         successful: 0,
         tokens: 0,
+        cost_usd: 0.0,
+        unpriced_requests: 0,
         active_days: 0,
         model_totals: Vec::new(),
         provider_totals: Vec::new(),
@@ -171,12 +175,21 @@ pub(super) fn range_totals(
         totals.requests += day.requests;
         totals.successful += day.successful;
         totals.tokens += day.tokens;
+        totals.cost_usd += day.cost_usd;
+        totals.unpriced_requests += day.unpriced_requests;
         // activeDays 只数**区间内**有请求的天数（补零的日子不算「活跃」）
         if day.requests > 0 {
             totals.active_days += 1;
         }
         for acc in &day.model_tokens {
-            push_model_accum(&mut totals.model_totals, &acc.model, acc.tokens, acc.requests);
+            push_model_accum(
+                &mut totals.model_totals,
+                &acc.model,
+                acc.tokens,
+                acc.requests,
+                acc.cost_usd,
+                acc.unpriced_requests,
+            );
         }
         for acc in &day.provider_stats {
             push_provider_accum(
@@ -185,6 +198,8 @@ pub(super) fn range_totals(
                 acc.requests,
                 acc.successful,
                 acc.tokens,
+                acc.cost_usd,
+                acc.unpriced_requests,
             );
         }
         for acc in &day.account_stats {
@@ -195,40 +210,32 @@ pub(super) fn range_totals(
                 acc.requests,
                 acc.successful,
                 acc.tokens,
+                acc.cost_usd,
+                acc.unpriced_requests,
             );
         }
     }
 
-    // ── 旧聚合行的余量归属 ──────────────────────────────────────
-    // 升级前写出的聚合行没有 `providerStats` 键（读入后是空表），那些天的请求
-    // 因此没有任何 provider 组覆盖。这里把「未被任何组覆盖的余量」补进空 id 组：
-    //   ① 各 provider 之和恒等于区间总量 —— 报表之间能对账，前端把
-    //      `providers` 与 `overview.requests` 并排显示时不会出现对不上的数；
-    //   ② 旧数据落进「未知」组而不是被静默丢掉 —— 契约要求不得给旧数据
-    //      **猜**值（不许补 workbuddy），但「未知」正是它的真实归属，不是猜。
-    // 先求和再借用 `&mut`：闭包持着不可变借用时不能同时改这张表。
     let covered_requests: i64 = totals.provider_totals.iter().map(|item| item.requests).sum();
     let covered_successful: i64 = totals.provider_totals.iter().map(|item| item.successful).sum();
     let covered_tokens: i64 = totals.provider_totals.iter().map(|item| item.tokens).sum();
-    // `max(0)` 兜住手改文件造成的「拆分比总量还多」；余量全零时这里仍会建出
-    // 一个空组，但 `build_providers` 会把全零的组滤掉（见那边的 `requests > 0
-    // || tokens > 0`），所以不会凭空冒出空的「未知」项
+    let covered_cost: f64 = totals.provider_totals.iter().map(|item| item.cost_usd).sum();
+    let covered_unpriced: i64 = totals.provider_totals.iter().map(|item| item.unpriced_requests).sum();
     push_provider_accum(
         &mut totals.provider_totals,
         "",
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
+        (totals.cost_usd - covered_cost).max(0.0),
+        (totals.unpriced_requests - covered_unpriced).max(0),
     );
 
-    // ── 账号维度同理 ────────────────────────────────────────────
-    // `accountStats` 是本次新增的键，**所有**已有聚合行都没有它，所以这一段
-    // 在这里比 provider 那一段更常命中：升级后第一次打开报表，区间内几乎全部
-    // 请求都会落进「未知账号」组。这是如实反映「那些行没记账号身份」，
-    // 而不是我们丢数据 —— 明细里其实有，但聚合要跨过年份，只能按聚合算。
     let covered_requests: i64 = totals.account_totals.iter().map(|item| item.requests).sum();
     let covered_successful: i64 = totals.account_totals.iter().map(|item| item.successful).sum();
     let covered_tokens: i64 = totals.account_totals.iter().map(|item| item.tokens).sum();
+    let covered_cost: f64 = totals.account_totals.iter().map(|item| item.cost_usd).sum();
+    let covered_unpriced: i64 = totals.account_totals.iter().map(|item| item.unpriced_requests).sum();
     push_account_accum(
         &mut totals.account_totals,
         "",
@@ -236,22 +243,35 @@ pub(super) fn range_totals(
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
+        (totals.cost_usd - covered_cost).max(0.0),
+        (totals.unpriced_requests - covered_unpriced).max(0),
     );
     totals
 }
 
 /// 把一次请求（或一天的累计）并进按模型的累计表。
 /// 线性查找即可：模型数量是个位到十位级，建 HashMap 反而更慢。
-pub(super) fn push_model_accum(list: &mut Vec<ModelAccum>, model: &str, tokens: i64, requests: i64) {
+pub(super) fn push_model_accum(
+    list: &mut Vec<ModelAccum>,
+    model: &str,
+    tokens: i64,
+    requests: i64,
+    cost_usd: f64,
+    unpriced_requests: i64,
+) {
     match list.iter_mut().find(|item| item.model == model) {
         Some(item) => {
             item.tokens += tokens;
             item.requests += requests;
+            item.cost_usd += cost_usd;
+            item.unpriced_requests += unpriced_requests;
         }
         None => list.push(ModelAccum {
             model: model.to_string(),
             requests,
             tokens,
+            cost_usd,
+            unpriced_requests,
         }),
     }
 }
@@ -321,52 +341,41 @@ pub(super) fn model_breakdown_json(list: &[ModelAccum]) -> Vec<Value> {
                 },
                 "tokens": item.tokens,
                 "requests": item.requests,
+                "costUsd": item.cost_usd,
+                "unpricedRequests": item.unpriced_requests,
             })
         })
         .collect()
 }
 
-/// 把一批（一条或一天的）请求并进按 provider 的累计表。
-///
-/// 与 `push_model_accum` 同一取舍：provider 数量是个位数，线性查找比 HashMap
-/// 更快也更省（不必分配键）。`provider` 为空串时**照常建组**，不丢弃 ——
-/// 旧数据与「转发前失败」的请求都落在这一组里，丢掉它们会让
-/// 「各 provider 之和」对不上区间总量。
 pub(super) fn push_provider_accum(
     list: &mut Vec<ProviderAccum>,
     provider: &str,
     requests: i64,
     successful: i64,
     tokens: i64,
+    cost_usd: f64,
+    unpriced_requests: i64,
 ) {
     match list.iter_mut().find(|item| item.provider == provider) {
         Some(item) => {
             item.requests += requests;
             item.successful += successful;
             item.tokens += tokens;
+            item.cost_usd += cost_usd;
+            item.unpriced_requests += unpriced_requests;
         }
         None => list.push(ProviderAccum {
             provider: provider.to_string(),
             requests,
             successful,
             tokens,
+            cost_usd,
+            unpriced_requests,
         }),
     }
 }
 
-/// 把一批（一条或一天的）请求并进按账号的累计表。
-///
-/// ── 身份只认 account_id ─────────────────────────────────────
-/// 匹配按 `account_id` 走，**名字不参与判等**：账号可以在账号页改名，
-/// 按名字匹配会让同一个账号在改名前后的两条聚合行分家，报表里出现两个半份的
-/// 「同一账号」。名字在这里只承担一件事：**首次建组时留下的展示名快照**。
-/// 后续同一账号的累计里若带了新名字，就更新快照（账号改名后报表跟着显示新名字，
-/// 这也正是账号页的观感），而不是保留旧名。
-///
-/// ── 空 id 的处理 ─────────────────────────────────────────────
-/// 与 `push_provider_accum` 同一取舍：`account_id` 为空串时**照常建组**，不丢弃 ——
-/// 走默认登录态转发的请求、以及旧版本写出的行都落在这一组里，
-/// 丢掉它们会让「各账号之和」对不上区间总量。
 pub(super) fn push_account_accum(
     list: &mut Vec<AccountAccum>,
     account_id: &str,
@@ -374,14 +383,16 @@ pub(super) fn push_account_accum(
     requests: i64,
     successful: i64,
     tokens: i64,
+    cost_usd: f64,
+    unpriced_requests: i64,
 ) {
     match list.iter_mut().find(|item| item.account_id == account_id) {
         Some(item) => {
             item.requests += requests;
             item.successful += successful;
             item.tokens += tokens;
-            // 名字只做「快照刷新」：非空才覆盖，绝不清空已有的名字
-            // （某些请求拿不到名字而另一些拿到了，取有名字的那一份）
+            item.cost_usd += cost_usd;
+            item.unpriced_requests += unpriced_requests;
             if !account_name.is_empty() {
                 item.account_name = account_name.to_string();
             }
@@ -392,6 +403,8 @@ pub(super) fn push_account_accum(
             requests,
             successful,
             tokens,
+            cost_usd,
+            unpriced_requests,
         }),
     }
 }
@@ -452,6 +465,8 @@ pub(super) fn build_providers(totals: &[ProviderAccum]) -> Vec<Value> {
                 "success": item.successful,
                 "failures": (item.requests - item.successful).max(0),
                 "totalTokens": item.tokens,
+                "costUsd": item.cost_usd,
+                "unpricedRequests": item.unpriced_requests,
             })
         })
         .collect()
@@ -503,6 +518,8 @@ pub(super) fn build_models(totals: &[ModelAccum]) -> Vec<Value> {
                 },
                 "requests": item.requests,
                 "totalTokens": item.tokens,
+                "costUsd": item.cost_usd,
+                "unpricedRequests": item.unpriced_requests,
             })
         })
         .collect()
@@ -549,6 +566,8 @@ pub(super) fn build_accounts(totals: &[AccountAccum]) -> Vec<Value> {
                 "success": item.successful,
                 "failures": (item.requests - item.successful).max(0),
                 "totalTokens": item.tokens,
+                "costUsd": item.cost_usd,
+                "unpricedRequests": item.unpriced_requests,
             })
         })
         .collect()
@@ -579,9 +598,35 @@ pub(super) fn build_accounts(totals: &[AccountAccum]) -> Vec<Value> {
 /// 序列化失败理论上不可能（字段全是 i64 / String / Option<String>），但仍然
 /// 不做 unwrap（panic=abort 下会带走整个应用）：退化成一个空对象，
 /// 前端那一行显示空白，比进程消失好。
-pub(super) fn entry_json(entry: &RequestEntry) -> Value {
+pub(super) fn entry_json(
+    entry: &RequestEntry,
+    pricing: &crate::server::core::model_pricing::ModelPricingSettings,
+) -> Value {
     let Ok(mut value) = serde_json::to_value(entry) else {
         return Value::Object(serde_json::Map::new());
+    };
+    let vision_mode = entry.route.pointer("/visionCompatibility/mode").and_then(Value::as_str).unwrap_or("");
+    let failed = !(200..300).contains(&entry.status) || entry.error.as_deref().is_some_and(|e| !e.is_empty());
+    let cost_calc = if entry.status == 0 || (failed && vision_mode != "assist_call") {
+        None
+    } else {
+        crate::server::core::model_pricing::calc::calc_request_cost_detail(
+            pricing,
+            &entry.provider,
+            &entry.model,
+            &entry.upstream_model,
+            entry.ts,
+            entry.prompt_tokens,
+            entry.completion_tokens,
+            entry.cache_read_tokens,
+            entry.cache_creation_tokens,
+            entry.cache_creation_1h_tokens,
+        )
+    };
+    let (cost_usd, priced, price_source) = match cost_calc {
+        None => (None, false, None),
+        Some(None) => (entry.cost_usd, entry.cost_usd.is_some(), None),
+        Some(Some(detail)) => (Some(detail.cost_usd), true, Some(detail.source)),
     };
     if let Some(object) = value.as_object_mut() {
         object.insert("clientLabel".into(), json!(crate::server::core::client::display_name(
@@ -598,14 +643,42 @@ pub(super) fn entry_json(entry: &RequestEntry) -> Value {
                 None => Value::Null,
             },
         );
+        object.insert("costUsd".to_string(), json!(cost_usd));
+        object.insert("costPriced".to_string(), Value::Bool(priced));
+        object.insert("priceSource".to_string(), json!(price_source));
     }
     value
 }
 
 /// 列表页轻量行转 JSON，契约与 `entry_json` 展示列一致，但省掉大字段拆装。
-pub(super) fn list_entry_json(row: &super::record::RequestListRow) -> Value {
+pub(super) fn list_entry_json(
+    row: &super::record::RequestListRow,
+    pricing: &crate::server::core::model_pricing::ModelPricingSettings,
+) -> Value {
     let phase_elapsed = row.phase_started_at.map(|started| (now_ms() - started).max(0));
-    let mut object = serde_json::Map::with_capacity(40);
+    let failed = !(200..300).contains(&row.status) || row.error.as_deref().is_some_and(|e| !e.is_empty());
+    let cost_calc = if row.status == 0 || (failed && row.vision_mode != "assist_call") {
+        None
+    } else {
+        crate::server::core::model_pricing::calc::calc_request_cost_detail(
+            pricing,
+            &row.provider,
+            &row.model,
+            &row.upstream_model,
+            row.ts,
+            row.prompt_tokens,
+            row.completion_tokens,
+            row.cache_read_tokens,
+            row.cache_creation_tokens,
+            row.cache_creation_1h_tokens,
+        )
+    };
+    let (cost_usd, priced, price_source) = match cost_calc {
+        None => (None, false, None),
+        Some(None) => (row.cost_usd, row.cost_usd.is_some(), None),
+        Some(Some(detail)) => (Some(detail.cost_usd), true, Some(detail.source)),
+    };
+    let mut object = serde_json::Map::with_capacity(44);
     object.insert("rowId".into(), json!(row.row_id));
     object.insert("id".into(), json!(row.id));
     object.insert("ts".into(), json!(row.ts));
@@ -621,7 +694,12 @@ pub(super) fn list_entry_json(row: &super::record::RequestListRow) -> Value {
     object.insert("completionTokens".into(), json!(row.completion_tokens));
     object.insert("totalTokens".into(), json!(row.total_tokens));
     object.insert("cacheReadTokens".into(), json!(row.cache_read_tokens));
+    object.insert("cacheCreationTokens".into(), json!(row.cache_creation_tokens));
+    object.insert("cacheCreation1hTokens".into(), json!(row.cache_creation_1h_tokens));
     object.insert("credit".into(), json!(row.credit));
+    object.insert("costUsd".into(), json!(cost_usd));
+    object.insert("costPriced".into(), Value::Bool(priced));
+    object.insert("priceSource".into(), json!(price_source));
     object.insert("provider".into(), json!(row.provider));
     object.insert("providerLabel".into(), Value::String(provider_label(&row.provider)));
     object.insert("clientModel".into(), json!(row.client_model));

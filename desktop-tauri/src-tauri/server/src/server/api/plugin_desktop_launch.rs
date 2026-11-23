@@ -4,7 +4,7 @@ use axum::{body::Bytes, extract::{ConnectInfo, Query, State}, http::HeaderMap, r
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::server::{access::local_session::{self, Source}, core::plugin_host::wasm::desktop_launch::{self, operations::Selection},
+use crate::server::{access::local_session::{self, Source}, core::plugin_host::wasm::desktop_launch::{self, operations::{PrepareSelection, Selection}},
     errors::management_error, http::ok_json, ServerState};
 
 #[derive(Deserialize)]
@@ -44,7 +44,7 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, String> {
 
 pub async fn prepare(State(state): State<ServerState>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
     let source = match source(peer, &headers) { Ok(source) => source, Err(message) => return management_error(403, message) };
-    let selection = match parse(&body) { Ok(selection) => selection, Err(error) => return response(Err(error)) };
+    let selection: PrepareSelection = match parse(&body) { Ok(selection) => selection, Err(error) => return response(Err(error)) };
     let Some(db) = state.db().cloned() else { return response(Err("账号数据库不可用".into())); };
     response(desktop_launch::prepare(source, state.store().clone(), db, selection).await)
 }

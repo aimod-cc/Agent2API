@@ -1,4 +1,4 @@
-//! 出网代理：手动配置、Clash Verge 端点与代理池引用的归一、解析和展示。
+//! 出网代理：手动配置、EasyClash 端点与代理池引用的归一、解析和展示。
 //! 旧订阅来源保留记录，但明确解析为不可用。
 //! 真实网络请求由 `core::egress` 负责；账号轮询复用 `core::proxy_rotate`。
 
@@ -187,7 +187,7 @@ pub fn normalize_account_proxy(input: &Value) -> Result<Option<Value>, ProxyConf
     if source == "clash" {
         let listener_uid = clean_string(object.get("listenerUid"), MAX_LABEL_LENGTH);
         if listener_uid.is_empty() {
-            return Err(ProxyConfigError::new("缺少 Clash 监听器 uid"));
+            return Err(ProxyConfigError::new("缺少 EasyClash 监听器 uid"));
         }
         return Ok(Some(json!({ "source": "clash", "listenerUid": listener_uid })));
     }
@@ -530,23 +530,23 @@ pub fn resolve_account_proxy(config: Option<&Value>) -> Option<ProxyResolution> 
         let detail = snapshot.error.as_ref()
             .map(|error| format!("（{error}）"))
             .unwrap_or_default();
-        return Some(ProxyResolution::Failed(format!("Clash Verge 配置不可用{detail}")));
+        return Some(ProxyResolution::Failed(format!("EasyClash 配置不可用{detail}")));
     }
     let listener_uid = object.get("listenerUid").and_then(Value::as_str).unwrap_or("");
     let (port, label) = if listener_uid == CLASH_MIXED_UID {
         let Some(port) = snapshot.mixed_port else {
-            return Some(ProxyResolution::Failed("Clash Verge 未启用混合端口".to_string()));
+            return Some(ProxyResolution::Failed("EasyClash 未启用混合端口".to_string()));
         };
-        (port, format!("Clash 混合端口 {port}"))
+        (port, format!("EasyClash 混合端口 {port}"))
     } else {
         let Some(listener) = snapshot.listeners.iter().find(|item| item.uid == listener_uid) else {
             return Some(ProxyResolution::Failed(format!(
-                "Clash Verge 中找不到监听器「{listener_uid}」（可能已在 Clash 中删除）"
+                "EasyClash 中找不到端口映射「{listener_uid}」（可能已在 EasyClash 中删除）"
             )));
         };
         if !listener.enabled {
             return Some(ProxyResolution::Failed(format!(
-                "Clash Verge 监听器「{}」已禁用", listener.name
+                "EasyClash 端口映射「{}」已禁用", listener.name
             )));
         }
         (listener.port, format!("{}（:{}）", listener.name, listener.port))

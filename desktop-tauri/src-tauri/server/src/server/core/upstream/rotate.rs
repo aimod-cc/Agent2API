@@ -230,7 +230,8 @@ fn select_target_account_sync(
     // 的计时由它维持。
     let settings = request_routing.settings;
     let ttl = routing::sticky_ttl_ms(settings.sticky);
-    let snap = service.route.snapshot_for_model(conv_key, keys.request_model(), now, ttl);
+    let mut snap = service.route.snapshot_for_model(conv_key, keys.request_model(), now, ttl);
+    service.route.merge_scoped_sunk(&accounts, keys, now, &mut snap.sunk);
     // 轮转游标只在「本请求的第一次选路」前进：429 顺延的后续选路沿用同一
     // 起点往后走，否则一条请求会连跳好几位。
     //
@@ -747,7 +748,8 @@ pub(super) fn pick_next_account(
     // 顺延不走粘性（粘住的是「答对了的账号」，刚失败的那个不该被粘回来）；
     // 空会话键使 sticky_lookup 直接返回 None，其余快照（垫底 / 休息 / 熔断）
     // 照常参与排序
-    let snap = service.route.snapshot("", now, 0);
+    let mut snap = service.route.snapshot("", now, 0);
+    service.route.merge_scoped_sunk(&candidates, keys, now, &mut snap.sunk);
     let meta = routing::PlanMeta {
         strategy: settings.strategy,
         sunk: &snap.sunk,

@@ -1,32 +1,76 @@
 use serde_json::Value;
 
-use crate::server::config::error_policy::{CooldownScope, ErrorKind};
+use crate::server::config::error_policy::{CooldownScope, ErrorKind, PluginErrorClassification};
 use crate::server::core::providers::adapter::UpstreamErrorClass;
 use crate::server::errors::GatewayError;
 
-pub(super) fn machine_code(body: &Value) -> String {
+pub(super) fn candidate_codes(body: &Value) -> Vec<String> {
+    let mut codes = Vec::new();
     for key in ["providerCode", "provider_code", "code", "upstreamCode", "upstream_code", "type"] {
         for value in [body, &body["error"], &body["detail"]] {
-            if let Some(text) = value.get(key).and_then(Value::as_str).filter(|text| !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control)) { return text.to_string(); }
-            if let Some(number) = value.get(key).and_then(Value::as_i64) { return number.to_string(); }
+            if let Some(text) = value.get(key).and_then(Value::as_str)
+                .filter(|text| !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control))
+            {
+                if !codes.iter().any(|existing| existing == text) {
+                    codes.push(text.to_string());
+                }
+            }
+            if let Some(number) = value.get(key).and_then(Value::as_i64) {
+                let text = number.to_string();
+                if !codes.iter().any(|existing| existing == &text) {
+                    codes.push(text);
+                }
+            }
         }
     }
-    String::new()
+    codes
 }
 
-pub(super) fn kind(provider: &str, class: &UpstreamErrorClass, status: u16, code: &str) -> ErrorKind {
+pub(super) fn machine_code(body: &Value) -> String {
+    candidate_codes(body).into_iter().next().unwrap_or_default()
+}
+
+pub(super) fn match_classification<'a>(
+    classifications: &'a [PluginErrorClassification],
+    status: u16,
+    codes: &[String],
+) -> Option<&'a PluginErrorClassification> {
+    let mut best: Option<(&PluginErrorClassification, (bool, bool))> = None;
+    for item in classifications {
+        let code_ok = item.codes.is_empty() || item.codes.iter().any(|c| codes.iter().any(|cand| cand == c));
+        let status_ok = item.statuses.is_empty() || item.statuses.contains(&status);
+        if !code_ok || !status_ok { continue; }
+        let score = (!item.codes.is_empty(), !item.statuses.is_empty());
+        if best.is_none_or(|(_, prev)| score > prev) {
+            best = Some((item, score));
+        }
+    }
+    best.map(|(item, _)| item)
+}
+
+pub(super) fn kind(
+    provider: &str,
+    class: &UpstreamErrorClass,
+    status: u16,
+    code: &str,
+    codes: &[String],
+    classifications: &[PluginErrorClassification],
+) -> ErrorKind {
+    if let Some(declared) = match_classification(classifications, status, codes) {
+        return declared.kind;
+    }
     if matches!(class, UpstreamErrorClass::ContentBlocked { .. }) { return ErrorKind::Content; }
     if matches!(class, UpstreamErrorClass::TokenExpired { .. }) { return ErrorKind::Auth; }
     let upstream = match class {
         UpstreamErrorClass::QuotaLimited { upstream_code, .. } | UpstreamErrorClass::Fatal { upstream_code, .. } => *upstream_code,
         _ => None,
-    }.or_else(|| code.parse::<i64>().ok());
-    if matches!(provider, "workbuddy" | "workbuddy-intl") {
+    }.or_else(|| codes.iter().find_map(|cand| cand.parse::<i64>().ok()));
+    if classifications.is_empty() && matches!(provider, "workbuddy" | "workbuddy-intl") {
         if matches!(upstream, Some(14003 | 6001 | 6002 | 6005 | 6006)) { return ErrorKind::Transient; }
         if matches!(upstream, Some(14001 | 14012 | 14013 | 14014 | 14018 | 14019)) { return ErrorKind::Quota; }
         if matches!(upstream, Some(6003 | 6004)) { return ErrorKind::RateLimit; }
     }
-    if matches!(provider, "zcode" | "zcode-intl") {
+    if classifications.is_empty() && matches!(provider, "zcode" | "zcode-intl") {
         if matches!(upstream, Some(1005 | 1308 | 1310)) { return ErrorKind::Quota; }
         if upstream == Some(1113) { return ErrorKind::Balance; }
     }
@@ -100,16 +144,42 @@ pub(in crate::server::core::upstream) fn gateway_class(error: &GatewayError) -> 
     })
 }
 
-pub(super) fn hard_stop(status: u16, code: &str) -> bool {
-    matches!(status, 403 | 409 | 428 | 499)
-        || code.ends_with("cleanup_unconfirmed") || code.starts_with("claude_session_")
-        || matches!(code, "permission_denied" | "access_denied" | "permission_error" | "validation_required"
-            | "tabbit_submission_unconfirmed" | "tabbit_account_changed" | "tabbit_state_conflict"
-            | "claude_response_started" | "account_origin_authorization_required"
-            | "plugin_busy" | "gateway_busy" | "account_busy" | "plugin_response_started" | "plugin_resource_limit"
-            | "plugin_protocol_error" | "plugin_trap" | "forbidden" | "native_helper_not_authorized" | "native_helper_unavailable"
-            | "request_replay_blocked" | "web_tools_invalid_request" | "gateway_capability_missing" | "aborted" | "cancelled"
-            | "upstream_submission_unconfirmed" | "runtime_invalid_error_metadata" | "runtime_protocol_error" | "runtime_stream_interrupted"
-            | "runtime_classification_unavailable" | "runtime_transport_unavailable" | "network_cleanup_unconfirmed"
-            | "runtime_upstream_error" | "builtin_runtime_error" | "runtime_sdk_content")
+pub(super) fn hard_stop(status: u16, code: &str, codes: &[String]) -> bool {
+    let matches_stop_code = |item: &str| {
+        item.ends_with("cleanup_unconfirmed")
+            || item.starts_with("claude_session_")
+            || matches!(
+                item,
+                "validation_required"
+                    | "tabbit_submission_unconfirmed"
+                    | "tabbit_account_changed"
+                    | "tabbit_state_conflict"
+                    | "claude_response_started"
+                    | "account_origin_authorization_required"
+                    | "plugin_busy"
+                    | "gateway_busy"
+                    | "account_busy"
+                    | "plugin_response_started"
+                    | "plugin_resource_limit"
+                    | "plugin_protocol_error"
+                    | "plugin_trap"
+                    | "native_helper_not_authorized"
+                    | "native_helper_unavailable"
+                    | "request_replay_blocked"
+                    | "web_tools_invalid_request"
+                    | "gateway_capability_missing"
+                    | "aborted"
+                    | "cancelled"
+                    | "upstream_submission_unconfirmed"
+                    | "runtime_invalid_error_metadata"
+                    | "runtime_protocol_error"
+                    | "runtime_stream_interrupted"
+                    | "runtime_classification_unavailable"
+                    | "runtime_transport_unavailable"
+                    | "network_cleanup_unconfirmed"
+                    | "builtin_runtime_error"
+                    | "runtime_sdk_content"
+            )
+    };
+    status == 499 || (!code.is_empty() && matches_stop_code(code)) || codes.iter().any(|item| matches_stop_code(item))
 }
