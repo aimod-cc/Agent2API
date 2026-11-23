@@ -106,7 +106,8 @@ impl Interactions {
             }
             Some(Captcha::Alicom4(captcha)) => {
                 if !options.allows("login.captcha.alicom4.v1") || options.provider != "codar"
-                    || captcha.engine != "alicom4" || captcha.captcha_id != "bb7f810ecc9f6d21dcf72bcae120c8c5" {
+                    || captcha.engine != "alicom4"
+                    || captcha.captcha_id != crate::server::core::login::sms::ALICOM4_CODAR_CAPTCHA_ID {
                     return Err(super::error("登录验证码声明无效"));
                 }
             }
@@ -163,10 +164,7 @@ impl Interactions {
                 }
             }
             Some(Captcha::Alicom4(_)) => {
-                let reply = params["captcha"].as_object().ok_or_else(|| super::error("请完成当前步骤的人机验证"))?;
-                let keys = ["lot_number", "captcha_output", "pass_token", "gen_time"];
-                if reply.len() != keys.len() || reply.iter().any(|(key, value)| !keys.contains(&key.as_str())
-                    || value.as_str().is_none_or(|value| value.is_empty() || value.len() > 8192 || value.chars().any(char::is_control))) {
+                if !crate::server::core::login::sms::check_alicom4_response(&params["captcha"]) {
                     return Err(super::error("请完成当前步骤的人机验证"));
                 }
             }

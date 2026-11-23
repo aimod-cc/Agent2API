@@ -16,6 +16,8 @@ pub(crate) struct SmsConfig {
     pub code_max_length: usize,
     pub resend_after_seconds: u64,
     pub expires_after_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<super::sms::Challenge>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,6 +49,12 @@ impl SmsConfig {
             {
                 return Err(GatewayError::with_status(502, "插件返回的手机区号声明无效"));
             }
+        }
+        if let Some(challenge) = &self.challenge {
+            if !matches!(challenge, super::sms::Challenge::Alicom4 { .. }) {
+                return Err(GatewayError::with_status(502, "插件返回的短信初始人机验证不支持"));
+            }
+            challenge.validate()?;
         }
         Ok(())
     }

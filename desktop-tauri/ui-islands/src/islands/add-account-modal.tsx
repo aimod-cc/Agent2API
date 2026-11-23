@@ -30,7 +30,7 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  Badge, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Alert, Badge, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
   NavItem, NavList, Sidebar,
 } from '@ui'
 
@@ -360,6 +360,56 @@ function AddAccountFormContent({
   )
 }
 
+type ModalErrorBoundaryProps = {
+  withDialog?: boolean
+  onDismiss?: () => void
+  children: React.ReactNode
+}
+
+class ModalErrorBoundary extends React.Component<ModalErrorBoundaryProps, { error: Error | null; attempt: number }> {
+  state: { error: Error | null; attempt: number } = { error: null, attempt: 0 }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    console.error('[add-account-modal] render error', error, info)
+  }
+
+  render(): React.ReactNode {
+    if (!this.state.error) {
+      return <React.Fragment key={this.state.attempt}>{this.props.children}</React.Fragment>
+    }
+    const content = (
+      <DialogContent className='max-w-md'>
+        <DialogHeader>
+          <DialogTitle>{t('添加账号')}</DialogTitle>
+        </DialogHeader>
+        <DialogBody>
+          <Alert variant='destructive'>{t('界面渲染异常，请重试或关闭后重新打开。')}</Alert>
+        </DialogBody>
+        <DialogFooter>
+          <Button type='button' variant='outline' onClick={() => this.setState(prev => ({ error: null, attempt: prev.attempt + 1 }))}>
+            {t('重试')}
+          </Button>
+          {this.props.onDismiss ? (
+            <Button type='button' variant='ghost' onClick={this.props.onDismiss}>
+              {t('关闭')}
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    )
+    if (!this.props.withDialog) return content
+    return (
+      <Dialog open onOpenChange={open => { if (!open) this.props.onDismiss?.() }}>
+        {content}
+      </Dialog>
+    )
+  }
+}
+
 function AddAccountModal({
   onClose,
   onReady,
@@ -432,13 +482,15 @@ function AddAccountModal({
     }}>
       <AddAccountProxyProvider>
         <AddAccountSettingsProvider contextKey={`${state.provider}:${state.providerHint}:${state.presetKey}`}>
-          <AddAccountFormContent
-            state={state}
-            version={version}
-            availability={availability}
-            formFootHost={formFootHost}
-            backToPick={backToPick}
-          />
+          <ModalErrorBoundary key={`${state.provider}:${state.providerHint}:${state.presetKey}`} onDismiss={backToPick}>
+            <AddAccountFormContent
+              state={state}
+              version={version}
+              availability={availability}
+              formFootHost={formFootHost}
+              backToPick={backToPick}
+            />
+          </ModalErrorBoundary>
         </AddAccountSettingsProvider>
       </AddAccountProxyProvider>
     </Dialog>
@@ -489,17 +541,19 @@ function mountModal(initialProvider?: string): void {
   document.body.append(host)
   root = createRoot(host)
   root.render(
-    <AddAccountModal
-      onClose={closeModal}
-      initialProvider={initialProvider}
-      onReady={next => {
-        handle = next
-        if (!next) return
-        const action = pendingAction
-        pendingAction = null
-        action?.()
-      }}
-    />,
+    <ModalErrorBoundary withDialog onDismiss={closeModal}>
+      <AddAccountModal
+        onClose={closeModal}
+        initialProvider={initialProvider}
+        onReady={next => {
+          handle = next
+          if (!next) return
+          const action = pendingAction
+          pendingAction = null
+          action?.()
+        }}
+      />
+    </ModalErrorBoundary>,
   )
 }
 

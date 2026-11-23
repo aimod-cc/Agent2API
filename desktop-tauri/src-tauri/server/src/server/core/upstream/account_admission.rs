@@ -30,7 +30,7 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
                 if connection.try_rebind(target.account_id.clone(), limit) { return Ok(target); }
                 if pinned.is_none() {
                     if let Some(key) = target.attempt_key() { excluded.push(key); }
-                    if excluded.len().saturating_sub(tried.len()) < 32 { continue; }
+                    if excluded.len().saturating_sub(tried.len()) < super::MAX_ROUTE_ATTEMPTS { continue; }
                 }
             }
             Err(error) if error.code.as_deref() == Some("account_busy") || excluded.len() > tried.len() => {},

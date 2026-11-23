@@ -172,17 +172,17 @@ export function ProviderPricingDialog({ context, onClose, onSaved }: {
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('开始时间')}</FieldLabel>
                         <Input value={w.start} placeholder='09:00'
-                          onChange={e => setWindows(prev => prev.map((it, i) => i === idx ? { ...it, start: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setWindows(prev => prev.map((it, i) => i === idx ? { ...it, start: v } : it)) }} />
                       </Field>
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('结束时间')}</FieldLabel>
                         <Input value={w.end} placeholder='18:00'
-                          onChange={e => setWindows(prev => prev.map((it, i) => i === idx ? { ...it, end: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setWindows(prev => prev.map((it, i) => i === idx ? { ...it, end: v } : it)) }} />
                       </Field>
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('时段倍率')}</FieldLabel>
                         <Input type='number' min='0.001' max='1000' step='any' value={w.rate} placeholder='2.0'
-                          onChange={e => setWindows(prev => prev.map((it, i) => i === idx ? { ...it, rate: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setWindows(prev => prev.map((it, i) => i === idx ? { ...it, rate: v } : it)) }} />
                       </Field>
                     </div>
                   </div>

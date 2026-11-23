@@ -10,7 +10,13 @@ export function kindLabel(value: string): string {
   return { gateway: t('本网关'), official: t('官方直连'), relay: t('第三方中转'), local: t('本机服务') }[value] || value
 }
 export function detectionLabel(client: AgentClient): string {
-  return { missing: t('未检测到'), uninitialized: t('尚未初始化'), read_error: t('读取失败'), unsupported: t('仅可读取'), ready: t('配置可读写') }[client.detectionState]
+  return {
+    missing: t('尚未安装'),
+    uninitialized: t('已安装 · 暂无配置'),
+    read_error: t('读取配置失败'),
+    unsupported: t('仅支持查看'),
+    ready: t('已检测 · 暂无配置'),
+  }[client.detectionState]
 }
 export function defaultOperation(client: AgentClient): AgentOperation { return client.configMode === 'single' ? 'default' : 'apply' }
 export function blankModel(): AgentModel { return { id: '', name: '', reasoningLevels: [], effort: '' } }

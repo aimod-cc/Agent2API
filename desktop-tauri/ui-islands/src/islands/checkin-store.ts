@@ -303,15 +303,30 @@ export function patch(next: Partial<Store>): void {
 const CENTER_SKIP_MS = 4_000
 const CENTER_FRESH_MS = 15_000
 let centerLoadedAt = 0
+let centerMutationEpoch = 0
 
 export function invalidateCenter(): void {
   centerLoadedAt = 0
 }
 
+function touchCenterMutation(): void {
+  centerMutationEpoch += 1
+  centerLoadedAt = Date.now()
+}
+
+function sameStringList(left: string[] | null | undefined, right: string[] | null | undefined): boolean {
+  return Boolean(left && right) && left!.length === right!.length && left!.every((item, index) => item === right![index])
+}
+
+function sameTravelDraft(draft: string | null, times: string[] | undefined): boolean {
+  return draft !== null && draft.replace(/\s+/g, '') === (times ?? []).join(',')
+}
+
 const refreshCenter = createRefreshRequest(async isCurrent => {
+  const fetchEpoch = centerMutationEpoch
   try {
     const data = await bridge().getCheckinCenter?.()
-    if (!isCurrent()) return
+    if (!isCurrent() || store.saving || fetchEpoch !== centerMutationEpoch) return
     if (!data) {
       patch({ loaded: true, loadError: '后端未返回签到中心数据' })
       return
@@ -322,11 +337,14 @@ const refreshCenter = createRefreshRequest(async isCurrent => {
       onboarding: onboardingFromCenter(data, store.onboarding),
       loaded: true,
       loadError: '',
-      keepaliveDraft: null,
-      travelTimesDraft: null,
+      // 保留尚未保存的本地编辑草稿，避免后台轮询或回读把输入框/列表清空
+      keepaliveDraft: sameStringList(store.keepaliveDraft, data.keepalive?.models) ? null : store.keepaliveDraft,
+      travelTimesDraft: sameTravelDraft(store.travelTimesDraft, data.travel?.times) ? null : store.travelTimesDraft,
     })
   } catch (error) {
-    if (isCurrent()) patch({ loaded: true, loadError: errorMessage(error) })
+    if (isCurrent() && !store.saving && fetchEpoch === centerMutationEpoch) {
+      patch({ loaded: true, loadError: errorMessage(error) })
+    }
   }
 })
 
@@ -494,7 +512,10 @@ export async function toggleMaster(enabled: boolean): Promise<void> {
   await run(
     async () => {
       const data = await bridge().saveAutoCheckin?.({ enabled })
-      if (data) patch({ center: withAuto(store.center, data) })
+      if (data) {
+        touchCenterMutation()
+        patch({ center: withAuto(store.center, data) })
+      }
     },
     { success: enabled ? '✅ 定时签到已开启' : '定时签到已关闭', reload: false, failure: '保存失败' },
   )
@@ -510,6 +531,7 @@ export async function saveScheduleEntry(
     async () => {
       const data = await bridge().saveCheckinSchedule?.(payload)
       if (!data) throw new Error(t('后端未返回定时签到数据'))
+      touchCenterMutation()
       patch({
         center: withAuto(store.center, data),
         ...(options.closeEditor === false ? {} : { editingId: null }),
@@ -552,7 +574,9 @@ export async function saveKeepaliveModels(models: string[], apiKeyId?: string | 
   await run(
     async () => {
       const data = await bridge().saveCheckinKeepalive?.(models, apiKeyId)
-      if (data && store.center) {
+      if (!data) throw new Error('后端未返回保活配置')
+      touchCenterMutation()
+      if (store.center) {
         patch({ center: { ...store.center, keepalive: data }, keepaliveDraft: null })
       }
     },
@@ -565,7 +589,9 @@ export async function saveTravel(body: Record<string, unknown>): Promise<void> {
   await run(
     async () => {
       const data = await bridge().saveTravelSchedule?.(body)
-      if (data && store.center) {
+      if (!data) throw new Error('后端未返回猫猫旅行排程')
+      touchCenterMutation()
+      if (store.center) {
         patch({
           center: { ...store.center, travel: data },
           ...(body.times ? { travelTimesDraft: null } : {}),

@@ -211,12 +211,13 @@ impl Host {
             .and_then(|value| {
                 let settings = super::provider_settings::parse(self, &value)?;
                 let error_rules = super::error_rules::parse(&value);
+                let usage_policies = super::usage_policy::parse(&value);
                 let providers = serde_json::from_value::<Vec<proto::ProviderInfo>>(value)
                     .map_err(|error| format!("插件返回的 provider 列表无法解析：{error}"))?;
-                Ok((providers, settings, error_rules))
+                Ok((providers, settings, error_rules, usage_policies))
             });
         match result {
-            Ok((providers, settings, error_rules)) => {
+            Ok((providers, settings, error_rules, usage_policies)) => {
                 let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
                 if !self.is_current_run(&run) || run.failed.load(Ordering::Acquire)
                     || !self.running.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire)
@@ -226,6 +227,7 @@ impl Host {
                 if let Ok(mut current) = self.providers.lock() { *current = providers.clone(); }
                 if let Ok(mut current) = self.provider_settings.lock() { *current = settings; }
                 if let Ok(mut current) = self.error_rules.lock() { *current = error_rules; }
+                if let Ok(mut current) = self.usage_policies.lock() { *current = usage_policies; }
                 if let Ok(mut crashes) = self.crashes.lock() { *crashes = 0; }
                 if let Ok(mut retry) = self.retry_after.lock() { *retry = None; }
                 let previous = self.last_error.lock().ok().and_then(|mut last| last.take());

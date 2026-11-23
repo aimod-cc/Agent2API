@@ -90,7 +90,7 @@ export function RoutingErrorsPanel({ api, t, active = true, identity = '', reloa
     }}>{t('恢复建议值')}</Button><Button size='sm' disabled={!dirty || busy} onClick={() => void save()}><ErrorIcon name='check' size={14} />{busy ? t('保存中…') : t('保存修改')}</Button></div></div>
     <div className='re-limit-strip' role='group' aria-label={t('每条请求的重试上限')}><div className='re-compact-fields'>
       <ErrorNumber compact label={t('原账号重发')} unit={t('次')} value={draft.resends} max={10} disabled={busy} onChange={resends => patch({ resends })} />
-      <ErrorNumber compact label={t('最多再换账号')} unit={t('个')} value={draft.switches} max={10} disabled={busy} onChange={switches => patch({ switches })} />
+      <ErrorNumber compact label={t('最多再换账号')} unit={t('个')} value={draft.switches} max={100} disabled={busy} onChange={switches => patch({ switches })} />
       <ErrorNumber compact label={t('重发间隔')} unit={t('秒')} value={draft.intervalSeconds} max={300} disabled={busy} onChange={intervalSeconds => patch({ intervalSeconds })} />
       <ErrorNumber compact label={t('累计等待上限')} unit={t('秒')} value={draft.waitBudgetSeconds} max={300} disabled={busy} onChange={waitBudgetSeconds => patch({ waitBudgetSeconds })} />
     </div><Popover><PopoverTrigger render={<Button variant='ghost' size='icon-sm' aria-label={t('重试计数说明')} />}><ErrorIcon name='info' size={14} /></PopoverTrigger><PopoverContent className='re-limit-help' align='end'>

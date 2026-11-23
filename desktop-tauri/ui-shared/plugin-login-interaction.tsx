@@ -3,6 +3,7 @@ import { Alert, Button, Input, Label, Spinner } from '@ui'
 import { SearchableSelect } from './searchable-select'
 import { Captcha } from './plugin-login-captcha'
 import { Alicom4Captcha, type Alicom4Config } from './plugin-login-alicom4'
+import { isAlicom4Config, safeLoginQrUrl } from './plugin-captcha-frames'
 import { SmsLoginInteraction, type SmsInteraction } from './plugin-login-sms'
 import { ManagedLoginInteraction, managedStepKey, readManagedInteraction, type ManagedInteraction, type ManagedLoginScope } from './plugin-login-managed'
 import type { SmsConfig } from '../ui-islands/src/islands/add-account-dynamic-fields'
@@ -49,6 +50,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
   const read = React.useRef<AbortController | null>(null)
   const deadlines = React.useRef(new Map<string, number>())
   const attempted = React.useRef(new Set<string>())
+  const captchaAutoStarted = React.useRef(new Set<string>())
   const attemptKey = (step: ManagedInteraction) => JSON.stringify([step.id, step.captcha?.configId])
   const callbackSubmitted = React.useRef(new Set<string>())
   const browserOpened = React.useRef(new Set<string>())
@@ -125,7 +127,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
     alive.current = true
     generation.current += 1
     signature.current = ''; managedKey.current = ''; managedInstance.current += 1
-    deadlines.current.clear(); attempted.current.clear(); callbackSubmitted.current.clear(); browserOpened.current.clear()
+    deadlines.current.clear(); attempted.current.clear(); captchaAutoStarted.current.clear(); callbackSubmitted.current.clear(); browserOpened.current.clear()
     submitting.current = false; submitOwner.current = null
     flowDoneRef.current = false
     setInteraction(null); setFlowDone(false); setValues({}); setCaptcha(null); setReadError('')
@@ -184,7 +186,8 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
             expired: false,
             retryAfterSeconds: 0,
             expiresAfterSeconds: 0,
-            challenge: null,
+            message: '',
+            challenge: smsConfig.challenge ?? null,
           },
         }
       : null
@@ -213,6 +216,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
       deadline={deadlines.current.get(key) ?? 0} request={request} refresh={refresh}
       accept={(next, startedAt) => { if (stepScope.current()) accept(next, startedAt) }}
       attemptedBefore={attempted.current.has(attemptKey(interaction))} markAttempted={() => { attempted.current.add(attemptKey(interaction)) }}
+      captchaAutoStartedBefore={captchaAutoStarted.current.has(attemptKey(interaction))} markCaptchaAutoStarted={() => { captchaAutoStarted.current.add(attemptKey(interaction)) }}
       browserOpenedBefore={browserOpened.current.has(key)} markBrowserOpened={() => { browserOpened.current.add(key) }}
       callbackSubmitted={callbackSubmitted.current.has(interaction.id)} markCallbackSubmitted={value => {
         if (!stepScope.current()) return
@@ -229,7 +233,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
   return <section className='flex flex-col gap-3 rounded-lg border border-hairline p-3' aria-label={interaction.title}>
     <h3 className='text-sm font-semibold'>{interaction.title}</h3>
     {interaction.message ? <p className='whitespace-pre-wrap text-xs text-muted-foreground'>{interaction.message}</p> : null}
-    {interaction.qr ? <img className='mx-auto h-56 w-56 rounded-lg bg-white object-contain' src={loginQrUrl(interaction.qr.url)}
+    {interaction.qr ? <img className='mx-auto h-56 w-56 rounded-lg bg-white object-contain' src={safeLoginQrUrl(interaction.qr.url)}
       alt={interaction.title} referrerPolicy='no-referrer' /> : null}
     {interaction.fields.map(field => <Label key={field.key} className='flex flex-col items-start gap-2'>
       {field.label}
@@ -238,20 +242,15 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, openEmb
         className='w-full' aria-label={field.label} options={field.options} searchable={field.options.length > 8}
         displayValue={field.options.find(item => item.value === values[field.key])?.label || t('请选择')} />
         : <Input disabled={busy} type={field.secret ? 'password' : 'text'} autoComplete='off' spellCheck={false}
-        value={values[field.key] || ''} onChange={event => setValues(previous => ({ ...previous, [field.key]: event.currentTarget.value }))} />}
+        value={values[field.key] || ''} onChange={event => {
+          const value = event.currentTarget.value
+          setValues(previous => ({ ...previous, [field.key]: value }))
+        }} />}
     </Label>)}
-    {interaction.captcha ? 'engine' in interaction.captcha
-      ? <Alicom4Captcha key={`${interaction.id}:${captchaGeneration}`} config={interaction.captcha} onChange={setCaptcha} t={t} />
-      : <Captcha key={`${interaction.id}:${interaction.captcha.challenge}:${captchaGeneration}`} config={interaction.captcha} onChange={setCaptcha} t={t} /> : null}
+    {interaction.captcha ? isAlicom4Config(interaction.captcha)
+      ? <Alicom4Captcha key={`${interaction.id}:${captchaGeneration}`} config={interaction.captcha} disabled={busy} onChange={setCaptcha} t={t} />
+      : <Captcha key={`${interaction.id}:${interaction.captcha.challenge}:${captchaGeneration}`} config={interaction.captcha} disabled={busy} onChange={setCaptcha} t={t} /> : null}
     {error ? <Alert variant='destructive'>{error}</Alert> : null}
-    {!interaction.qr ? <Button disabled={busy || Boolean(interaction.captcha && !captcha)} onClick={() => void submit()}>{t('继续')}</Button> : null}
+    {!interaction.qr ? <Button type='button' disabled={busy || Boolean(interaction.captcha && !captcha)} onClick={() => void submit()}>{t('继续')}</Button> : null}
   </section>
-}
-
-function loginQrUrl(value: string): string {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && !url.username && !url.password && !url.hash
-      && ['mp.weixin.qq.com', 'api.kuaipaper.com', 'api.claw.speedai.com'].includes(url.hostname) ? url.href : ''
-  } catch { return '' }
 }

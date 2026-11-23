@@ -85,7 +85,9 @@ async fn start(context: &Context) -> Result<Value,proto::WireError> {
         expired.cancel.cancel();
         if let Ok(mut items) = flows().lock() { items.remove(&flow_id); }
     });
-    Ok(json!({"flow":id,"url":url,"poll_interval_ms":1500,"external_browser":false,"allowed_hosts":["huaweicloud.com"],
+    // 华为云登录会经由 Huawei ID（cloud.huawei.com）、UnifiedIDM、第三方扫码或企业联邦 IdP 等多域 SSO，
+    // 不能把白名单锁死在 huaweicloud.com；置空仅对 HTTPS 放行多域跳转，HTTP 仍由回环回调策略严格约束。
+    Ok(json!({"flow":id,"url":url,"poll_interval_ms":1500,"external_browser":false,"allowed_hosts":[],
         "instructions":"在华为云官方页面完成登录即可添加账号；远程访问面板时，按提示粘贴登录后的回调地址即可。"}))
 }
 

@@ -170,6 +170,7 @@
   "有新版本": "Nova versão disponível",
   "服务正在重启，页面会在恢复后自动刷新…（{seconds}s）": "O serviço está reiniciando; a página será atualizada automaticamente quando ele voltar… ({seconds} s)",
   "服务端压缩包": "Pacote compactado do servidor",
+  "服务重启耗时较长，请稍后手动刷新页面确认新版本状态。": "",
   "未找到适用的更新包": "Nenhum pacote adequado",
   "未找到适用的更新包。需要：{wanted}；发布页包含的文件类型：{seen}。": "Nenhum pacote adequado foi encontrado. Necessário: {wanted}. Tipos de arquivo na release: {seen}.",
   "未检查": "Não verificado",

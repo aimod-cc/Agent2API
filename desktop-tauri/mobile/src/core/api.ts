@@ -194,17 +194,48 @@ export function fetchAccountUsage(id: string): Promise<{ results?: UsageRow[] }>
 
 /* ─── 动态添加账号 ───────────────────────────────────────── */
 
+import type { Alicom4Config, GeetestConfig } from '../../../ui-shared/plugin-captcha-frames'
+
+export type DynamicLoginPromptOption = {
+  value: string
+  label: string
+}
+
 export type DynamicLoginField = {
   key?: string
   name?: string
   label?: string
   placeholder?: string
   type?: string
+  secret?: boolean
+  optional?: boolean
   required?: boolean
   description?: string
+  defaultValue?: string
+  options?: DynamicLoginPromptOption[]
+  when?: { key: string; op?: 'eq' | 'neq'; value: string }
+}
+
+export type SmsChallenge =
+  | ({ type: 'geetest' } & GeetestConfig)
+  | ({ type: 'alicom4' } & Alicom4Config)
+  | { type: 'external'; url: string }
+
+export type SmsConfig = {
+  phoneLabel: string
+  phonePlaceholder: string
+  countryCodes: Array<{ value: string; label: string }>
+  phoneMinLength: number
+  phoneMaxLength: number
+  codeMinLength: number
+  codeMaxLength: number
+  resendAfterSeconds: number
+  expiresAfterSeconds: number
+  challenge?: { type: 'alicom4'; captchaId: string }
 }
 
 export type DynamicLoginMethod = {
+  methodIndex?: number
   index?: number
   id?: string
   type?: string
@@ -212,21 +243,70 @@ export type DynamicLoginMethod = {
   label?: string
   title?: string
   description?: string
+  instructions?: string
+  unavailableReason?: string
+  localOnly?: boolean
+  desktopOnly?: boolean
+  embeddedOnly?: boolean
+  manualCallback?: boolean
+  callbackInput?: 'url' | 'code'
+  browserMode?: 'none' | 'external' | 'embedded'
+  prompts?: DynamicLoginField[]
   fields?: DynamicLoginField[]
   inputs?: DynamicLoginField[]
+  sms?: SmsConfig
 }
 
 export type DynamicLoginStart = {
   state?: string
   flow?: string
   provider?: string
+  methodIndex?: number
   url?: string
   authUrl?: string
   instructions?: string
+  browserMode?: string
   manualCallback?: boolean
   callbackInput?: 'url' | 'code'
   pollIntervalMs?: number
+  interactionType?: string
 }
+
+export type SmsInteractionStep = {
+  id: string
+  type: 'sms'
+  title: string
+  sms: {
+    config: SmsConfig
+    phone: string
+    countryCode: string
+    sent: boolean
+    expired: boolean
+    retryAfterSeconds: number
+    expiresAfterSeconds: number
+    message?: string
+    challenge: SmsChallenge | null
+  }
+}
+
+export type GenericInteractionStep = {
+  id: string
+  type?: 'generic'
+  title: string
+  message: string
+  fields: Array<{
+    key: string
+    label: string
+    type: 'text' | 'select'
+    secret: boolean
+    optional: boolean
+    options: Array<{ value: string; label: string }>
+  }>
+  captcha?: GeetestConfig | Alicom4Config | null
+  qr?: { url: string; expiresAt: number } | null
+}
+
+export type LoginInteractionStep = SmsInteractionStep | GenericInteractionStep
 
 export type DynamicLoginWait = {
   pending?: boolean
@@ -268,6 +348,34 @@ export function startDynamicLogin(input: {
 export function waitDynamicLogin(state: string, signal?: AbortSignal): Promise<DynamicLoginWait> {
   return apiCall(`/api/session/login/wait?state=${encodeURIComponent(state)}`, {
     signal,
+    quiet: true,
+  })
+}
+
+export function cancelDynamicLogin(state: string): Promise<{ canceled?: boolean }> {
+  return apiCall('/api/session/login/cancel', {
+    method: 'POST',
+    body: { state },
+    quiet: true,
+  })
+}
+
+export function fetchLoginInteraction(
+  state: string,
+  signal?: AbortSignal,
+): Promise<{ interaction: LoginInteractionStep | null }> {
+  return apiCall(`/api/session/login/interaction?state=${encodeURIComponent(state)}`, {
+    signal,
+    quiet: true,
+  })
+}
+
+export function submitLoginInteraction(
+  body: Record<string, unknown>,
+): Promise<{ accepted?: boolean; accountId?: string }> {
+  return apiCall('/api/session/login/interaction', {
+    method: 'POST',
+    body,
     quiet: true,
   })
 }

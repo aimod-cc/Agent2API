@@ -1994,7 +1994,7 @@ pub fn shim_js() -> &'static str {
     // Agent（本机 AI 客户端的配置接管；与桌面壳 bridge.rs 的同名方法成对
     // 存在 —— 只加一边时另一形态下的页面会报「桥接方法缺失」。契约见
     // api::agents 的模块头：写操作都返回整份 {clients}，就地替换）
-    getAgents: function () { return call('GET', '/api/agents'); },
+    getAgents: function (options) { return call('GET', '/api/agents' + (options && options.refresh ? '?refresh=1' : '')); },
     getAgentModels: function (gatewayKeyId) { return call('GET', '/api/agents/models' + (gatewayKeyId == null ? '' : '?gatewayKeyId=' + encodeURIComponent(gatewayKeyId))); },
     saveAgentProfiles: function (payload) { return call('POST', '/api/agents/profiles', payload || {}); },
     applyAgentProfile: function (payload) { return call('POST', '/api/agents/apply', payload || {}); },
@@ -2018,6 +2018,7 @@ pub fn shim_js() -> &'static str {
     // 文件夹选择框是**壳的能力**（web 版没有壳）：回 `unsupported`，界面据此提示
     // 手输路径 —— 只回 `canceled` 的话，点一下按钮什么都不会发生，用户会以为卡了
     pickFolder: function () { return Promise.resolve({ canceled: true, unsupported: true }); },
+    pickAgentConfigFile: function () { return Promise.resolve({ canceled: true, unsupported: true }); },
 
     // ── 积分 / 签到 ──
     getUsage: function () { return call('GET', '/api/usage'); },

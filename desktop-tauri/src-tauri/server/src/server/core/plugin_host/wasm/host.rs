@@ -89,6 +89,7 @@ impl Host {
             let value = unwrap_reply(reply).map_err(|error| error.message)?;
             let settings = super::super::provider_settings::parse(self, &value)?;
             let error_rules = super::super::error_rules::parse(&value);
+            let usage_policies = super::super::usage_policy::parse(&value);
             super::desktop_launch::validate_metadata(&runtime.shared.options, &value)?;
             let providers: Vec<proto::ProviderInfo> = serde_json::from_value(value).map_err(|_| "Wasm 握手返回无效提供商信息")?;
             if providers.len() != 1 || providers[0].id.as_str() != runtime.shared.options.provider {
@@ -111,10 +112,10 @@ impl Host {
                 return Err("Wasm 对话必须声明受控账号访问能力".into());
             }
             runtime.shared.system_proxy_when_unset.store(provider.capabilities.system_proxy_when_unset, Ordering::Release);
-            Ok((providers, settings, error_rules, runtime))
+            Ok((providers, settings, error_rules, usage_policies, runtime))
         }.await;
         match result {
-            Ok((providers, settings, error_rules, runtime)) => {
+            Ok((providers, settings, error_rules, usage_policies, runtime)) => {
                 let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
                 if self.closing.load(Ordering::Acquire) || super::super::runtime::admission_closed()
                     || runtime.shared.cancel.is_cancelled() {
@@ -130,6 +131,7 @@ impl Host {
                 *self.providers.lock().unwrap_or_else(|error| error.into_inner()) = providers.clone();
                 *self.provider_settings.lock().unwrap_or_else(|error| error.into_inner()) = settings;
                 *self.error_rules.lock().unwrap_or_else(|error| error.into_inner()) = error_rules;
+                *self.usage_policies.lock().unwrap_or_else(|error| error.into_inner()) = usage_policies;
                 self.generation.fetch_add(1, Ordering::AcqRel);
                 self.running.store(true, Ordering::Release);
                 self.ready.store(true, Ordering::Release);
@@ -358,17 +360,24 @@ impl Host {
         } else if let Some(owner) = claim_owner { runtime.invoke_claim(method, params, timeout, owner).await? }
         else { runtime.invoke(method, params, timeout, None).await? };
         let result = unwrap_reply(reply)?;
-        let _sms_completed = sms_verify.then(|| LoginCleanup { shared: runtime.shared.clone(),
+        let sms_captcha = sms_action && result["status"] == "captcha";
+        let _sms_completed = (sms_verify && !sms_captcha).then(|| LoginCleanup { shared: runtime.shared.clone(),
             flow: sms.map(|call| call.flow().to_string()).unwrap_or_default() });
-        if sms_action && result["status"] == "captcha" && result["challenge"]["type"] == "geetest"
+        if sms_captcha && result["challenge"]["type"] == "geetest"
             && !runtime.shared.options.allows("login.captcha.geetest.v1")
         {
             return Err(proto::WireError::with_code("插件未声明人机验证能力", "forbidden"));
         }
-        if sms_action && result["status"] == "captcha" && result["challenge"]["type"] == "external" {
+        if sms_captcha && result["challenge"]["type"] == "alicom4"
+            && (runtime.shared.options.provider != "codar"
+                || !runtime.shared.options.allows("login.sms.alicom4.v1"))
+        {
+            return Err(proto::WireError::with_code("插件未声明人机验证能力", "forbidden"));
+        }
+        if sms_captcha && result["challenge"]["type"] == "external" {
             runtime.shared.options.check_url(result["challenge"]["url"].as_str().unwrap_or(""), false)?;
         }
-        if sms_verify {
+        if sms_verify && !sms_captcha {
             validate_identity(&runtime.shared.options, &result)?;
             super::public_view::validate(&result["public"], &result["secret"])?;
         }

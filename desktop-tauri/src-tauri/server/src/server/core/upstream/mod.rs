@@ -111,10 +111,9 @@ const INFLIGHT_WAIT_MS: u64 = 45_000;
 
 /// 选路循环的最大轮数（防病态数据下的无限回环）。
 ///
-/// Node 版靠 `pickNextAccount` 返回 null 收尾 —— 每次轮换都会往 triedIds 里
-/// 加一个账号，而账号上限是 20，所以必然收敛。这里额外加一个轮数上限兜底：
-/// 万一账号数据被手工改出「同一个 id 出现两次」之类的怪状，宁可报错也不要空转。
-pub(super) const MAX_ROUTE_ATTEMPTS: usize = 32;
+/// 与 `config::error_policy::MAX_SWITCHES`（100）对齐，让高账号数部署在配置到
+/// 100 时不会在转发层被提前截断。
+pub(super) const MAX_ROUTE_ATTEMPTS: usize = 100;
 
 /// 在途请求的完成信号（去重队列用）。
 ///

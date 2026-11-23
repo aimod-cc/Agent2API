@@ -26,8 +26,8 @@ use serde_json::{json, Value};
 use crate::server::config::{
     self, RetryPatch, RetrySettings, KEY_RETRY_ACCOUNT_SWITCH_COUNT, KEY_RETRY_COUNT,
     KEY_RETRY_INTERVAL_SECONDS, KEY_RETRY_NO_RETRY_CODES, RETRY_CODE_MAX, RETRY_CODE_MIN,
-    RETRY_MAX_COUNT, RETRY_MAX_INTERVAL_SECONDS, RETRY_MAX_NO_RETRY_CODES, RETRY_MIN_COUNT,
-    RETRY_MIN_INTERVAL_SECONDS,
+    RETRY_MAX_COUNT, RETRY_MAX_INTERVAL_SECONDS, RETRY_MAX_NO_RETRY_CODES, RETRY_MAX_SWITCH_COUNT,
+    RETRY_MIN_COUNT, RETRY_MIN_INTERVAL_SECONDS,
 };
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
@@ -67,7 +67,7 @@ pub async fn put_retry(State(_state): State<ServerState>, body: Bytes) -> Respon
             KEY_RETRY_ACCOUNT_SWITCH_COUNT,
             object.get(KEY_RETRY_ACCOUNT_SWITCH_COUNT),
             RETRY_MIN_COUNT,
-            RETRY_MAX_COUNT,
+            RETRY_MAX_SWITCH_COUNT,
             &mut patch.account_switch_count,
         ),
         (

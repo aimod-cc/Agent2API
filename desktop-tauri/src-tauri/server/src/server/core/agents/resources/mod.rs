@@ -20,8 +20,14 @@ pub fn reject_links(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn capabilities(def: &ClientDef) -> Value {
     let paths = paths::for_client(def);
+    json!({ "prompt": paths.prompt.is_some(), "skills": !paths.skills.is_empty(), "mcp": paths.mcp.is_some(), "note": paths.note })
+}
+
+pub fn capabilities_for(def: &ClientDef, detection: &super::paths::Detection) -> Value {
+    let paths = paths::for_detection(def, detection);
     json!({ "prompt": paths.prompt.is_some(), "skills": !paths.skills.is_empty(), "mcp": paths.mcp.is_some(), "note": paths.note })
 }
 

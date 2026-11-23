@@ -3,9 +3,13 @@ import {
   Alert, AlertDescription, Button, Input, InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput, InputGroupText, Label,
 } from '@ui'
 import { SearchableSelect } from './searchable-select'
+import { Alicom4Captcha, type Alicom4Config } from './plugin-login-alicom4'
 import { Captcha, type GeetestConfig } from './plugin-login-captcha'
+import { formatSmsNotice, safeHttpsUrl } from './plugin-captcha-frames'
 import type { LoginRequest } from './plugin-login-interaction'
 import type { SmsConfig } from '../ui-islands/src/islands/add-account-dynamic-fields'
+
+export type SmsChallenge = ({ type: 'geetest' } & GeetestConfig) | ({ type: 'alicom4' } & Alicom4Config) | { type: 'external'; url: string }
 
 export type SmsInteraction = {
   id: string
@@ -19,7 +23,8 @@ export type SmsInteraction = {
     expired: boolean
     retryAfterSeconds: number
     expiresAfterSeconds: number
-    challenge: ({ type: 'geetest' } & GeetestConfig) | { type: 'external'; url: string } | null
+    message?: string
+    challenge: SmsChallenge | null
   }
 }
 
@@ -68,6 +73,7 @@ export function SmsLoginInteraction({
   const [countdown, setCountdown] = React.useState(sms.retryAfterSeconds)
   const inFlight = React.useRef(false)
   const pendingSend = React.useRef(false)
+  const pendingCaptcha = React.useRef<unknown>(null)
   const hadServerPhone = React.useRef(Boolean(sms.phone))
   const generation = React.useRef(0)
   const current = React.useRef({ request, refresh, onBusy, onStart })
@@ -90,7 +96,7 @@ export function SmsLoginInteraction({
       setCountry(sms.countryCode)
     }
     setCode('')
-    setCaptcha(null)
+    if (!pendingSend.current) setCaptcha(null)
   }, [interaction.id, sms.phone, sms.countryCode])
   React.useEffect(() => {
     const deadline = Date.now() + sms.retryAfterSeconds * 1000
@@ -108,6 +114,7 @@ export function SmsLoginInteraction({
     }
     if (!flow && !starting) {
       pendingSend.current = false
+      pendingCaptcha.current = null
       setBusy('')
     }
   }, [flow, interaction.id, starting])
@@ -123,15 +130,18 @@ export function SmsLoginInteraction({
     if (action === 'send' && (!flow || !interaction.id)) {
       if (!current.current.onStart || pendingSend.current) return
       pendingSend.current = true
+      pendingCaptcha.current = captcha
       setBusy('send'); setError('')
       try {
         const started = await current.current.onStart()
         if (started !== true) {
           pendingSend.current = false
+          pendingCaptcha.current = null
           setBusy('')
         }
       } catch (cause) {
         pendingSend.current = false
+        pendingCaptcha.current = null
         setBusy('')
         setError(describeSmsError(cause, t))
       }
@@ -139,13 +149,15 @@ export function SmsLoginInteraction({
     }
     const token = generation.current
     const live = () => generation.current === token
+    const submittedCaptcha = action === 'send' ? (pendingCaptcha.current ?? captcha) : null
+    pendingCaptcha.current = null
     inFlight.current = true
     setBusy(action); setError(''); current.current.onBusy(true)
     try {
       await current.current.request('POST', '/api/session/login/interaction', {
         state: flow, interaction: interaction.id, action,
         inputs: action === 'send' ? { phone, countryCode: country } : action === 'verify' ? { code, name: onRemarkChange ? (remark ?? '') : name } : {},
-        captcha: action === 'send' ? captcha : null,
+        captcha: submittedCaptcha,
       })
       if (live()) { setCode(''); setCaptcha(null); setCaptchaGeneration(value => value + 1) }
     } catch (cause) {
@@ -166,8 +178,10 @@ export function SmsLoginInteraction({
   }
 
   const phoneLocked = Boolean(sms.phone)
-  const external = sms.challenge?.type === 'external' ? safeUrl(sms.challenge.url) : ''
-  const sendDisabled = Boolean(busy) || (!flow && Boolean(startDisabled)) || countdown > 0 || !phone || (sms.challenge?.type === 'geetest' && !captcha)
+  const external = sms.challenge?.type === 'external' ? safeHttpsUrl(sms.challenge.url) : ''
+  const requiresSolvedCaptcha = sms.challenge?.type === 'geetest' || sms.challenge?.type === 'alicom4'
+  const showChallenge = Boolean(sms.challenge && (!sms.sent || countdown <= 0))
+  const sendDisabled = Boolean(busy) || (!flow && Boolean(startDisabled)) || countdown > 0 || !phone || (requiresSolvedCaptcha && !captcha)
   return <section className='plugin-login-sms' aria-label={t('手机验证码登录')}>
     <div className='plugin-login-field'>
       <Label htmlFor={`${prefix}-phone`}>{t(config.phoneLabel)}</Label>
@@ -192,13 +206,20 @@ export function SmsLoginInteraction({
         </InputGroupAddon> : null}
       </InputGroup>
     </div>
-    {sms.challenge ? <Alert><AlertDescription className='flex flex-col gap-2'>
-      <p>{t('需要先完成人机验证，短信尚未发送。完成后请再次获取验证码。')}</p>
-      {sms.challenge.type === 'geetest' ? <Captcha key={`${interaction.id}:${captchaGeneration}`} config={sms.challenge} onChange={setCaptcha} t={t} />
-        : external ? <Button type='button' variant='outline' className='self-start' disabled={Boolean(busy)}
-          onClick={() => void openChallenge(external)}>
-          {t('打开人机验证')}</Button> : <p>{t('人机验证地址无效，请重新发起登录')}</p>}
-    </AlertDescription></Alert> : null}
+    {sms.message ? <Alert><AlertDescription>{formatSmsNotice(sms.message, t)}</AlertDescription></Alert> : null}
+    {showChallenge && sms.challenge ? (sms.challenge.type === 'alicom4' ? (
+      <div className='plugin-login-field'>
+        <Alicom4Captcha key={`${interaction.id}:${captchaGeneration}`} config={sms.challenge} disabled={Boolean(busy)} onChange={setCaptcha} t={t} />
+      </div>
+    ) : (
+      <Alert><AlertDescription className='flex flex-col gap-2'>
+        <p>{t('需要先完成人机验证，短信尚未发送。完成后请再次获取验证码。')}</p>
+        {sms.challenge.type === 'geetest' ? <Captcha key={`${interaction.id}:${captchaGeneration}`} config={sms.challenge} disabled={Boolean(busy)} onChange={setCaptcha} t={t} />
+          : external ? <Button type='button' variant='outline' className='self-start' disabled={Boolean(busy)}
+            onClick={() => void openChallenge(external)}>
+            {t('打开人机验证')}</Button> : <p>{t('人机验证地址无效，请重新发起登录')}</p>}
+      </AlertDescription></Alert>
+    )) : null}
     <div className='plugin-login-field'>
       <Label htmlFor={`${prefix}-code`}>{t('验证码')}</Label>
       <InputGroup className='plugin-login-sms-group'>
@@ -228,11 +249,4 @@ export function SmsLoginInteraction({
       {busy === 'verify' ? t('登录中…') : t('登录并添加')}
     </Button>
   </section>
-}
-
-function safeUrl(value: string): string {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && !url.username && !url.password ? url.href : ''
-  } catch { return '' }
 }

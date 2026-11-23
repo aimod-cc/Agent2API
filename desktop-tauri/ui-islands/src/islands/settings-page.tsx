@@ -67,9 +67,15 @@ import {
   readThemeMode,
   readZoomPercent,
   shared,
+  toast,
   type NumberField,
   type ThemeMode,
 } from './settings-model'
+import {
+  refreshExchangeRate,
+  switchDisplayCurrency,
+  usePricingDisplay,
+} from './model-pricing'
 import {
   applyUnits,
   closePasswordDialog,
@@ -399,23 +405,83 @@ function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
         </CardContent>
       </Card>
 
-      <Card render={<section />} className='panel'>
-        <PanelHead title={t('计量单位')} tip={TIPS.units} />
-        <CardContent className='panel-body'>
-          <div className='settings-switches'>
-            <SwitchRow
-              id='settings-chinese-units'
-              label={t('使用中文单位（亿 / 万）')}
-              checked={snap.unitsChinese}
-              onCheckedChange={applyUnits}
-            />
-          </div>
-          <div className='settings-state'>
-            {snap.unitsChinese ? STATES.unitsOn : STATES.unitsOff}
-          </div>
-        </CardContent>
-      </Card>
+      <UnitsPanel snap={snap} />
     </>
+  )
+}
+
+const CURRENCY_OPTIONS = [
+  { value: 'usd', label: t('美元 ($)') },
+  { value: 'cny', label: t('人民币 (¥)') },
+] as const
+
+function UnitsPanel({ snap }: { snap: SettingsSnapshot }) {
+  const pricing = usePricingDisplay()
+  const [currencyBusy, setCurrencyBusy] = React.useState(false)
+  const [fxBusy, setFxBusy] = React.useState(false)
+
+  return (
+    <Card render={<section />} className='panel'>
+      <PanelHead title={t('计量单位')} tip={TIPS.units} />
+      <CardContent className='panel-body'>
+        <div className='settings-switches'>
+          <SwitchRow
+            id='settings-chinese-units'
+            label={t('使用中文单位（亿 / 万）')}
+            checked={snap.unitsChinese}
+            onCheckedChange={applyUnits}
+          />
+        </div>
+        <div className='settings-state'>
+          {snap.unitsChinese ? STATES.unitsOn : STATES.unitsOff}
+        </div>
+        <div className='retention-list'>
+          <div className='retention-row'>
+            <Label>{t('计价货币')}</Label>
+            <div className='flex flex-wrap items-center gap-2.5'>
+              <SegmentedControl<'usd' | 'cny'>
+                aria-label={t('计价货币')}
+                value={pricing.currency}
+                options={CURRENCY_OPTIONS}
+                onValueChange={next => {
+                  if (next === pricing.currency || currencyBusy) return
+                  setCurrencyBusy(true)
+                  void switchDisplayCurrency(next)
+                    .then(() => {
+                      toast(next === 'cny' ? t('✅ 已切换为人民币 (¥)') : t('✅ 已切换为美元 ($)'))
+                    })
+                    .finally(() => setCurrencyBusy(false))
+                }}
+              />
+              <span className='text-[12px] text-subtle tabular-nums'>
+                {t('1 USD ≈ ¥{rate}', { rate: pricing.exchangeRate.toFixed(4) })}
+                {pricing.fx?.fallback ? t('（离线默认）') : ''}
+              </span>
+              <Button
+                id='settings-refresh-fx'
+                variant='outline'
+                size='sm'
+                disabled={fxBusy}
+                onClick={() => {
+                  setFxBusy(true)
+                  void refreshExchangeRate()
+                    .then(fx => {
+                      if (fx) toast(t('✅ 汇率已刷新：1 USD ≈ ¥{rate}', { rate: fx.rate.toFixed(4) }))
+                      else toast(t('当前环境不支持刷新汇率'), 'err')
+                    })
+                    .catch(err => {
+                      toast(t('刷新汇率失败：{message}', { message: err instanceof Error ? err.message : String(err) }), 'err')
+                    })
+                    .finally(() => setFxBusy(false))
+                }}
+              >
+                {fxBusy ? t('刷新中…') : t('刷新汇率')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 

@@ -2784,3 +2784,58 @@ mod auto_continue_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod retry_and_error_policy_tests {
+    use super::*;
+    use super::error_policy_types::{ErrorAction, ErrorKind, ErrorSettings, MAX_SWITCHES};
+    use serde_json::json;
+
+    #[test]
+    fn defaults_keep_transient_resends_and_raise_switch_limit() {
+        let retry = RetrySettings::default();
+        assert_eq!(retry.count, 3);
+        assert_eq!(retry.account_switch_count, 32);
+
+        let settings = ErrorSettings::default();
+        assert_eq!(settings.resends, 3);
+        assert_eq!(settings.switches, 32);
+        assert_eq!(
+            settings.resolve(ErrorKind::Transient, 502, "", "*", "*").action,
+            ErrorAction::RetryThenSwitch,
+        );
+
+        assert_eq!(MAX_SWITCHES, 100);
+        let mut at_max = ErrorSettings::default();
+        at_max.switches = MAX_SWITCHES;
+        assert!(at_max.validate().is_ok());
+        let mut over_max = at_max;
+        over_max.switches = MAX_SWITCHES + 1;
+        assert!(over_max.validate().is_err());
+    }
+
+    #[test]
+    fn user_configured_switch_limit_is_preserved_and_bounded_to_100() {
+        let empty = build(Map::new());
+        assert_eq!(empty.retry.account_switch_count, 32);
+        assert_eq!(empty.error_policy.settings.switches, 32);
+
+        let mut custom = Map::new();
+        custom.insert(KEY_RETRY_ACCOUNT_SWITCH_COUNT.to_string(), json!(5));
+        let kept = build(custom);
+        assert_eq!(kept.retry.account_switch_count, 5);
+        assert_eq!(kept.error_policy.settings.switches, 5);
+
+        let mut at_100 = Map::new();
+        at_100.insert(KEY_RETRY_ACCOUNT_SWITCH_COUNT.to_string(), json!(100));
+        let max_cfg = build(at_100);
+        assert_eq!(max_cfg.retry.account_switch_count, 100);
+        assert_eq!(max_cfg.error_policy.settings.switches, 100);
+
+        let mut over_100 = Map::new();
+        over_100.insert(KEY_RETRY_ACCOUNT_SWITCH_COUNT.to_string(), json!(101));
+        let fallback_cfg = build(over_100);
+        assert_eq!(fallback_cfg.retry.account_switch_count, 32);
+        assert_eq!(fallback_cfg.error_policy.settings.switches, 32);
+    }
+}

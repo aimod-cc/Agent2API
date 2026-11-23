@@ -157,7 +157,7 @@ pub struct RequestEntry {
     /// 「重试」列只能显示一个没有信息量的「重试」标记。本字段就是那段历史。
     ///
     /// 条数上限：采集侧保证 `attempt_details.len() <= attempts`，而 `attempts`
-    /// 的上界是 `MAX_ROUTE_ATTEMPTS + 1`（32+1）。采集侧另有
+    /// 的上界是 `MAX_ROUTE_ATTEMPTS + 1`（100+1）。采集侧另有
     /// `MAX_ATTEMPT_DETAILS`（24）的体积闸 —— 截断时明细会比 `attempts` 短，
     /// 前端据此显示「只保留前 N 条」（见 requests-panel）。
     ///

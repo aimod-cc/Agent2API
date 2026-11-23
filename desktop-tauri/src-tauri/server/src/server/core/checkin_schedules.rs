@@ -605,6 +605,7 @@ fn record_providers_version() {
 }
 
 /// 插件首次声明每日签到时仅补一次；用户之后取消的范围不能被重新勾选。
+/// 对已上线且明确声明不支持每日签到的插件，清理其历史留存标记以免下架后继续占位。
 pub fn extend_plugin_providers_once() -> bool {
     let available: Vec<String> = auto_checkin::checkin_providers()
         .into_iter()
@@ -614,8 +615,22 @@ pub fn extend_plugin_providers_once() -> bool {
         .get("pluginProvidersSeen")
         .and_then(Value::as_array)
         .into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
-    let added: Vec<String> = available.into_iter().filter(|id| !known.contains(id)).collect();
-    if added.is_empty() { return false; }
+    let retained: Vec<String> = known
+        .iter()
+        .filter(|id| {
+            !crate::server::core::plugin_host::serves_provider(id)
+                || auto_checkin::plugin_supports_daily_checkin(id)
+        })
+        .cloned()
+        .collect();
+    let pruned = retained.len() != known.len();
+    let added: Vec<String> = available.into_iter().filter(|id| !retained.contains(id)).collect();
+    if added.is_empty() {
+        if pruned {
+            auto_checkin::write_state(json!({ "pluginProvidersSeen": retained }));
+        }
+        return false;
+    }
     let mut changed = false;
     match stored_entries() {
         Some(mut entries) => {
@@ -645,7 +660,7 @@ pub fn extend_plugin_providers_once() -> bool {
             if changed { auto_checkin::write_state(json!({ "providers": providers })); }
         }
     }
-    let mut seen = known;
+    let mut seen = retained;
     seen.extend(added);
     auto_checkin::write_state(json!({ "pluginProvidersSeen": seen }));
     changed

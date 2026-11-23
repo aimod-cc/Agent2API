@@ -322,6 +322,7 @@ pub fn run() {
             commands::cancel_login,
             commands::export_logs,
             commands::pick_folder,
+            commands::pick_agent_config_file,
             desktop_client::pick_desktop_client,
             commands::get_app_settings,
             graphics::get_graphics_settings,

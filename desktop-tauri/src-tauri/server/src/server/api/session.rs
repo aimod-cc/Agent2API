@@ -332,6 +332,13 @@ async fn read_login_methods(
                 return Err(GatewayError::with_status(502, "WASM 插件未声明短信登录能力"));
             }
             sms.validate()?;
+            if sms.challenge.is_some()
+                && (adapter.provider_id() != "codar"
+                    || (crate::server::core::plugin_host::wasm::owns(adapter.provider_id())
+                        && !crate::server::core::plugin_host::wasm::has_capability(adapter.provider_id(), "login.sms.alicom4.v1")))
+            {
+                return Err(GatewayError::with_status(502, "插件未声明短信人机验证能力"));
+            }
             sms.phone_label = login_text(&sms.phone_label);
             sms.phone_placeholder = login_text(&sms.phone_placeholder);
             for country in &mut sms.country_codes { country.label = login_text(&country.label); }

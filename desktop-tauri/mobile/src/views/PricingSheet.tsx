@@ -51,6 +51,12 @@ export function PricingSheet({
   const [mode, setMode] = useState<ModelMode>(() =>
     initialPricing?.source === 'same_as' ? 'same_as' : 'custom',
   )
+  const [priceCurrency, setPriceCurrency] = useState<'usd' | 'cny'>(() =>
+    initialPricing?.base?.currency === 'cny' ||
+    (!initialPricing?.base && (initialPricing?.currency === 'cny' || display.currency === 'cny'))
+      ? 'cny'
+      : 'usd',
+  )
   const [inputPrice, setInputPrice] = useState('')
   const [outputPrice, setOutputPrice] = useState('')
   const [cacheReadPrice, setCacheReadPrice] = useState('')
@@ -77,6 +83,7 @@ export function PricingSheet({
     if (targetKey && res.modelPrices?.[targetKey]) {
       const p = res.modelPrices[targetKey]
       setMode('custom')
+      setPriceCurrency(p.currency === 'cny' ? 'cny' : 'usd')
       setInputPrice(String(p.input))
       setOutputPrice(String(p.output))
       setCacheReadPrice(p.cacheRead ? String(p.cacheRead) : '')
@@ -85,10 +92,13 @@ export function PricingSheet({
       setMode('same_as')
       setSameAs(res.modelSameAs[targetKey])
     } else if (initialPricing?.base) {
+      setPriceCurrency(initialPricing.base.currency === 'cny' ? 'cny' : 'usd')
       setInputPrice(String(initialPricing.base.input))
       setOutputPrice(String(initialPricing.base.output))
       setCacheReadPrice(initialPricing.base.cacheRead ? String(initialPricing.base.cacheRead) : '')
       setCacheWritePrice(initialPricing.base.cacheWrite ? String(initialPricing.base.cacheWrite) : '')
+    } else {
+      setPriceCurrency(res.currency === 'cny' ? 'cny' : 'usd')
     }
   }
 
@@ -112,6 +122,7 @@ export function PricingSheet({
     const ref = data?.modelSameAs?.[key]
     if (custom) {
       setMode('custom')
+      setPriceCurrency(custom.currency === 'cny' ? 'cny' : 'usd')
       setInputPrice(String(custom.input))
       setOutputPrice(String(custom.output))
       setCacheReadPrice(custom.cacheRead ? String(custom.cacheRead) : '')
@@ -156,6 +167,7 @@ export function PricingSheet({
           output: parseNonNeg(outputPrice),
           cacheRead: parseNonNeg(cacheReadPrice),
           cacheWrite: parseNonNeg(cacheWritePrice),
+          currency: priceCurrency,
         }
         payload.sameAs = null
       }
@@ -272,7 +284,7 @@ export function PricingSheet({
                     <div style={{ minWidth: 0 }}>
                       <div className='fc-mono' style={{ fontSize: 12.5, fontWeight: 700 }}>{key}</div>
                       <div style={{ fontSize: 11.5, color: 'var(--fc-text-secondary)' }}>
-                        输入 ${price.input}/M · 输出 ${price.output}/M
+                        输入 {price.currency === 'cny' ? '¥' : '$'}{price.input}/M · 输出 {price.currency === 'cny' ? '¥' : '$'}{price.output}/M
                       </div>
                     </div>
                     <TonalChip tone='primary'>自定义</TonalChip>
@@ -321,27 +333,37 @@ export function PricingSheet({
               ]}
             />
             {mode === 'custom' ? (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                <label style={{ fontSize: 12, fontWeight: 600 }}>
-                  输入 ($/M)
-                  <input className='fc-input' type='number' min='0' step='any' value={inputPrice} placeholder='0'
-                    onChange={e => setInputPrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
-                </label>
-                <label style={{ fontSize: 12, fontWeight: 600 }}>
-                  输出 ($/M)
-                  <input className='fc-input' type='number' min='0' step='any' value={outputPrice} placeholder='0'
-                    onChange={e => setOutputPrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
-                </label>
-                <label style={{ fontSize: 12, fontWeight: 600 }}>
-                  缓存读 ($/M)
-                  <input className='fc-input' type='number' min='0' step='any' value={cacheReadPrice} placeholder='0'
-                    onChange={e => setCacheReadPrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
-                </label>
-                <label style={{ fontSize: 12, fontWeight: 600 }}>
-                  缓存写 ($/M)
-                  <input className='fc-input' type='number' min='0' step='any' value={cacheWritePrice} placeholder='0'
-                    onChange={e => setCacheWritePrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
-                </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <ConnectedButtonGroup
+                  value={priceCurrency}
+                  onChange={v => setPriceCurrency(v as 'usd' | 'cny')}
+                  options={[
+                    { id: 'usd', label: '美元 ($)' },
+                    { id: 'cny', label: '人民币 (¥)' },
+                  ]}
+                />
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>
+                    输入 ({priceCurrency === 'cny' ? '¥/M' : '$/M'})
+                    <input className='fc-input' type='number' min='0' step='any' value={inputPrice} placeholder='0'
+                      onChange={e => setInputPrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
+                  </label>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>
+                    输出 ({priceCurrency === 'cny' ? '¥/M' : '$/M'})
+                    <input className='fc-input' type='number' min='0' step='any' value={outputPrice} placeholder='0'
+                      onChange={e => setOutputPrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
+                  </label>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>
+                    缓存读 ({priceCurrency === 'cny' ? '¥/M' : '$/M'})
+                    <input className='fc-input' type='number' min='0' step='any' value={cacheReadPrice} placeholder='0'
+                      onChange={e => setCacheReadPrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
+                  </label>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>
+                    缓存写 ({priceCurrency === 'cny' ? '¥/M' : '$/M'})
+                    <input className='fc-input' type='number' min='0' step='any' value={cacheWritePrice} placeholder='0'
+                      onChange={e => setCacheWritePrice(e.currentTarget.value)} style={{ marginTop: 4 }} />
+                  </label>
+                </div>
               </div>
             ) : null}
             {mode === 'same_as' ? (
@@ -443,11 +465,11 @@ export function PricingSheet({
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
                   <input className='fc-input fc-mono' value={w.start} placeholder='09:00'
-                    onChange={e => setWindows(prev => prev.map((it, i) => i === idx ? { ...it, start: e.currentTarget.value } : it))} />
+                    onChange={e => { const v = e.currentTarget.value; setWindows(prev => prev.map((it, i) => i === idx ? { ...it, start: v } : it)) }} />
                   <input className='fc-input fc-mono' value={w.end} placeholder='18:00'
-                    onChange={e => setWindows(prev => prev.map((it, i) => i === idx ? { ...it, end: e.currentTarget.value } : it))} />
+                    onChange={e => { const v = e.currentTarget.value; setWindows(prev => prev.map((it, i) => i === idx ? { ...it, end: v } : it)) }} />
                   <input className='fc-input fc-mono' type='number' min='0.001' max='1000' step='any' value={String(w.rate)}
-                    onChange={e => setWindows(prev => prev.map((it, i) => i === idx ? { ...it, rate: Number(e.currentTarget.value) || 1 } : it))} />
+                    onChange={e => { const v = Number(e.currentTarget.value) || 1; setWindows(prev => prev.map((it, i) => i === idx ? { ...it, rate: v } : it)) }} />
                 </div>
               </div>
             ))}

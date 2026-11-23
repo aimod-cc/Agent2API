@@ -3,13 +3,19 @@ import type { AgentClient, AgentGatewayKey, AgentOperation, AgentPayload, AgentP
 export type { AgentClient, AgentOperation, AgentPayload, AgentPreview, AgentProfile } from './agent-types'
 
 type Bridge = {
-  getAgents?: () => Promise<AgentPayload>
+  platform?: string
+  getAgents?: (options?: { refresh?: boolean }) => Promise<AgentPayload>
   saveAgentProfiles?: (payload: Record<string, unknown>) => Promise<AgentPayload>
   applyAgentProfile?: (payload: Record<string, unknown>) => Promise<AgentPayload>
   previewAgentProfile?: (payload: Record<string, unknown>) => Promise<AgentPreview>
   restoreAgentClient?: (payload: Record<string, unknown>) => Promise<AgentPayload>
   importAgentClient?: (payload: Record<string, unknown>) => Promise<AgentPayload>
+  pickAgentConfigFile?: (defaultPath?: string) => Promise<{ canceled?: boolean; unsupported?: boolean; path?: string }>
 }
+
+const SNAPSHOT_CACHE_KEY = 'wb-agent-panel-snapshot-v1'
+const SELECTED_CACHE_KEY = 'wb-agent-selected-v1'
+const AUTO_REFRESH_COOLDOWN_MS = 15_000
 
 type AgentWindow = {
   workbuddyDesktop?: Bridge
@@ -17,6 +23,10 @@ type AgentWindow = {
   wbConfirm?: { ask?: (options: { title?: string; text?: string; okText?: string; okClass?: string }) => Promise<boolean> }
 }
 const host = () => window as unknown as AgentWindow
+export const isDesktopEnvironment = () => {
+  const platform = host().workbuddyDesktop?.platform
+  return Boolean(platform && platform !== 'web')
+}
 export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 export const toast = (message: string, kind?: 'err' | 'ok') => host().wbApp?.toast?.(message, kind)
 export async function confirm(title: string, text: string, okText = t('确定')): Promise<boolean> {
@@ -32,28 +42,110 @@ export type AgentStore = {
   detectedAt: number
   hostName: string
   loading: boolean
+  refreshing: boolean
   error: string
   selected: string
   filter: string
   query: string
   busy: string
 }
-let state: AgentStore = { clients: [], gateway: '', defaultModel: '', requiresKey: false, gatewayKeys: [], detectedAt: 0, hostName: '', loading: false, error: '', selected: '', filter: 'all', query: '', busy: '' }
+
+function readStoredString(key: string): string {
+  try { return window.localStorage.getItem(key) || '' } catch { return '' }
+}
+function writeStoredString(key: string, value: string): void {
+  try { window.localStorage.setItem(key, value) } catch { /* ignore storage errors */ }
+}
+function readCachedPayload(): AgentPayload | null {
+  try {
+    const raw = window.localStorage.getItem(SNAPSHOT_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as AgentPayload
+    if (!parsed || !Array.isArray(parsed.clients) || !parsed.clients.length) return null
+    if (parsed.clients.some(client => !Array.isArray(client.configurations))) return null
+    if (typeof parsed.gateway?.baseUrl !== 'string') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+function saveCachedPayload(payload: AgentPayload): void {
+  try { window.localStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify(payload)) } catch { /* ignore storage quota */ }
+}
+function defaultSelected(clients: AgentClient[], preferred: string): string {
+  if (preferred && clients.some(client => client.id === preferred)) return preferred
+  return clients.find(client => client.detected)?.id || clients[0]?.id || ''
+}
+
+const cachedPayload = readCachedPayload()
+const cachedSelected = cachedPayload ? defaultSelected(cachedPayload.clients, readStoredString(SELECTED_CACHE_KEY)) : ''
+let lastLiveLoadedAt = 0
+
+let state: AgentStore = cachedPayload ? {
+  clients: cachedPayload.clients,
+  gateway: cachedPayload.gateway.baseUrl,
+  defaultModel: cachedPayload.gateway.defaultModel || '',
+  requiresKey: cachedPayload.gateway.requiresKey,
+  gatewayKeys: cachedPayload.gateway.keys || [],
+  detectedAt: cachedPayload.detectedAt || 0,
+  hostName: cachedPayload.host?.name || '',
+  loading: false,
+  refreshing: false,
+  error: '',
+  selected: cachedSelected,
+  filter: 'all',
+  query: '',
+  busy: '',
+} : {
+  clients: [], gateway: '', defaultModel: '', requiresKey: false, gatewayKeys: [], detectedAt: 0, hostName: '', loading: false, refreshing: false, error: '', selected: '', filter: 'all', query: '', busy: '',
+}
 const listeners = new Set<() => void>()
 export const getAgentStore = () => state
 export function subscribeAgentStore(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener) } }
 function patch(values: Partial<AgentStore>): void { state = { ...state, ...values }; for (const listener of listeners) listener() }
+function syncVisibleSelection(next: AgentStore): string {
+  const list = visibleClients(next)
+  if (!list.length) return next.selected
+  return list.some(client => client.id === next.selected) ? next.selected : list[0].id
+}
 export function selectedClient(): AgentClient | undefined { return state.clients.find(client => client.id === state.selected) }
-export function selectClient(id: string): void { patch({ selected: id }) }
-export function setFilter(filter: string): void { patch({ filter }) }
-export function setQuery(query: string): void { patch({ query }) }
+export function selectClient(id: string): void { writeStoredString(SELECTED_CACHE_KEY, id); patch({ selected: id }) }
+export function setFilter(filter: string): void {
+  const selected = syncVisibleSelection({ ...state, filter })
+  if (selected) writeStoredString(SELECTED_CACHE_KEY, selected)
+  patch({ filter, selected })
+}
+export function setQuery(query: string): void {
+  const selected = syncVisibleSelection({ ...state, query })
+  if (selected) writeStoredString(SELECTED_CACHE_KEY, selected)
+  patch({ query, selected })
+}
+export function clearFilters(): void {
+  const selected = syncVisibleSelection({ ...state, filter: 'all', query: '' })
+  if (selected) writeStoredString(SELECTED_CACHE_KEY, selected)
+  patch({ filter: 'all', query: '', selected })
+}
 
 function accept(payload: AgentPayload): void {
   if (!payload || !Array.isArray(payload.clients)) throw new Error(t('客户端列表响应无效'))
   if (payload.clients.some(client => !Array.isArray(client.configurations))) throw new Error(t('配置列表格式不匹配，请重启网关后刷新页面'))
-  patch({ clients: payload.clients, gateway: payload.gateway.baseUrl, defaultModel: payload.gateway.defaultModel || '', requiresKey: payload.gateway.requiresKey,
-    gatewayKeys: payload.gateway.keys || [], detectedAt: payload.detectedAt, hostName: payload.host?.name || '', error: '',
-    selected: payload.clients.some(client => client.id === state.selected) ? state.selected : (payload.clients.find(client => client.detected)?.id || payload.clients[0]?.id || '') })
+  const next: AgentStore = {
+    ...state,
+    clients: payload.clients,
+    gateway: payload.gateway.baseUrl,
+    defaultModel: payload.gateway.defaultModel || '',
+    requiresKey: payload.gateway.requiresKey,
+    gatewayKeys: payload.gateway.keys || [],
+    detectedAt: payload.detectedAt,
+    hostName: payload.host?.name || '',
+    error: '',
+    selected: defaultSelected(payload.clients, state.selected || readStoredString(SELECTED_CACHE_KEY)),
+  }
+  next.selected = syncVisibleSelection(next)
+  if (next.selected) writeStoredString(SELECTED_CACHE_KEY, next.selected)
+  saveCachedPayload(payload)
+  lastLiveLoadedAt = Date.now()
+  patch(next)
 }
 
 export function visibleClients(store = state): AgentClient[] {
@@ -71,22 +163,36 @@ export function counts(store = state) {
   return { all: store.clients.length, detected: detected.length, via, direct: detected.length - via, missing: store.clients.length - detected.length }
 }
 
+export type LoadOptions = { silent?: boolean; force?: boolean }
 let loadingRequest = 0
-export async function loadPanel(silent = false): Promise<void> {
-  if (state.loading || state.busy) return
+export async function loadPanel(optionsOrSilent: boolean | LoadOptions = false): Promise<void> {
+  const options = typeof optionsOrSilent === 'boolean' ? { silent: optionsOrSilent, force: false } : optionsOrSilent
+  const silent = Boolean(options.silent)
+  const force = Boolean(options.force)
+  if (state.refreshing || state.busy) return
+  if (!force && lastLiveLoadedAt > 0 && Date.now() - lastLiveLoadedAt < AUTO_REFRESH_COOLDOWN_MS) return
   const call = host().workbuddyDesktop?.getAgents
-  if (!call) { patch({ error: t('当前环境不支持客户端配置'), loading: false }); return }
+  if (!call) { patch({ error: t('当前环境不支持客户端配置'), loading: false, refreshing: false }); return }
   const request = ++loadingRequest
-  patch({ loading: true })
-  try { const payload = await call(); if (request === loadingRequest) accept(payload) }
+  patch({ loading: state.clients.length === 0, refreshing: true })
+  try {
+    const payload = await call(force ? { refresh: true } : undefined)
+    if (request === loadingRequest) accept(payload)
+  }
   catch (error) { if (request === loadingRequest) { patch({ error: errorMessage(error) }); if (!silent) toast(errorMessage(error), 'err') } }
-  finally { if (request === loadingRequest) patch({ loading: false }) }
+  finally { if (request === loadingRequest) patch({ loading: false, refreshing: false }) }
+}
+
+export async function pickConfigFile(defaultPath?: string) {
+  const picker = host().workbuddyDesktop?.pickAgentConfigFile
+  if (!picker) return { canceled: true, unsupported: true }
+  return await picker(defaultPath)
 }
 
 async function mutation(clientId: string, call: () => Promise<AgentPayload>): Promise<AgentPayload> {
   if (state.busy) throw new Error(t('另一项配置操作尚未完成'))
   loadingRequest += 1
-  patch({ busy: clientId, loading: false })
+  patch({ busy: clientId, loading: false, refreshing: false })
   try { const payload = await call(); accept(payload); return payload }
   finally { patch({ busy: '' }) }
 }

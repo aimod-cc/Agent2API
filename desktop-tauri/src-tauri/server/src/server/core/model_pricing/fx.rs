@@ -103,7 +103,8 @@ pub fn current_rate_soon() -> FxRateSnapshot {
         });
         let stale = current.is_stale(now);
         let cooling = guard.failed_at > 0 && now.saturating_sub(guard.failed_at) < RETRY_AFTER_MS;
-        let trigger = stale && !guard.refreshing && !cooling;
+        let can_spawn = tokio::runtime::Handle::try_current().is_ok();
+        let trigger = stale && can_spawn && !guard.refreshing && !cooling;
         if trigger {
             guard.refreshing = true;
         }

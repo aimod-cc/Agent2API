@@ -460,7 +460,7 @@ const BRIDGE_JS: &str = r#"
     //   · restoreAgentClient  按最近一次备份还原
     //   · importAgentClient   从客户端现有文件里读回一套配置
     //   写操作都返回整份 `{clients}`（就地替换，页面不必再拉一次）。
-    getAgents: () => call('GET', '/api/agents'),
+    getAgents: options => call('GET', '/api/agents' + (options && options.refresh ? '?refresh=1' : '')),
     getAgentModels: gatewayKeyId => call('GET', '/api/agents/models' + (gatewayKeyId == null ? '' : '?gatewayKeyId=' + encodeURIComponent(gatewayKeyId))),
     saveAgentProfiles: payload => call('POST', '/api/agents/profiles', payload || {}),
     applyAgentProfile: payload => call('POST', '/api/agents/apply', payload || {}),
@@ -489,6 +489,7 @@ const BRIDGE_JS: &str = r#"
 
     // 桌面壳的文件夹选择框：参数名与命令签名一致（camelCase ← Rust 的 snake_case）
     pickFolder: defaultDir => invoke('pick_folder', { defaultDir: defaultDir == null ? null : String(defaultDir) }),
+    pickAgentConfigFile: defaultPath => invoke('pick_agent_config_file', { defaultPath: defaultPath == null ? null : String(defaultPath) }),
     pickDesktopClient: defaultPath => invoke('pick_desktop_client', { defaultPath: defaultPath == null ? null : String(defaultPath) }),
 
     // ── 积分 / 签到 ──

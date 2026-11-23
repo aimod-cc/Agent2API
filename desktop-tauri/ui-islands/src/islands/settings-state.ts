@@ -67,6 +67,7 @@ import {
   INITIAL_SANITIZE, sanitizeStateFrom, type SanitizePatch, type SanitizeState,
 } from './settings-sanitize-model'
 import { t } from '../i18n'
+import { loadPricingSettings } from './model-pricing'
 import { retentionSavedMessage, retentionShrinkHead, type RetentionField } from './settings-retention-model'
 
 /* ─── 快照类型 ─────────────────────────────── */
@@ -2673,6 +2674,7 @@ export async function load({ checkUpdate = false }: { checkUpdate?: boolean } = 
     loadStorage(),
     loadAccount(),
     loadModelsDev(),
+    loadPricingSettings().catch(() => null),
     reconnectDbRestore(),
     // 托盘只检查版本，不能恢复下载任务后顺带启动已完成的安装包。
     checkUpdate ? shared().wbUpdatePanel?.check?.() : shared().wbUpdatePanel?.load?.(),

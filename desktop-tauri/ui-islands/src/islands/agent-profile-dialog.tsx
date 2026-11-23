@@ -120,7 +120,7 @@ export function ProfileDialog({ client, profile, creating, onClose }: { client: 
           <Alert>{t('确认后将更新 {name} 的配置文件，原配置会自动备份。', { name: client.name })}</Alert>
           {preview.warnings.map((warning, index) => <p key={index} className='text-xs leading-relaxed text-subtle'>{warning}</p>)}
           <Collapsible open={detailsOpen} onOpenChange={setDetailsOpen}>
-            <CollapsibleTrigger render={<Button variant='ghost' size='sm' />}><AgentIcon name='chevron' />{t('查看文件改动')}</CollapsibleTrigger>
+            <CollapsibleTrigger render={<Button variant='ghost' size='sm' />}><span className={detailsOpen ? 'agent-chevron is-open' : 'agent-chevron'}><AgentIcon name='chevron' /></span>{t('查看文件改动')}</CollapsibleTrigger>
             <CollapsibleContent><WritePreview preview={preview} showWarnings={false} /></CollapsibleContent>
           </Collapsible>
         </>}

@@ -232,7 +232,7 @@ export function RoutingErrorsPanel({ refreshNonce }: { refreshNonce: number }) {
         <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 8 }}>{t('单条请求重试上限')}</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           <NumberField label={t('原账号重发(次)')} value={draft.resends} min={0} max={10} onChange={resends => patchDraft({ resends })} />
-          <NumberField label={t('最多再换号(个)')} value={draft.switches} min={0} max={10} onChange={switches => patchDraft({ switches })} />
+          <NumberField label={t('最多再换号(个)')} value={draft.switches} min={0} max={100} onChange={switches => patchDraft({ switches })} />
           <NumberField label={t('重发间隔(秒)')} value={draft.intervalSeconds} min={0} max={300} onChange={intervalSeconds => patchDraft({ intervalSeconds })} />
           <NumberField label={t('累计等待上限(秒)')} value={draft.waitBudgetSeconds} min={0} max={300} onChange={waitBudgetSeconds => patchDraft({ waitBudgetSeconds })} />
         </div>

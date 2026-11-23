@@ -113,7 +113,7 @@ export function ConnectionFields({ client, draft, update, disabled }: {
       hint={t('只保存变量引用，不修改系统环境；请在启动客户端的环境里设置变量值。')} />}
     {client.id === 'zed' && <p className='text-xs leading-relaxed text-subtle'>{t('请在 Zed 提供商设置中保存 API Key；本页不修改系统凭证存储。')}</p>}
     <Collapsible open={advanced} onOpenChange={setAdvanced} className='sm:col-span-2'>
-      <CollapsibleTrigger render={<Button variant='ghost' size='sm' />}><AgentIcon name='chevron' />{t('高级选项')}<span className='text-xs text-subtle'>{protocolLabel(draft.protocol)}</span></CollapsibleTrigger>
+      <CollapsibleTrigger render={<Button variant='ghost' size='sm' />}><span className={advanced ? 'agent-chevron is-open' : 'agent-chevron'}><AgentIcon name='chevron' /></span>{t('高级选项')}<span className='text-xs text-subtle'>{protocolLabel(draft.protocol)}</span></CollapsibleTrigger>
       <CollapsibleContent className='pt-3'>
         <Field><FieldLabel>{t('客户端协议')}</FieldLabel><AgentSelect label={t('客户端协议')} value={draft.protocol} disabled={disabled || client.protocols.length === 1 && client.protocols.includes(draft.protocol)}
           onChange={protocol => update({ protocol, ...(draft.kind === 'gateway' ? { baseUrl: protocol === 'anthropic' ? store.gateway : `${store.gateway}/v1` } : {}) })}

@@ -11,7 +11,7 @@ import { CapabilityDialog } from './model-capability-dialog'
 import { ModelPricingDialog, type ModelPricingContext } from './model-pricing-dialog'
 import { ProviderPricingDialog, type ProviderPricingContext } from './provider-pricing-dialog'
 import {
-  loadPricingSettings, switchDisplayCurrency, updateCachedDisplay, usePricingDisplay,
+  loadPricingSettings, updateCachedDisplay,
   type ModelPricingSettings,
 } from './model-pricing'
 import { ModelTestDialog, type ModelTestTarget } from './model-test-dialog'
@@ -162,7 +162,6 @@ function ModelsPage() {
   const [pricingTarget, setPricingTarget] = React.useState<ModelPricingContext | null>(null)
   const [providerPricingTarget, setProviderPricingTarget] = React.useState<ProviderPricingContext | null>(null)
   const [pricingSettings, setPricingSettings] = React.useState<ModelPricingSettings | null>(null)
-  const pricingDisplay = usePricingDisplay()
   /** 批量操作的弹窗开关（勾选若干行后由表头旁按钮打开） */
   const [batchOpen, setBatchOpen] = React.useState(false)
   /**
@@ -558,12 +557,6 @@ function ModelsPage() {
                   </span>
                 </div>
                 <div className='head-actions'>
-                  <SegmentedControl
-                    value={pricingDisplay.currency}
-                    onValueChange={value => { void switchDisplayCurrency(value as 'usd' | 'cny') }}
-                    options={[{ value: 'usd', label: 'USD $' }, { value: 'cny', label: 'CNY ¥' }]}
-                    aria-label={t('计价货币')}
-                  />
                   {provider !== 'all' && provider !== ALL_CUSTOM ? (() => {
                     const rule = pricingSettings?.providerPricing?.[provider]
                     const tag = rule?.priceRate ? ` ×${rule.priceRate}` : rule?.rateWindows?.length ? ` ${rule.rateWindows.length}时段` : ''

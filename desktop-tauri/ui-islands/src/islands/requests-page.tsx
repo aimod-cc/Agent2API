@@ -21,7 +21,7 @@ import { DATE_RANGES, dateRangeQuery, readCustomRange, saveCustomRange, validCus
 import { Empty } from '@ui'
 import { ALL_CLIENTS, clientFilterValue, LogDateFilters, SourceLogFilters, sourceParams,
   type LogDates, type LogDrilldown, type SourceOption } from './requests/source-filters'
-import { switchDisplayCurrency, updateCachedDisplay, usePricingDisplay } from './model-pricing'
+import { updateCachedDisplay } from './model-pricing'
 import { RequestCell, headRow, isOk, isRunning, uniqueRowKeys, providerLabelOf, type RequestEntry, type VisibleColumn } from './requests/request-cells'
 import { getStore as getAccountsStore, subscribe as subscribeAccounts } from './accounts-store'
 import { phaseOf, phaseLabelOf, phaseElapsedText, phaseBadgeHtml, phaseElapsedLineHtml } from './requests/request-phase'
@@ -328,7 +328,6 @@ function emptyText(data: PanelData): string {
 
 function RequestsPage() {
   const namesHidden = React.useSyncExternalStore(subscribeAccounts, () => getAccountsStore().namesHidden)
-  const pricing = usePricingDisplay()
   const [data, setData] = React.useState<PanelData>(EMPTY_DATA)
   const [filters, setFilters] = React.useState<Filters>(() => readSavedFilters())
   const [range, setRange] = React.useState<string>(() => current.range)
@@ -630,12 +629,6 @@ function RequestsPage() {
         <Badge id='req-badge' variant='outline' data-tone=''>{badgeText + liveText}</Badge>
         <span className='panel-sub'>{t('按时间倒序，全量保留')}</span>
         <div className='head-actions'>
-          <SegmentedControl
-            value={pricing.currency}
-            onValueChange={val => { void switchDisplayCurrency(val as 'usd' | 'cny') }}
-            options={[{ value: 'usd', label: 'USD $' }, { value: 'cny', label: 'CNY ¥' }]}
-            aria-label={t('计价货币')}
-          />
           {}
           <Button id='btn-req-clear' variant='destructive'
             onClick={() => { void shared().wbRequestClearModal?.open?.() }}>{t('清理')}</Button>

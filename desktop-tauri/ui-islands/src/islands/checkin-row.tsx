@@ -20,7 +20,7 @@ export function ProviderLogo({ id, label }: { id: string; label: string }): Reac
 }
 
 /** 展开箭头：展开时转 90°（与账号页同一观感） */
-function ChevronIcon({ open }: { open: boolean }): React.ReactElement {
+export function ChevronIcon({ open }: { open: boolean }): React.ReactElement {
   return (
     <span
       className={cn('inline-flex flex-none text-muted-foreground transition-transform duration-150', open && 'rotate-90')}

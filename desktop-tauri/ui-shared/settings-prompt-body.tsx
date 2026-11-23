@@ -103,7 +103,10 @@ export function PromptGatewayDialog({ title, blocks, overrides, t, onSave, onClo
         {BLOCKS.map((field, index) => <div className='sp-body-field' key={field}>
           <Label htmlFor={`sp-gateway-${field}`}>{labels[index]}</Label>
           <Textarea id={`sp-gateway-${field}`} rows={field === 'identity' ? 2 : 8} value={draft[field]} spellCheck={false} disabled={busy}
-            onChange={event => setDraft(current => ({ ...current, [field]: event.currentTarget.value }))} />
+            onChange={event => {
+              const value = event.currentTarget.value
+              setDraft(current => ({ ...current, [field]: value }))
+            }} />
         </div>)}
         {error ? <p role='alert' className='sp-error'>{error}</p> : null}
       </DialogBody>

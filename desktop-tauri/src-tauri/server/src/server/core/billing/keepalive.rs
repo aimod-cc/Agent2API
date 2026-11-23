@@ -114,13 +114,22 @@ pub fn set_models(list: &[String], api_key_id: Option<Option<String>>) -> Result
     }
     let picked = normalize(list);
     let value: Vec<String> = if picked.is_empty() { default_models() } else { picked };
-    config::update_raw_field(
+    config::try_update_raw_field(
         CONFIG_KEY,
-        json!({ "models": value, "apiKeyId": selected }),
-    );
+        |current| {
+            *current = json!({ "models": &value, "apiKeyId": &selected });
+            Ok(())
+        },
+        || "保存保活模型链失败（配置数据库不可用）".to_string(),
+    )?;
+    let summary = if value.is_empty() {
+        "（已清空）".to_string()
+    } else {
+        value.join(" → ")
+    };
     logging::log(
         "[Checkin]",
-        &format!("WorkBuddy 国际版保活模型链已改为 {}", value.join(" → ")),
+        &format!("WorkBuddy 国际版保活模型链已改为 {summary}"),
     );
     Ok(value)
 }

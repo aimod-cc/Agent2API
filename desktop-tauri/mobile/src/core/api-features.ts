@@ -130,6 +130,7 @@ export type ModelPrice = {
   cacheWrite1h?: number
   tiers?: ModelPriceTier[]
   peak?: string
+  currency?: 'usd' | 'cny'
 }
 
 export type RateWindow = {

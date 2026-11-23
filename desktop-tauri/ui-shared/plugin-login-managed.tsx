@@ -168,14 +168,12 @@ export const managedStepKey = (step: ManagedInteraction) => JSON.stringify([
   step.provider, step.flow, step.methodIndex, step.id, step.captcha, step.browser,
 ])
 
-const captchaOwners = new Set<symbol>()
-const captchaListeners = new Set<() => void>()
-export const subscribeManagedCaptchaBusy = (listener: () => void) => { captchaListeners.add(listener); return () => { captchaListeners.delete(listener) } }
-export const managedCaptchaBusy = () => captchaOwners.size > 0
+import { isCaptchaBusy, setCaptchaBusy, subscribeCaptchaBusy } from './plugin-captcha-busy'
+
+export const subscribeManagedCaptchaBusy = subscribeCaptchaBusy
+export const managedCaptchaBusy = isCaptchaBusy
 function captchaBusy(owner: symbol, busy: boolean) {
-  if (busy) captchaOwners.add(owner)
-  else captchaOwners.delete(owner)
-  captchaListeners.forEach(listener => listener())
+  setCaptchaBusy(owner, busy)
 }
 
 type BusinessReply = { captchaResult: boolean; bizResult: boolean }
@@ -220,7 +218,7 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 export function ManagedLoginInteraction({ step, deadline, scope, request, refresh, accept, onSubmitting,
-  attemptedBefore, markAttempted, browserOpenedBefore = false, markBrowserOpened, callbackSubmitted, markCallbackSubmitted, openExternal, openEmbedded, t }: {
+  attemptedBefore, markAttempted, captchaAutoStartedBefore = false, markCaptchaAutoStarted, browserOpenedBefore = false, markBrowserOpened, callbackSubmitted, markCallbackSubmitted, openExternal, openEmbedded, t }: {
   step: ManagedInteraction
   deadline: number
   scope: ManagedLoginScope
@@ -230,6 +228,8 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   onSubmitting(busy: boolean, owner: symbol): void
   attemptedBefore: boolean
   markAttempted(): void
+  captchaAutoStartedBefore?: boolean
+  markCaptchaAutoStarted?: () => void
   browserOpenedBefore?: boolean
   markBrowserOpened?: () => void
   callbackSubmitted: boolean
@@ -239,6 +239,7 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   t: Translate
 }) {
   const [busy, setBusy] = React.useState('')
+  const [opening, setOpening] = React.useState(false)
   const [attempted, setAttempted] = React.useState(attemptedBefore)
   const [expired, setExpired] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -247,6 +248,7 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   const [hasCallback, setHasCallback] = React.useState(false)
   const [callbackSent, setCallbackSent] = React.useState(callbackSubmitted)
   const callbackLocked = React.useRef(callbackSubmitted)
+  const captchaAutoStarted = React.useRef(captchaAutoStartedBefore)
   const browserOpened = React.useRef(browserOpenedBefore)
   const input = React.useRef<HTMLInputElement>(null)
   const controller = React.useRef<AbortController | null>(null)
@@ -300,6 +302,14 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
     }
   }, [step.status, scopeAlive])
   React.useEffect(() => {
+    if (captchaAutoStarted.current || used.current || attempted || busy || expired || !current()
+      || step.status !== 'ready' || !step.captcha || isCaptchaBusy()) return
+    captchaAutoStarted.current = true
+    markCaptchaAutoStarted?.()
+    void verify()
+  }, [scopeKey, stepKey, step.status, scopeAlive, busy, expired, attempted])
+
+  React.useEffect(() => {
     if (browserOpened.current || !current() || busy || expired || callbackSent || callbackLocked.current
       || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
     browserOpened.current = true
@@ -321,11 +331,11 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       const api = await untilAborted(loadAliyun(), abort.signal)
       if (!live()) throw aborted()
       if (api.isBusy()) throw new Error('captcha_busy')
-      used.current = true; markAttempted(); setAttempted(true)
       captchaBusy(owner.current, true)
       const result = await untilAborted(api.solve(step.captcha, async param => {
         if (!live() || sent || !text(param, 32768)) return { captchaResult: false, bizResult: false }
         sent = true
+        used.current = true; markAttempted(); setAttempted(true)
         context.onSubmitting(true, owner.current)
         const startedAt = performance.now()
         try {
@@ -352,8 +362,14 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       if (result.captchaResult && result.bizResult && next.value) {
         context.accept(next.value.step, next.value.startedAt)
       } else setError(t('登录验证结果未确认，请刷新当前步骤；不会自动重发验证凭据。'))
-    } catch {
-      if (current() && !abort.signal.aborted) setError(t('登录验证未完成，请刷新当前步骤后重试。'))
+    } catch (failure) {
+      if (current() && !abort.signal.aborted) {
+        if (failure instanceof Error && failure.name === 'CaptchaCancelledError') {
+          setNotice(t('已取消人机验证，可点击下方按钮重新开始。'))
+        } else {
+          setError(t('登录验证未完成，请刷新当前步骤后重试。'))
+        }
+      }
     } finally {
       context.onSubmitting(false, owner.current)
       captchaBusy(owner.current, false)
@@ -401,23 +417,31 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   }
 
   async function open(auto = false) {
-    if (!current() || busy || callbackSent || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
+    if (!current() || busy || opening || callbackSent || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
+    setOpening(true)
     setError('')
+    setNotice('')
     setAutoOpenNotice('')
     try {
       if (step.browser.browserMode === 'embedded') {
         if (!latest.current.openEmbedded) throw new Error('embedded_login_unavailable')
         await latest.current.openEmbedded(step.flow, step.id)
       } else { await latest.current.openExternal(step.browser.url) }
+      if (!current()) return
+      setNotice(step.browser.browserMode === 'embedded'
+        ? t('已打开官方授权窗口，请在弹出的窗口中完成登录；如果未看到窗口，可点击下方按钮重新打开。')
+        : t('已打开系统浏览器授权页，请在浏览器中完成登录；如果页面未切换到前台，可切到浏览器查看或点击下方按钮重新打开。'))
     }
     catch {
       if (!current()) return
       if (auto) setAutoOpenNotice(t('未能自动打开官方授权页，请点击下方按钮手动打开。'))
       else setError(t('打开授权页失败，请刷新当前步骤后重试。'))
+    } finally {
+      if (alive.current) setOpening(false)
     }
   }
 
-  const disabled = Boolean(busy) || expired || !scopeAlive || step.status !== 'ready'
+  const disabled = Boolean(busy) || opening || expired || !scopeAlive || step.status !== 'ready'
     || sourceGeneration.current !== managedLoginSourceGeneration()
   return <section className='flex flex-col gap-3 rounded-lg border border-hairline p-3' aria-label={step.title}>
     <h3 className='text-sm font-semibold'>{step.title}</h3>
@@ -426,12 +450,12 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       <Spinner className='size-3' />{step.status === 'preparing' ? t('正在准备安全登录，请稍候…') : t('正在处理本次登录，请勿重复提交。')}
     </p> : null}
     {step.captcha ? <Button disabled={disabled || attempted} onClick={() => void verify()}>
-      {busy ? <Spinner /> : null}{t('开始登录验证')}
+      {busy ? <Spinner /> : null}{busy ? t('正在进行人机验证…') : t('开始登录验证')}
     </Button> : null}
     {step.browser ? <>
       {autoOpenNotice ? <p role='status' className='text-xs text-muted-foreground'>{autoOpenNotice}</p> : null}
       <Button variant='outline' disabled={disabled || callbackSent} onClick={() => void open()}>
-        {autoOpenNotice ? t('打开官方授权页') : t('重新打开官方授权页')}
+        {opening ? <Spinner /> : null}{autoOpenNotice ? t('打开官方授权页') : t('重新打开官方授权页')}
       </Button>
       {step.browser.manualCallback ? <>
         <p className='text-xs text-muted-foreground'>{t('授权完成后如未自动返回，请粘贴本次完整回调地址。打开浏览器不代表登录成功。')}</p>

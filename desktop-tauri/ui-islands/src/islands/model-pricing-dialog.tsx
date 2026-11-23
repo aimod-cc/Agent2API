@@ -63,6 +63,12 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
   })
 
   const base = context.settings?.modelPrices?.[targetKey] || context.pricing?.base
+  const [priceCurrency, setPriceCurrency] = React.useState<'usd' | 'cny'>(() => {
+    if (base?.currency === 'cny' || (!base && (context.pricing?.currency === 'cny' || display.currency === 'cny'))) {
+      return 'cny'
+    }
+    return 'usd'
+  })
   const [inputPrice, setInputPrice] = React.useState(() => numToStr(base?.input))
   const [outputPrice, setOutputPrice] = React.useState(() => numToStr(base?.output))
   const [cacheReadPrice, setCacheReadPrice] = React.useState(() => numToStr(base?.cacheRead))
@@ -91,6 +97,7 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
     const existingSame = same[targetKey]
     if (existingPrice) {
       setMode('custom')
+      setPriceCurrency(existingPrice.currency === 'cny' ? 'cny' : 'usd')
       setInputPrice(numToStr(existingPrice.input))
       setOutputPrice(numToStr(existingPrice.output))
       setCacheReadPrice(numToStr(existingPrice.cacheRead))
@@ -110,6 +117,7 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
     } else {
       setMode('default')
       const fallback = context.pricing?.base
+      setPriceCurrency(fallback ? (fallback.currency === 'cny' ? 'cny' : 'usd') : display.currency)
       setInputPrice(numToStr(fallback?.input))
       setOutputPrice(numToStr(fallback?.output))
       setCacheReadPrice(numToStr(fallback?.cacheRead))
@@ -189,6 +197,7 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
           cacheRead: parseNum(cacheReadPrice, t('缓存读取单价')),
           cacheWrite: parseNum(cacheWritePrice, t('缓存写入单价')),
           cacheWrite1h: parseNum(cacheWrite1hPrice, t('1小时缓存写入单价')),
+          currency: priceCurrency,
           ...(parsedTiers.length > 0 ? { tiers: parsedTiers } : {}),
         }
         payload.price = price
@@ -221,15 +230,24 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
               {context.pricing?.effective ? (
                 <span>
                   {t('当前生效：输入 {input}/M · 输出 {output}/M', {
-                    input: formatUnitPrice(context.pricing.effective.input, display.currency, display.exchangeRate),
-                    output: formatUnitPrice(context.pricing.effective.output, display.currency, display.exchangeRate),
+                    input: formatUnitPrice(
+                      context.pricing.effective.input,
+                      display.currency,
+                      display.exchangeRate,
+                      context.pricing.effective.currency || context.pricing.currency || 'usd',
+                    ),
+                    output: formatUnitPrice(
+                      context.pricing.effective.output,
+                      display.currency,
+                      display.exchangeRate,
+                      context.pricing.effective.currency || context.pricing.currency || 'usd',
+                    ),
                   })}
                 </span>
               ) : (
                 <span className='text-[var(--text-3)]'>{t('尚未匹配到官网基准价')}</span>
               )}
             </div>
-            <span className='text-[var(--text-3)]'>{t('单价填写均以美元($)/百万 Token 为准')}</span>
           </div>
 
           <Field>
@@ -262,29 +280,43 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
 
           {mode === 'custom' ? (
             <div className='flex flex-col gap-3'>
+              <Field>
+                <FieldLabel>{t('计价币种')}</FieldLabel>
+                <SegmentedControl
+                  value={priceCurrency}
+                  onValueChange={v => {
+                    if (v === 'usd' || v === 'cny') setPriceCurrency(v)
+                  }}
+                  aria-label={t('计价币种')}
+                  options={[
+                    { value: 'usd', label: t('美元 ($)') },
+                    { value: 'cny', label: t('人民币 (¥)') },
+                  ]}
+                />
+              </Field>
               <div className='grid grid-cols-2 gap-3 sm:grid-cols-3'>
                 <Field>
-                  <FieldLabel>{t('输入 ($/M)')}</FieldLabel>
+                  <FieldLabel>{priceCurrency === 'cny' ? t('输入 (¥/M)') : t('输入 ($/M)')}</FieldLabel>
                   <Input type='number' min='0' step='any' value={inputPrice} placeholder='0'
                     onChange={e => setInputPrice(e.currentTarget.value)} />
                 </Field>
                 <Field>
-                  <FieldLabel>{t('输出 ($/M)')}</FieldLabel>
+                  <FieldLabel>{priceCurrency === 'cny' ? t('输出 (¥/M)') : t('输出 ($/M)')}</FieldLabel>
                   <Input type='number' min='0' step='any' value={outputPrice} placeholder='0'
                     onChange={e => setOutputPrice(e.currentTarget.value)} />
                 </Field>
                 <Field>
-                  <FieldLabel>{t('缓存读取 ($/M)')}</FieldLabel>
+                  <FieldLabel>{priceCurrency === 'cny' ? t('缓存读取 (¥/M)') : t('缓存读取 ($/M)')}</FieldLabel>
                   <Input type='number' min='0' step='any' value={cacheReadPrice} placeholder='0'
                     onChange={e => setCacheReadPrice(e.currentTarget.value)} />
                 </Field>
                 <Field>
-                  <FieldLabel>{t('缓存写入 5m ($/M)')}</FieldLabel>
+                  <FieldLabel>{priceCurrency === 'cny' ? t('缓存写入 5m (¥/M)') : t('缓存写入 5m ($/M)')}</FieldLabel>
                   <Input type='number' min='0' step='any' value={cacheWritePrice} placeholder='0'
                     onChange={e => setCacheWritePrice(e.currentTarget.value)} />
                 </Field>
                 <Field>
-                  <FieldLabel>{t('缓存写入 1h ($/M)')}</FieldLabel>
+                  <FieldLabel>{priceCurrency === 'cny' ? t('缓存写入 1h (¥/M)') : t('缓存写入 1h ($/M)')}</FieldLabel>
                   <Input type='number' min='0' step='any' value={cacheWrite1hPrice} placeholder={t('Claude 自动 2×')}
                     onChange={e => setCacheWrite1hPrice(e.currentTarget.value)} />
                 </Field>
@@ -303,27 +335,27 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('超出 Token')}</FieldLabel>
                         <Input type='number' min='1' value={tier.above}
-                          onChange={e => setTiers(prev => prev.map((it, i) => i === idx ? { ...it, above: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setTiers(prev => prev.map((it, i) => i === idx ? { ...it, above: v } : it)) }} />
                       </Field>
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('输入')}</FieldLabel>
                         <Input type='number' min='0' step='any' value={tier.input}
-                          onChange={e => setTiers(prev => prev.map((it, i) => i === idx ? { ...it, input: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setTiers(prev => prev.map((it, i) => i === idx ? { ...it, input: v } : it)) }} />
                       </Field>
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('输出')}</FieldLabel>
                         <Input type='number' min='0' step='any' value={tier.output}
-                          onChange={e => setTiers(prev => prev.map((it, i) => i === idx ? { ...it, output: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setTiers(prev => prev.map((it, i) => i === idx ? { ...it, output: v } : it)) }} />
                       </Field>
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('缓存读')}</FieldLabel>
                         <Input type='number' min='0' step='any' value={tier.cacheRead}
-                          onChange={e => setTiers(prev => prev.map((it, i) => i === idx ? { ...it, cacheRead: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setTiers(prev => prev.map((it, i) => i === idx ? { ...it, cacheRead: v } : it)) }} />
                       </Field>
                       <Field>
                         <FieldLabel className='text-[11px]'>{t('缓存写')}</FieldLabel>
                         <Input type='number' min='0' step='any' value={tier.cacheWrite}
-                          onChange={e => setTiers(prev => prev.map((it, i) => i === idx ? { ...it, cacheWrite: e.currentTarget.value } : it))} />
+                          onChange={e => { const v = e.currentTarget.value; setTiers(prev => prev.map((it, i) => i === idx ? { ...it, cacheWrite: v } : it)) }} />
                       </Field>
                       <Button size='xs' variant='ghost' type='button'
                         onClick={() => setTiers(prev => prev.filter((_, i) => i !== idx))}>{t('移除')}</Button>

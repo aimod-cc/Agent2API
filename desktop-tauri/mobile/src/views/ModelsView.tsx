@@ -190,11 +190,12 @@ export function ModelsView() {
           const enabled = m.enabled !== false
           const p = m.pricing
           const eff = p?.effective || p?.base
+          const srcCurrency = eff?.currency || p?.currency || 'usd'
           const priceText =
             p?.priced && eff
               ? eff.input === 0 && eff.output === 0
                 ? t('免费')
-                : `${formatUnitPrice(eff.input, pricing.currency, pricing.exchangeRate)} / ${formatUnitPrice(eff.output, pricing.currency, pricing.exchangeRate)}`
+                : `${formatUnitPrice(eff.input, pricing.currency, pricing.exchangeRate, srcCurrency)} / ${formatUnitPrice(eff.output, pricing.currency, pricing.exchangeRate, srcCurrency)}`
               : t('未定价')
           const sourceText = p?.priced ? pricingSourceLabel(p.source) : null
           return (

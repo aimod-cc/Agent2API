@@ -113,8 +113,16 @@ fn target(path: PathBuf, install: &installation::Installation, modern: bool) -> 
 }
 
 pub fn detect(binary: Option<&Path>, selected: Option<&Path>) -> Detection {
+    detect_with_options(binary, selected, true)
+}
+
+pub fn detect_with_options(
+    binary: Option<&Path>,
+    selected: Option<&Path>,
+    allow_spawn: bool,
+) -> Detection {
     let home = selected.map(home_for).unwrap_or_else(home);
-    let cli = installation::cli(binary);
+    let cli = installation::cli_with_options(binary, allow_spawn);
     let desktop = installation::desktop();
     let profiles = home.join("profiles");
     let mut targets = Vec::new();

@@ -9,6 +9,7 @@ mod challenge;
 mod context;
 
 pub use context::Call;
+pub(crate) use challenge::{check_alicom4_response, Challenge, ALICOM4_CODAR_CAPTCHA_ID};
 pub(crate) use context::device;
 
 pub(crate) struct Session {
@@ -20,6 +21,7 @@ pub(crate) struct Session {
     country_code: String,
     ticket: Value,
     challenge: Option<challenge::Challenge>,
+    message: String,
     sent: bool,
     retry_at: i64,
     expires_at: i64,
@@ -87,12 +89,16 @@ pub(crate) async fn start(
     let flow = format!("sms_{}", nonce()?);
     let provider = adapter.provider_id().to_string();
     let label = adapter.label();
+    let challenge = config.challenge.clone();
+    if challenge.is_some() && provider != "codar" {
+        return Err(GatewayError::with_status(502, "当前提供商不支持短信初始人机验证"));
+    }
     let task = state.login().new_handle_for_adapter("", adapter, proxy);
     let cancel = tokio_util::sync::CancellationToken::new();
     let session = Session {
         flow: flow.clone(), cleanup: std::sync::Arc::new(context::Cleanup::default()),
         country_code: config.country_codes.first().map(|code| code.value.clone()).unwrap_or_default(),
-        config, step: nonce()?, phone: String::new(), ticket: Value::Null, challenge: None,
+        config, step: nonce()?, phone: String::new(), ticket: Value::Null, challenge, message: String::new(),
         sent: false, retry_at: 0, expires_at: 0, deadline: logging::now_ms() + LOGIN_TIMEOUT_MS as i64,
         verify_attempts: 0, cancel: cancel.clone(), _reservation,
     };
@@ -162,6 +168,7 @@ pub(crate) fn snapshot(task: &LoginTaskHandle) -> Result<Value, GatewayError> {
                 "sent": session.sent, "expired": session.sent && (session.expires_at <= now || session.verify_attempts >= 5),
                 "retryAfterSeconds": ((session.retry_at - now).max(0) + 999) / 1000,
                 "expiresAfterSeconds": ((session.expires_at - now).max(0) + 999) / 1000,
+                "message": session.message,
                 "challenge": session.challenge } }))
     })
 }
@@ -196,7 +203,8 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
                 session.step = step;
                 session.phone.clear();
                 session.ticket = Value::Null;
-                session.challenge = None;
+                session.challenge = session.config.challenge.clone();
+                session.message.clear();
                 session.sent = false;
                 session.retry_at = 0;
                 session.expires_at = 0;
@@ -248,7 +256,7 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
                             .unwrap_or(retry_at);
                         let _ = with_session(task, |session| {
                             session.retry_at = ready;
-                            if !session.sent {
+                            if !session.sent && session.ticket.is_null() {
                                 session.phone.clear();
                             }
                             Ok(())
@@ -274,7 +282,7 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
                             return Err(GatewayError::with_status(502, "插件返回的短信有效时间无效"));
                         }
                         session.ticket = ticket;
-                        session.challenge = None;
+                        session.challenge = session.config.challenge.clone();
                         session.sent = true;
                         session.retry_at = now + retry_after_seconds.max(cooldown) as i64 * 1000;
                         session.expires_at = (now + expires_after_seconds.min(session.config.expires_after_seconds) as i64 * 1000)
@@ -334,6 +342,42 @@ pub(crate) async fn submit(_state: &ServerState, task: &LoginTaskHandle, value: 
             };
             if task.snapshot().canceled || task.snapshot().done { return Err(unavailable()); }
             with_session(task, |_| Ok(()))?;
+            if value.get("status").and_then(Value::as_str) == Some("captcha") {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct VerifyChallenge {
+                    #[serde(rename = "status")]
+                    _status: String,
+                    ticket: Value,
+                    challenge: challenge::Challenge,
+                    #[serde(default)]
+                    message: String,
+                }
+                let next: VerifyChallenge = serde_json::from_value(value)
+                    .map_err(|_| GatewayError::with_status(502, "插件返回的二次验证步骤无效"))?;
+                check_ticket(&next.ticket)?;
+                next.challenge.validate()?;
+                if matches!(next.challenge, challenge::Challenge::Alicom4 { .. }) && adapter.provider_id() != "codar" {
+                    return Err(GatewayError::with_status(502, "当前提供商不支持短信人机验证"));
+                }
+                if next.message.len() > 2048 || next.message.contains('\0') {
+                    return Err(GatewayError::with_status(502, "插件返回的验证提示语无效"));
+                }
+                let (country, phone) = with_session(task, |session| {
+                    session.ticket = next.ticket;
+                    session.challenge = Some(next.challenge);
+                    session.message = next.message;
+                    session.sent = false;
+                    session.retry_at = 0;
+                    session.expires_at = 0;
+                    session.verify_attempts = 0;
+                    session.step = nonce()?;
+                    Ok((session.country_code.clone(), session.phone.clone()))
+                })?;
+                limits::reset_retry(adapter.provider_id(), &country, &phone);
+                logging::log("[Login]", &format!("{}登录后需要二次人机及短信验证", adapter.label()));
+                return Ok(json!({ "accepted": true }));
+            }
             let mut account: agent2api_provider_protocol::NormalizedAccount = serde_json::from_value(value)
                 .map_err(|_| GatewayError::with_status(502, "插件返回的登录结果无效"))?;
             if !input.inputs.name.trim().is_empty() {
@@ -355,4 +399,70 @@ fn check_ticket(ticket: &Value) -> Result<(), GatewayError> {
         return Err(GatewayError::with_status(502, "插件返回的短信关联信息无效"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config(challenge: Option<Challenge>) -> SmsConfig {
+        SmsConfig {
+            phone_label: "手机号".into(),
+            phone_placeholder: "11 位手机号".into(),
+            country_codes: vec![super::super::sms_contract::CountryCode {
+                value: "86".into(),
+                label: "+86 中国大陆".into(),
+            }],
+            phone_min_length: 11,
+            phone_max_length: 11,
+            code_min_length: 4,
+            code_max_length: 8,
+            resend_after_seconds: 60,
+            expires_after_seconds: 300,
+            challenge,
+        }
+    }
+
+    #[test]
+    fn sms_config_accepts_codar_alicom4_initial_challenge() {
+        let cfg = base_config(Some(Challenge::Alicom4 {
+            captcha_id: ALICOM4_CODAR_CAPTCHA_ID.into(),
+        }));
+        assert!(cfg.validate().is_ok());
+
+        let wrong_id = base_config(Some(Challenge::Alicom4 {
+            captcha_id: "invalid".into(),
+        }));
+        assert!(wrong_id.validate().is_err());
+
+        let external = base_config(Some(Challenge::External {
+            url: "https://example.com".into(),
+        }));
+        assert!(external.validate().is_err());
+    }
+
+    #[test]
+    fn alicom4_challenge_checks_exact_fields() {
+        let ch = Challenge::Alicom4 {
+            captcha_id: ALICOM4_CODAR_CAPTCHA_ID.into(),
+        };
+        assert!(ch
+            .check(&json!({
+                "lot_number": "a",
+                "captcha_output": "b",
+                "pass_token": "c",
+                "gen_time": "1700000000"
+            }))
+            .is_ok());
+        assert!(ch.check(&Value::Null).is_err());
+        assert!(ch
+            .check(&json!({
+                "lot_number": "a",
+                "captcha_output": "b",
+                "pass_token": "c",
+                "gen_time": "1700000000",
+                "extra": "x"
+            }))
+            .is_err());
+    }
 }

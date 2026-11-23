@@ -221,6 +221,23 @@ impl ChatRequestPlan {
             policy: super::policy::ChatPolicy::default(),
         }
     }
+
+    /// 图片生成与编辑端点的请求计划（响应格式由 [`super::images::ImageResponseKind`] 决定）。
+    pub fn images(
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Value,
+        response: super::images::ImageResponseKind,
+    ) -> Self {
+        Self {
+            url,
+            headers,
+            body,
+            response: UpstreamResponse::Images(response),
+            reasoning: None,
+            policy: super::policy::ChatPolicy::default(),
+        }
+    }
 }
 
 /// 上游响应的协议（**请求体与响应必须同源**：这套标记由适配器在构造请求时

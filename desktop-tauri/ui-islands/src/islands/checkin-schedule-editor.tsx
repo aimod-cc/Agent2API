@@ -113,7 +113,10 @@ function ScheduleEditorForm({ entry, options, defaultRetryTime, onClose }: {
                   <Input type='time' value={override || effectiveScheduleTime(time, providerTimes, option)}
                     disabled={!checked || store.saving} className='w-[108px] font-mono tabular-nums'
                     aria-label={t('{name}签到时间', { name: t(option.label) })}
-                    onChange={event => setProviderTimes(previous => ({ ...previous, [option.id]: event.currentTarget.value }))} />
+                    onChange={event => {
+                      const value = event.currentTarget.value
+                      setProviderTimes(previous => ({ ...previous, [option.id]: value }))
+                    }} />
                   <small className='font-mono tabular-nums'>{checkinRangeText(
                     effectiveScheduleTime(time, providerTimes, option),
                     providerCheckinEnd(effectiveScheduleTime(time, providerTimes, option), time, timeEnd),

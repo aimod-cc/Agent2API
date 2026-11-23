@@ -80,7 +80,7 @@ function CheckinPage(): React.ReactElement {
   React.useEffect(() => {
     const timer = window.setInterval(() => {
       const page = (window as unknown as { wbApp?: { currentPage?: string } }).wbApp?.currentPage
-      if (document.hidden || page !== 'checkin') return
+      if (document.hidden || page !== 'checkin' || store.saving) return
       if (store.center?.auto?.running || store.center?.travel?.running || store.center?.pluginTasks?.some(pluginTaskRunning)
         || activeTab === 'schedule' && (store.center?.auto?.enabled || store.center?.pluginTasks?.some(row => row.task.enabled))) void loadCenter()
     }, 3000)

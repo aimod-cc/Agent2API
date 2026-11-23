@@ -38,8 +38,35 @@ fn response(result: Result<Value, String>) -> Response {
     }
 }
 
-pub async fn list_agents(State(state): State<ServerState>) -> Response {
-    ok_json(agents::snapshot(state.port))
+async fn run_json(action: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Response {
+    match crate::server::core::blocking::run(action).await {
+        Ok(result) => response(result),
+        Err(error) => management_error(500, error.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListQuery {
+    refresh: Option<String>,
+}
+
+pub async fn list_agents(
+    State(state): State<ServerState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let force_refresh = matches!(
+        query.refresh.as_deref().map(str::trim),
+        Some("1" | "true" | "TRUE")
+    );
+    match crate::server::core::blocking::run(move || {
+        agents::snapshot_with_options(state.port, force_refresh)
+    })
+    .await
+    {
+        Ok(value) => ok_json(value),
+        Err(error) => management_error(500, error.to_string()),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -49,12 +76,15 @@ pub struct ModelQuery {
 }
 
 pub async fn list_models(State(state): State<ServerState>, Query(query): Query<ModelQuery>) -> Response {
-    response(agents::catalog::models(state.store(), query.gateway_key_id.as_deref())
-        .map(|models| json!({ "models": models })))
+    run_json(move || {
+        agents::catalog::models(state.store(), query.gateway_key_id.as_deref())
+            .map(|models| json!({ "models": models }))
+    })
+    .await
 }
 
 pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         // 路径偏好不改变客户端自身的配置加载位置。
@@ -101,7 +131,8 @@ pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Res
         }
         agents::store::save_client(state.db(), def.id, &profiles, text(&payload, "revision"))?;
         Ok(agents::snapshot(state.port))
-    })())
+    })
+    .await
 }
 
 fn same_profile(a: &Profile, b: &Profile) -> bool {
@@ -166,7 +197,7 @@ fn selected_profile(
 }
 
 pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
@@ -186,11 +217,12 @@ pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> R
             return agents::quick_connect::create_preview(def, &path, &profile, state.port);
         }
         agents::preview::create(def, &path, &profile, &operation(def, &payload)?, state.port)
-    })())
+    })
+    .await
 }
 
 pub async fn apply_profile(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
@@ -213,11 +245,12 @@ pub async fn apply_profile(State(state): State<ServerState>, body: Bytes) -> Res
             object.insert("applied".into(), applied);
         }
         Ok(snapshot)
-    })())
+    })
+    .await
 }
 
 pub async fn restore_client(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
@@ -232,11 +265,12 @@ pub async fn restore_client(State(state): State<ServerState>, body: Bytes) -> Re
             object.insert("restored".into(), restored);
         }
         Ok(snapshot)
-    })())
+    })
+    .await
 }
 
 pub async fn import_client(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
@@ -284,5 +318,6 @@ pub async fn import_client(State(state): State<ServerState>, body: Bytes) -> Res
             object.insert("imported".into(), json!({"clientId":def.id,"count":count}));
         }
         Ok(snapshot)
-    })())
+    })
+    .await
 }

@@ -251,7 +251,10 @@ export function MappingDialog({ context, onClose }: { context: MappingContext; o
               <Input id='mapping-reasoning-custom' maxLength={32} autoFocus
                 placeholder={t('自定义等级（例如 custom-high）')} autoComplete='off'
                 disabled={saving} value={active.custom}
-                onChange={event => setReasoning(prev => ({ ...prev, custom: event.currentTarget.value }))}
+                onChange={event => {
+                  const custom = event.currentTarget.value
+                  setReasoning(prev => ({ ...prev, custom }))
+                }}
                 onKeyDown={onEnter} />
             ) : null}
             {reasoningNotice ? <p className='text-xs leading-[1.65] text-subtle'>{reasoningNotice}</p> : null}

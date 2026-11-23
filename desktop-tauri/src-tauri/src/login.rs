@@ -1423,7 +1423,11 @@ impl DynamicNavigation {
     fn matches_callback(&self, url: &url::Url) -> bool {
         url.username().is_empty() && url.password().is_none() && self.callbacks.iter().any(|target| {
             url.scheme() == target.scheme() && url.host_str().zip(target.host_str())
-                .is_some_and(|(host, target)| host.eq_ignore_ascii_case(target))
+                .is_some_and(|(host, target_host)| {
+                    host.eq_ignore_ascii_case(target_host)
+                        || (url.scheme() == "http" && target.port().is_some()
+                            && is_loopback_host(host) && is_loopback_host(target_host))
+                })
                 && url.port_or_known_default() == target.port_or_known_default() && url.path() == target.path()
                 && url.fragment().is_none()
         })
@@ -1439,11 +1443,15 @@ impl DynamicNavigation {
             }),
             // HTTP 只用于授权地址实际登记的回环 callback，或插件明确申报的
             // 本机登录页；仅白名单写 localhost 不够。
-            "http" => matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+            "http" => is_loopback_host(host)
                 && (self.matches_callback(url) || self.matches_loopback_page(url)),
             _ => false,
         }
     }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "[::1]")
 }
 
 fn dumate_login_url(url: &url::Url) -> bool {
@@ -1551,7 +1559,13 @@ async fn run_dynamic_login(
                     nav_policy.allows(url)
                 })
                 .on_new_window(move |url, _| {
-                    if direct_callback && policy.is_callback(&url) {
+                    // 华为云等直连回环回调的登录页会把华为账号、IAM、企业联邦与第三方登录通过
+                    // window.open / target="_blank" 打开；仅转发回调 URL 会导致点击这些入口
+                    // 静默无响应。这里将策略允许范围内的目标改道在当前窗口打开，既保持单窗与策略
+                    // 校验，又不放开未受控的新窗口。
+                    if direct_callback && (policy.is_callback(&url)
+                        || (url.as_str() != "about:blank" && policy.allows(&url)))
+                    {
                         let handle = app_for_popup.clone();
                         let label = window_label.clone();
                         tauri::async_runtime::spawn(async move {

@@ -32,7 +32,15 @@ fn is_empty_str(value: &str) -> bool {
     value.is_empty()
 }
 
-/// 模型单价（美元 / 百万 Token）。
+pub fn normalize_price_currency(value: &str) -> String {
+    if value.trim().eq_ignore_ascii_case("cny") {
+        "cny".to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// 模型单价（每百万 Token；默认美元，可为人民币 `"cny"`）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelPrice {
     #[serde(default)]
@@ -50,6 +58,9 @@ pub struct ModelPrice {
     /// 峰谷定价标记（`"deepseek"` / `"weekdays"` / `"ollama"` / `""`）。
     #[serde(default, skip_serializing_if = "is_empty_str")]
     pub peak: String,
+    /// 单价币种（`"cny"` 表示人民币，空或 `"usd"` 表示美元）。
+    #[serde(default, skip_serializing_if = "is_empty_str")]
+    pub currency: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +119,15 @@ impl ModelPrice {
                 })
                 .collect(),
             peak: self.peak.clone(),
+            currency: self.currency.clone(),
+        }
+    }
+
+    pub fn currency_code(&self) -> &'static str {
+        if self.currency.trim().eq_ignore_ascii_case("cny") {
+            "cny"
+        } else {
+            "usd"
         }
     }
 
@@ -156,6 +176,23 @@ impl ModelPrice {
             / 1_000_000.0
     }
 
+    pub fn cost_usd(
+        &self,
+        uncached_input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+        cache_write_1h: i64,
+        fx_rate: f64,
+    ) -> f64 {
+        let raw = self.cost_split(uncached_input, output, cache_read, cache_write, cache_write_1h);
+        if self.currency_code() == "cny" && fx_rate.is_finite() && fx_rate > 0.0 {
+            raw / fx_rate
+        } else {
+            raw
+        }
+    }
+
     pub fn normalized(&self) -> Result<Self, String> {
         let check_num = |name: &str, value: f64| -> Result<f64, String> {
             if !value.is_finite() || value < 0.0 {
@@ -186,6 +223,7 @@ impl ModelPrice {
             cache_write_1h: check_num("1h 缓存写入", self.cache_write_1h)?,
             tiers,
             peak: self.peak.trim().to_string(),
+            currency: normalize_price_currency(&self.currency),
         })
     }
 
@@ -264,6 +302,7 @@ impl ModelPrice {
             cache_write_1h: cache_write_1h.unwrap_or(0.0),
             tiers,
             peak: obj.get("peak").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+            currency: normalize_price_currency(obj.get("currency").and_then(Value::as_str).unwrap_or("")),
         };
         if let Some(id) = id_hint {
             out.apply_one_hour_for(id);

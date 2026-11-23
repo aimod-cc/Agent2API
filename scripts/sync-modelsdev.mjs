@@ -263,6 +263,27 @@ async function main() {
   const canonicalCount = index.size
 
   // ── 第二遍：api.json 的档位与价格（lab 家优先，其次 provider id 字典序）──
+  const isCodingPlanProvider = (pid) => pid.endsWith('-coding-plan') || pid.endsWith('-plan')
+  const isCnCatalogVariant = (pid) =>
+    ['zhipuai', 'moonshotai-cn', 'minimax-cn', 'alibaba-cn', 'stepfun-cn', 'tencent-tokenhub-cn'].includes(pid)
+  const costPriority = (canonical, pid) => {
+    const lab = labOf(canonical)
+    const intlMatch =
+      (lab === 'zhipuai' && pid === 'zai')
+      || (lab === 'bytedance-seed' && pid === 'volcengine')
+      || (lab === 'huawei' && pid === 'huawei-maas')
+      || (lab === 'tencent' && pid === 'tencent-tokenhub')
+    if (intlMatch || (lab && lab === pid && !isCnCatalogVariant(pid) && !isCodingPlanProvider(pid))) {
+      return 3
+    }
+    if (isCnCatalogVariant(pid) && lab && (lab === pid || pid.startsWith(`${lab}-`))) {
+      return 2
+    }
+    if (isCodingPlanProvider(pid) && lab && pid.startsWith(`${lab}-`)) {
+      return 1
+    }
+    return 0
+  }
   const providers = Object.entries(api ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   const picked = new Map()
   const pickedCosts = new Map()
@@ -287,9 +308,10 @@ async function main() {
       }
       const cost = costOf(entry, canonical || key)
       if (cost) {
+        const prio = costPriority(canonical || '', providerId)
         const prevCost = pickedCosts.get(key)
-        if (!prevCost?.isLab && (!prevCost || isLab)) {
-          pickedCosts.set(key, { cost, isLab })
+        if (!prevCost || prio > prevCost.prio) {
+          pickedCosts.set(key, { cost, prio })
         }
       }
     }

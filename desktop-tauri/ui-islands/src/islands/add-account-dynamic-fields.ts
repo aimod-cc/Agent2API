@@ -17,6 +17,11 @@ export type Prompt = {
 
 export type CallbackInput = 'url' | 'code'
 
+export type SmsInitialChallenge = {
+  type: 'alicom4'
+  captchaId: string
+}
+
 export type SmsConfig = {
   phoneLabel: string
   phonePlaceholder: string
@@ -27,6 +32,7 @@ export type SmsConfig = {
   codeMaxLength: number
   resendAfterSeconds: number
   expiresAfterSeconds: number
+  challenge?: SmsInitialChallenge
 }
 
 export type CredentialFile = {
@@ -152,11 +158,20 @@ function parseSms(value: unknown): SmsConfig {
   }
   const phoneMinLength = integer('phoneMinLength', 1, 32)
   const codeMinLength = integer('codeMinLength', 1, 16)
+  let challenge: SmsInitialChallenge | undefined
+  if (raw.challenge !== undefined && raw.challenge !== null) {
+    const ch = objectOf(raw.challenge)
+    if (!ch || ch.type !== 'alicom4' || ch.captchaId !== 'bb7f810ecc9f6d21dcf72bcae120c8c5') {
+      throw new Error(t('插件返回的短信登录声明无效'))
+    }
+    challenge = { type: 'alicom4', captchaId: ch.captchaId }
+  }
   return {
     phoneLabel: loginText(raw.phoneLabel), phonePlaceholder: loginText(raw.phonePlaceholder), countryCodes,
     phoneMinLength, phoneMaxLength: integer('phoneMaxLength', phoneMinLength, 32),
     codeMinLength, codeMaxLength: integer('codeMaxLength', codeMinLength, 16),
     resendAfterSeconds: integer('resendAfterSeconds', 1, 3600), expiresAfterSeconds: integer('expiresAfterSeconds', 30, 900),
+    ...(challenge ? { challenge } : {}),
   }
 }
 

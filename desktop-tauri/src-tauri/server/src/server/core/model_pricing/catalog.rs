@@ -90,7 +90,12 @@ fn ensure_loaded() -> Arc<BuiltCatalogIndex> {
             .unwrap_or(0);
         let stale = updated_at <= 0 || now.saturating_sub(updated_at) >= CATALOG_TTL_MS;
         let cooling = guard.failed_at > 0 && now.saturating_sub(guard.failed_at) < CATALOG_RETRY_MS;
-        if stale && !guard.refreshing && !cooling && crate::server::config::models_dev_enabled() {
+        if stale
+            && tokio::runtime::Handle::try_current().is_ok()
+            && !guard.refreshing
+            && !cooling
+            && crate::server::config::models_dev_enabled()
+        {
             guard.refreshing = true;
             true
         } else {
@@ -238,9 +243,10 @@ fn extract_compact_catalog(root: &Value) -> Option<CachedProviderPrices> {
 
 fn build_index(cached: &CachedProviderPrices) -> BuiltCatalogIndex {
     let mut by_provider: HashMap<String, HashMap<String, ModelPrice>> = HashMap::new();
-    let mut lab_makers: HashMap<String, (ModelPrice, bool)> = HashMap::new();
+    let mut lab_makers: HashMap<String, (ModelPrice, u8, String)> = HashMap::new();
     for (pid, models) in &cached.providers {
-        let p_entry = by_provider.entry(pid.to_ascii_lowercase()).or_default();
+        let pid_lower = pid.to_ascii_lowercase();
+        let p_entry = by_provider.entry(pid_lower.clone()).or_default();
         for (mid, entry) in models {
             let bare_mid = bare_id(mid);
             p_entry.entry(mid.to_ascii_lowercase()).or_insert_with(|| entry.cost.clone());
@@ -253,16 +259,16 @@ fn build_index(cached: &CachedProviderPrices) -> BuiltCatalogIndex {
             } else {
                 entry.canonical.as_str()
             };
-            let is_lab = canon
-                .split_once('/')
-                .is_some_and(|(lab, _)| lab.eq_ignore_ascii_case(pid));
+            let prio = maker_priority(canon, pid);
             for key in candidate_keys(canon).into_iter().chain(candidate_keys(mid)) {
-                match lab_makers.get(&key) {
-                    Some((_, true)) => {}
-                    Some(_) if !is_lab => {}
-                    _ => {
-                        lab_makers.insert(key, (entry.cost.clone(), is_lab));
+                let replace = match lab_makers.get(&key) {
+                    None => true,
+                    Some((_, prev_prio, prev_pid)) => {
+                        prio > *prev_prio || (prio == *prev_prio && pid_lower < *prev_pid)
                     }
+                };
+                if replace {
+                    lab_makers.insert(key, (entry.cost.clone(), prio, pid_lower.clone()));
                 }
             }
         }
@@ -270,8 +276,62 @@ fn build_index(cached: &CachedProviderPrices) -> BuiltCatalogIndex {
     BuiltCatalogIndex {
         updated_at: cached.updated_at,
         by_provider,
-        makers: lab_makers.into_iter().map(|(k, (p, _))| (k, p)).collect(),
+        makers: lab_makers.into_iter().map(|(k, (p, _, _))| (k, p)).collect(),
     }
+}
+
+fn is_coding_plan_provider(pid: &str) -> bool {
+    let lower = pid.trim().to_ascii_lowercase();
+    lower.ends_with("-coding-plan") || lower.ends_with("-plan")
+}
+
+fn is_cn_catalog_variant(pid: &str) -> bool {
+    matches!(
+        pid.trim().to_ascii_lowercase().as_str(),
+        "zhipuai"
+            | "moonshotai-cn"
+            | "minimax-cn"
+            | "alibaba-cn"
+            | "stepfun-cn"
+            | "tencent-tokenhub-cn"
+    )
+}
+
+fn maker_priority(canon: &str, pid: &str) -> u8 {
+    let pid_lower = pid.trim().to_ascii_lowercase();
+    let Some((lab, _)) = canon.split_once('/') else {
+        return if is_coding_plan_provider(&pid_lower) {
+            1
+        } else if is_cn_catalog_variant(&pid_lower) {
+            2
+        } else {
+            0
+        };
+    };
+    let lab_lower = lab.trim().to_ascii_lowercase();
+    let is_intl_alias = matches!(
+        (lab_lower.as_str(), pid_lower.as_str()),
+        ("zhipuai", "zai")
+            | ("bytedance-seed", "volcengine")
+            | ("huawei", "huawei-maas")
+            | ("tencent", "tencent-tokenhub")
+    );
+    if is_intl_alias
+        || (lab_lower == pid_lower
+            && !is_cn_catalog_variant(&pid_lower)
+            && !is_coding_plan_provider(&pid_lower))
+    {
+        return 3;
+    }
+    if is_cn_catalog_variant(&pid_lower)
+        && (lab_lower == pid_lower || pid_lower.starts_with(&format!("{lab_lower}-")))
+    {
+        return 2;
+    }
+    if is_coding_plan_provider(&pid_lower) && pid_lower.starts_with(&format!("{lab_lower}-")) {
+        return 1;
+    }
+    0
 }
 
 /// 剥离厂商前缀、括号修饰、冒号后缀，提取裸 ID（小写）。
@@ -354,7 +414,7 @@ pub fn same_model_key(id: &str) -> String {
     k
 }
 
-fn candidate_keys(model: &str) -> Vec<String> {
+pub fn candidate_keys(model: &str) -> Vec<String> {
     let raw = model.trim().to_ascii_lowercase();
     if raw.is_empty() {
         return Vec::new();
@@ -403,6 +463,11 @@ fn provider_catalog_aliases(provider_id: &str) -> Vec<&'static str> {
 
 /// 按提供商专属清单查官网列表价（优先 `models.dev` 对应提供商，其次品牌制作方 + 内嵌快照）。
 pub fn provider_list_price(provider_id: &str, model_id: &str) -> Option<ModelPrice> {
+    if super::cn_prices::is_domestic_cn_provider(provider_id) {
+        if let Some(price) = super::cn_prices::lookup(model_id, Some(provider_id)) {
+            return Some(price);
+        }
+    }
     let idx = ensure_loaded();
     let pid_lower = provider_id.trim().to_ascii_lowercase();
     let mut keys_to_try: Vec<&str> = Vec::new();
@@ -430,6 +495,20 @@ pub fn provider_list_price(provider_id: &str, model_id: &str) -> Option<ModelPri
         }
     }
     None
+}
+
+/// 按模型与渠道归属（国内人民币渠道优先使用国内官网人民币价目表）查官方标准价。
+pub fn maker_list_price_for_provider(
+    provider_id: Option<&str>,
+    model_id: &str,
+    peak_provider_hint: Option<&str>,
+) -> Option<ModelPrice> {
+    if provider_id.is_some_and(super::cn_prices::is_domestic_cn_provider) {
+        if let Some(price) = super::cn_prices::lookup(model_id, peak_provider_hint) {
+            return Some(price);
+        }
+    }
+    maker_list_price(model_id, peak_provider_hint)
 }
 
 /// 按模型本身（官方制造方优先 + `modelsdev.json` 内嵌快照）查官方标准价。
@@ -465,6 +544,56 @@ pub fn maker_list_price(model_id: &str, peak_provider_hint: Option<&str>) -> Opt
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_index_prefers_official_usd_labs_over_cn_or_resellers() {
+        let root = json!({
+            "adzuki": {
+                "models": {
+                    "bytedance-seed/doubao-seed-2.1-pro": {
+                        "canonical_model_id": "bytedance-seed/doubao-seed-2.1-pro",
+                        "cost": { "input": 1.7143, "output": 8.5714 }
+                    }
+                }
+            },
+            "volcengine": {
+                "models": {
+                    "doubao-seed-2.1-pro": {
+                        "canonical_model_id": "bytedance-seed/doubao-seed-2.1-pro",
+                        "cost": { "input": 0.8906, "output": 4.45301 }
+                    }
+                }
+            },
+            "zhipuai": {
+                "models": {
+                    "glm-5.3": {
+                        "canonical_model_id": "zhipuai/glm-5.3",
+                        "cost": { "input": 1.19516, "output": 4.18306 }
+                    }
+                }
+            },
+            "zai": {
+                "models": {
+                    "glm-5.3": {
+                        "canonical_model_id": "zhipuai/glm-5.3",
+                        "cost": { "input": 1.0, "output": 3.2 }
+                    }
+                }
+            }
+        });
+        let cached = extract_compact_catalog(&root).expect("catalog");
+        let built = build_index(&cached);
+        let doubao = built.makers.get("doubaoseed21pro").expect("doubao");
+        assert!((doubao.input - 0.8906).abs() < 1e-6);
+        let glm = built.makers.get("glm53").expect("glm");
+        assert!((glm.input - 1.0).abs() < 1e-6);
+    }
 }
 
 /// 列出可作为「参考模型」的已定价模型清单，供前端选择器联想。

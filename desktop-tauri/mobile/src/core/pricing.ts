@@ -11,12 +11,14 @@ export type ModelPricingInfo = {
   activeWindowRate?: number | null
   inPeak?: boolean
   peak?: string | null
+  currency?: CurrencyCode
   base?: {
     input: number
     output: number
     cacheRead?: number
     cacheWrite?: number
     cacheWrite1h?: number
+    currency?: CurrencyCode
   } | null
   effective?: {
     input: number
@@ -24,6 +26,7 @@ export type ModelPricingInfo = {
     cacheRead?: number
     cacheWrite?: number
     cacheWrite1h?: number
+    currency?: CurrencyCode
   } | null
 }
 
@@ -106,15 +109,29 @@ export function formatCost(usd: number | undefined | null, currency: CurrencyCod
   return `${sign}${amount.toFixed(4)}`
 }
 
-export function formatUnitPrice(usdPerM: number | undefined | null, currency: CurrencyCode, rate: number): string {
-  if (usdPerM === null || usdPerM === undefined || !Number.isFinite(usdPerM) || usdPerM < 0) return '—'
-  const useCny = currency === 'cny' && rate > 0
-  const amount = useCny ? usdPerM * rate : usdPerM
-  const sign = useCny ? '¥' : '$'
-  if (amount === 0) return `${sign}0`
-  if (amount >= 100) return `${sign}${amount.toFixed(0)}`
-  if (amount >= 1) return `${sign}${Number(amount.toFixed(2))}`
-  return `${sign}${Number(amount.toFixed(4))}`
+export function formatUnitPrice(
+  amount: number | undefined | null,
+  currency: CurrencyCode,
+  rate: number,
+  sourceCurrency: CurrencyCode = 'usd',
+): string {
+  if (amount === null || amount === undefined || !Number.isFinite(amount) || amount < 0) return '—'
+  const src: CurrencyCode = sourceCurrency === 'cny' ? 'cny' : 'usd'
+  const dst: CurrencyCode = currency === 'cny' ? 'cny' : 'usd'
+  const sign = dst === 'cny' ? '¥' : '$'
+  let converted = amount
+  if (src !== dst) {
+    if (!(rate > 0)) return '—'
+    converted = dst === 'cny' ? amount * rate : amount / rate
+  }
+  if (converted === 0) return `${sign}0`
+  if (src === dst) {
+    if (converted >= 0.01) return `${sign}${Number(converted.toFixed(3))}`
+    return `${sign}${Number(converted.toFixed(4))}`
+  }
+  if (converted >= 0.05) return `${sign}${Number(converted.toFixed(2))}`
+  if (converted >= 0.005) return `${sign}${Number(converted.toFixed(3))}`
+  return `${sign}${Number(converted.toFixed(4))}`
 }
 
 export function pricingSourceLabel(source: ModelPricingInfo['source'] | undefined): string {

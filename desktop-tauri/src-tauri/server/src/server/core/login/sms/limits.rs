@@ -57,3 +57,12 @@ pub(super) fn extend(provider: &str, country: &str, phone: &str, retry_at: i64) 
         }
     }
 }
+
+pub(super) fn reset_retry(provider: &str, country: &str, phone: &str) {
+    let now = crate::server::logging::now_ms();
+    if let Ok(mut table) = table().lock() {
+        if let Some(entry) = table.get_mut(&key(provider, country, phone)) {
+            entry.retry_at = now;
+        }
+    }
+}

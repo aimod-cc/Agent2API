@@ -642,6 +642,11 @@ async fn attempt_queue(
     // 同样顺延（粘性不等于无条件）。
     let conv_key = super::route_state::RouteState::conversation_key(ctx.client_headers, &ctx.body);
     let sticky_generation = service.route.sticky_generation();
+    let sticky = super::error_policy_finish::StickyContext {
+        key: &conv_key,
+        model: &model,
+        generation: sticky_generation,
+    };
     let sticky_source = super::route_state::RouteState::conversation_source(ctx.client_headers, &ctx.body);
     if !conv_key.is_empty() {
         let mut decision = json!({
@@ -800,7 +805,7 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total, sticky) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -888,6 +893,7 @@ async fn attempt_queue(
                     }
                     if matches!(error.code.as_deref(), Some("plugin_busy" | "gateway_busy" | "account_busy" | "plugin_resource_limit"
                         | "plugin_protocol_error" | "plugin_trap" | "plugin_response_started" | "web_tools_invalid_request")) {
+                        super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
                         return Err(error);
                     }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
@@ -910,7 +916,7 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total, sticky) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -982,12 +988,16 @@ async fn attempt_queue(
                         session = fresh;
                     }
                 }
-                Err(error) if ctx.telemetry.replay_guard().blocked() => return Err(error),
+                Err(error) if ctx.telemetry.replay_guard().blocked() => {
+                    super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
+                    return Err(error);
+                }
                 Err(error) if crate::server::core::providers::subscriptions::contains(provider_id) => {
                     let name = account_label(target.account.as_ref(), &account_id, &session);
                     ctx.telemetry.note_attempt(Some(&account_id), &name, provider_id);
                     ctx.telemetry.note_attempt_started(provider_id, &name);
                     ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+                    super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
                     return Err(error);
                 }
                 Err(error) => logging::verbose(
@@ -1151,6 +1161,7 @@ async fn attempt_queue(
                         Some(i64::from(error.status_code)),
                         Some(&error.message),
                     );
+                    super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
                     // ── 构造期的**本地**失败：这一家还没出本机就发不出去 ──────
                     // 判据是状态码而不是文案（556，见 `readiness` 模块头）：适配器
                     // 在**构造请求时**发现本地前置条件不成立（当前唯一用户是 ZCode
@@ -1172,7 +1183,7 @@ async fn attempt_queue(
                         if account_unavailable || error.status_code == 501 {
                             let mut error = error;
                             if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, sticky) {
                                 last_error = Some(error); continue 'accounts;
                             }
                             return Err(error);
@@ -1218,6 +1229,7 @@ async fn attempt_queue(
                         Some(reset),
                     );
                     ctx.telemetry.finish_last_attempt(Some(429), Some(&error.message));
+                    super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
                     if !tried_ids.contains(&attempt_key) {
                         tried_ids.push(attempt_key.clone());
                     }
@@ -1411,6 +1423,9 @@ async fn attempt_queue(
                 Err(failure) => {
                     if ctx.telemetry.replay_guard().blocked() {
                         ctx.telemetry.finish_last_attempt(Some(i64::from(failure.error.status_code)), Some(&failure.error.message));
+                        if !ctx.telemetry.is_cancelled() {
+                            super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
+                        }
                         return Err(failure.error);
                     }
                     // ── 手动终止优先于一切重试动作 ────────────────────────
@@ -1449,6 +1464,9 @@ async fn attempt_queue(
                             Some(i64::from(failure.error.status_code)),
                             Some(&failure.error.message),
                         );
+                        if !ctx.telemetry.is_cancelled() {
+                            super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
+                        }
                         return Err(failure.error);
                     }
                     // ── 动作 2：token 失效 → 刷新后同一账号重试一次 ──────
@@ -1500,7 +1518,10 @@ async fn attempt_queue(
                                 service, provider_id, target.account_id.as_deref(),
                             ).await {
                                 let delay = host_rule.retry_delay(0);
-                                if !budget.take_retry(delay) { return Err(failure.error); }
+                                if !budget.take_retry(delay) {
+                                    super::error_policy_finish::forget_sticky(service, ctx, sticky, Some(&attempt_key));
+                                    return Err(failure.error);
+                                }
                                 ctx.telemetry.note_attempt_retry("登录凭证已刷新，在原账号重试一次", Some(401), delay);
                                 super::error_policy_send::sleep_or_cancel(ctx.telemetry, delay).await;
                                 session = fresh;
@@ -1574,7 +1595,7 @@ async fn attempt_queue(
                     );
                     let mut error = failure.error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, sticky) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -1679,7 +1700,7 @@ async fn attempt_queue(
                 super::error_policy::attach(&mut error, &decision);
                 ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
                 if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, sticky) {
                     last_error = Some(error); continue 'accounts;
                 }
                 return Err(error);

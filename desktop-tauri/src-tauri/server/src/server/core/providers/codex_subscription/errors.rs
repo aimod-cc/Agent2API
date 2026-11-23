@@ -19,6 +19,8 @@ pub(super) fn classify(status: u16, body: &Value) -> UpstreamErrorClass {
         .get("message")
         .and_then(Value::as_str)
         .or_else(|| body.pointer("/error/message").and_then(Value::as_str))
+        .or_else(|| body.pointer("/detail/message").and_then(Value::as_str))
+        .or_else(|| body.get("detail").and_then(Value::as_str))
         .unwrap_or("上游拒绝了本次请求");
     let detail: String = detail
         .chars()

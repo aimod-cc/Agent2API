@@ -72,24 +72,107 @@ pub fn write(backup: &Backup) -> Result<(), String> {
     )
 }
 
-pub fn list(client: &str, path: &Path) -> Result<Vec<Backup>, String> {
+pub fn scan_directory() -> Result<Vec<String>, String> {
     let entries = match std::fs::read_dir(directory()) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("读取备份目录失败: {e}")),
     };
-    let mut backups = Vec::new();
+    let mut ids = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("读取备份失败: {e}"))?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with(&format!("{client}-")) || !name.ends_with(".json") {
+        let Some(id) = name.strip_suffix(".json") else {
             continue;
-        }
-        let id = name.trim_end_matches(".json");
+        };
         // 旧版备份是未加密原文件，必须与新的事务备份分开。
         if id.split('-').last().is_none_or(|part| part.len() != 16) {
             continue;
         }
+        ids.push(id.to_string());
+    }
+    Ok(ids)
+}
+
+fn parse_backup_ts(client: &str, id: &str) -> Option<i64> {
+    let rest = id.strip_prefix(client)?.strip_prefix('-')?;
+    let (ts, suffix) = rest.rsplit_once('-')?;
+    if suffix.len() != 16 {
+        return None;
+    }
+    ts.parse::<i64>().ok()
+}
+
+pub fn latest_active(
+    client: &str,
+    path: &Path,
+    pre_scanned: Option<&[String]>,
+) -> Result<Option<Backup>, String> {
+    let owned_ids;
+    let all_ids = match pre_scanned {
+        Some(ids) => ids,
+        None => {
+            owned_ids = scan_directory()?;
+            &owned_ids
+        }
+    };
+    let prefix = format!("{client}-");
+    let matching: Vec<&str> = all_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| id.starts_with(&prefix))
+        .collect();
+    if matching.is_empty() {
+        return Ok(None);
+    }
+    let mut dated = Vec::with_capacity(matching.len());
+    for id in &matching {
+        let Some(ts) = parse_backup_ts(client, id) else {
+            return Ok(list(client, path)?.into_iter().rev().find(|b| {
+                matches!(
+                    b.phase.as_str(),
+                    "committed" | "prepared" | "restore_prepared"
+                )
+            }));
+        };
+        dated.push((ts, *id));
+    }
+    dated.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(a.1)));
+
+    let mut restored = std::collections::HashSet::new();
+    let mut idx = 0;
+    while idx < dated.len() {
+        let current_ts = dated[idx].0;
+        let mut batch = Vec::new();
+        while idx < dated.len() && dated[idx].0 == current_ts {
+            let backup = read(dated[idx].1)?;
+            if backup.config_path == path {
+                if backup.phase == "restore_committed" {
+                    restored.extend(backup.restored_ids.iter().cloned());
+                } else {
+                    batch.push(backup);
+                }
+            }
+            idx += 1;
+        }
+        if let Some(found) = batch.into_iter().find(|backup| {
+            !restored.contains(&backup.id)
+                && matches!(
+                    backup.phase.as_str(),
+                    "committed" | "prepared" | "restore_prepared"
+                )
+        }) {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+pub fn list(client: &str, path: &Path) -> Result<Vec<Backup>, String> {
+    let all_ids = scan_directory()?;
+    let prefix = format!("{client}-");
+    let mut backups = Vec::new();
+    for id in all_ids.iter().filter(|id| id.starts_with(&prefix)) {
         let backup = read(id)?;
         if backup.config_path == path {
             backups.push(backup);

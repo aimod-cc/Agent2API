@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::catalog::{bare_id, maker_list_price, provider_list_price};
+use super::catalog::{bare_id, maker_list_price_for_provider, provider_list_price};
 use super::peak::{is_peak_at, rate_window_at, PEAK_FACTOR};
 use super::types::{ModelPrice, ModelPricingSettings, ProviderPricingRule};
 
@@ -44,6 +44,7 @@ impl ResolvedTariff {
             "activeWindowRate": active_window_rate,
             "inPeak": in_peak_now,
             "peak": (!self.price.peak.is_empty()).then_some(self.price.peak.clone()),
+            "currency": self.price.currency_code(),
             "base": self.price,
             "effective": active_now,
         })
@@ -139,7 +140,8 @@ pub fn resolve_tariff(
         }
     }
 
-    if let Some(mut price) = maker_list_price(mid, peak_hint) {
+    let pid_opt = (!pid.is_empty()).then_some(pid);
+    if let Some(mut price) = maker_list_price_for_provider(pid_opt, mid, peak_hint) {
         if let Some(r) = rate {
             price = price.times(r);
         }
@@ -165,7 +167,7 @@ pub fn resolve_tariff(
     }
     for key in same_keys {
         if let Some(target) = find_map_entry(&settings.model_same_as, &key) {
-            if let Some(mut price) = maker_list_price(target, None) {
+            if let Some(mut price) = maker_list_price_for_provider(pid_opt, target, None) {
                 if let Some(r) = rate {
                     price = price.times(r);
                 }
@@ -236,12 +238,14 @@ pub fn calc_request_cost_detail(
     } else {
         prompt
     };
-    let usd = price.cost_split(
+    let fx_rate = super::fx::current_rate_soon().rate;
+    let usd = price.cost_usd(
         uncached_input,
         completion,
         cache_read,
         cache_write,
         cache_write_1h,
+        fx_rate,
     );
     let cost_usd = if usd.is_finite() && usd >= 0.0 { usd } else { 0.0 };
     Some(Some(RequestCostDetail {
@@ -276,4 +280,99 @@ pub fn calc_request_cost_usd(
         cache_creation_1h_tokens,
     )
     .map(|inner| inner.map(|detail| detail.cost_usd))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn domestic_provider_uses_native_cny_and_keeps_intl_models_usd() {
+        let settings = ModelPricingSettings::default();
+        let glm = resolve_tariff(&settings, "wps-lingxi", "GLM-5.3").expect("glm-5.3");
+        assert_eq!(glm.price.currency_code(), "cny");
+        assert!((glm.price.input - 8.0).abs() < 1e-6);
+        assert!((glm.price.output - 28.0).abs() < 1e-6);
+
+        let flash = resolve_tariff(&settings, "wps-lingxi", "GLM-5.3-Flash").expect("glm-5.3-flash");
+        assert_eq!(flash.price.currency_code(), "cny");
+        assert!((flash.price.input - 0.8).abs() < 1e-6);
+        assert!((flash.price.output - 2.8).abs() < 1e-6);
+
+        let qwen = resolve_tariff(&settings, "wps-lingxi", "qwen3.8_flash").expect("qwen3.8_flash");
+        assert_eq!(qwen.price.currency_code(), "cny");
+        assert!((qwen.price.input - 0.8).abs() < 1e-6);
+        assert!((qwen.price.output - 2.7).abs() < 1e-6);
+
+        let minimax = resolve_tariff(&settings, "wps-lingxi", "minimax_m3").expect("minimax_m3");
+        assert_eq!(minimax.price.currency_code(), "cny");
+        assert!((minimax.price.input - 2.1).abs() < 1e-6);
+        assert!((minimax.price.output - 8.4).abs() < 1e-6);
+
+        let doubao = resolve_tariff(&settings, "wps-lingxi", "doubao_seed_2_1_pro_260401").expect("doubao");
+        assert_eq!(doubao.price.currency_code(), "cny");
+        assert!((doubao.price.input - 6.0).abs() < 1e-6);
+        assert!((doubao.price.output - 30.0).abs() < 1e-6);
+
+        let deepseek = resolve_tariff(&settings, "wps-lingxi", "deepseek-v4.1-flash").expect("deepseek");
+        assert_eq!(deepseek.price.currency_code(), "cny");
+        assert!((deepseek.price.input - 1.0).abs() < 1e-6);
+        assert!((deepseek.price.output - 4.0).abs() < 1e-6);
+
+        let claude = resolve_tariff(&settings, "wps-lingxi", "claude-sonnet-4-5").expect("claude");
+        assert_eq!(claude.price.currency_code(), "usd");
+
+        let intl_glm = resolve_tariff(&settings, "workbuddy-intl", "glm-5.3").expect("intl glm");
+        assert_eq!(intl_glm.price.currency_code(), "usd");
+    }
+
+    #[test]
+    fn custom_cny_price_converts_cost_to_usd_and_preserves_same_as_region() {
+        let mut model_prices = BTreeMap::new();
+        model_prices.insert(
+            "custom/local-model".to_string(),
+            ModelPrice {
+                input: 10.0,
+                output: 20.0,
+                currency: "cny".to_string(),
+                ..Default::default()
+            },
+        );
+        let mut model_same_as = BTreeMap::new();
+        model_same_as.insert("*/alias-glm".to_string(), "glm-5.3".to_string());
+        let settings = ModelPricingSettings {
+            model_prices,
+            model_same_as,
+            ..Default::default()
+        };
+
+        let cny_price = settings.model_prices.get("custom/local-model").unwrap();
+        let usd = cny_price.cost_usd(500_000, 250_000, 0, 0, 0, 7.0);
+        // 0.5M * 10 + 0.25M * 20 = 10 CNY => 10 / 7 USD
+        assert!((usd - 10.0 / 7.0).abs() < 1e-9);
+
+        let detail = calc_request_cost_detail(
+            &settings,
+            "custom",
+            "local-model",
+            "",
+            0,
+            1_000_000,
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        assert!((detail.cost_usd - (10.0 / super::super::fx::FX_FALLBACK)).abs() < 1e-9);
+
+        let same_cn = resolve_tariff(&settings, "wps-lingxi", "alias-glm").expect("same_as cn");
+        assert_eq!(same_cn.price.currency_code(), "cny");
+        assert!((same_cn.price.input - 8.0).abs() < 1e-6);
+
+        let same_intl = resolve_tariff(&settings, "workbuddy-intl", "alias-glm").expect("same_as intl");
+        assert_eq!(same_intl.price.currency_code(), "usd");
+    }
 }

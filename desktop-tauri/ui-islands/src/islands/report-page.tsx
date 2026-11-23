@@ -1,10 +1,8 @@
 import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
-import { Badge, Button, Empty, SegmentedControl, type SegmentedControlOption, PageHeader, PageTitle, PageDescription } from '@ui'
-import {
-  refreshExchangeRate, switchDisplayCurrency, updateCachedDisplay, usePricingDisplay,
-} from './model-pricing'
+import { Badge, Empty, SegmentedControl, type SegmentedControlOption, PageHeader, PageTitle, PageDescription } from '@ui'
+import { updateCachedDisplay } from './model-pricing'
 import {
   RANGES, DEFAULT_RANGE, RANGE_KEY, RANGE_LABEL, RANGE_OPTION_LABEL,
   CUSTOM_RANGE,
@@ -230,6 +228,13 @@ function ReportPage() {
       if (token !== seq) return summaryValue
       if (!payload || typeof payload !== 'object') throw new Error('后端未返回报表数据')
       summaryValue = payload
+      if (payload.currency || payload.exchangeRate || payload.fx) {
+        updateCachedDisplay({
+          currency: payload.currency,
+          exchangeRate: payload.exchangeRate,
+          fx: payload.fx,
+        })
+      }
       // 内容与上一轮完全一致就不落 state（见 signatureRef 的说明）：轮询到「没有变化」
       // 是常态，那一轮不该付整页重渲染的代价
       const signature = JSON.stringify(payload)
@@ -344,8 +349,6 @@ function ReportPage() {
   /* ─── 渲染 ─────────────────────────────── */
 
   const { summary, error } = data
-  const pricing = usePricingDisplay()
-  const [fxBusy, setFxBusy] = React.useState(false)
   // 概览小格的说明文字用后端回显的档位（与这份数据同一轮），后端没回显才退回本地档位
   const rangeKey = summary && RANGES.includes(summary.range ?? '') ? (summary.range as string) : range
 
@@ -370,26 +373,6 @@ function ReportPage() {
           <div><PageTitle>{t('统计报表')}</PageTitle><PageDescription>{t('查看用量、调用来源与缓存表现')}</PageDescription></div>
           <div className='report-period-control'>
             <div className='report-date-caption' id='report-range-label'>{summary ? `${summary.startDate || '—'} — ${summary.endDate || '—'}` : RANGE_LABEL[rangeKey]} <TipQ text={TIP_RANGE} /></div>
-            <SegmentedControl
-              options={[{ value: 'usd', label: 'USD $' }, { value: 'cny', label: 'CNY ¥' }]}
-              value={pricing.currency}
-              onValueChange={val => { void switchDisplayCurrency(val as 'usd' | 'cny') }}
-              aria-label={t('货币切换')}
-            />
-            {pricing.currency === 'cny' ? (
-              <Button
-                variant='ghost'
-                size='xs'
-                disabled={fxBusy}
-                title={t('点击刷新 USD → CNY 汇率（当前 1 USD = ¥{rate}）', { rate: pricing.exchangeRate.toFixed(4) })}
-                onClick={() => {
-                  setFxBusy(true)
-                  void refreshExchangeRate().finally(() => setFxBusy(false))
-                }}
-              >
-                {fxBusy ? t('刷新汇率…') : `1$≈¥${pricing.exchangeRate.toFixed(2)}`}
-              </Button>
-            ) : null}
             <SegmentedControl options={RANGE_OPTIONS} value={range} onValueChange={changeRange} aria-label={t('报表时间范围')} />
             {range === CUSTOM_RANGE ? <DateRangeFields dates={custom} onChange={changeCustomDate} /> : null}
           </div>

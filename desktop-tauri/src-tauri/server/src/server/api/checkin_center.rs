@@ -105,7 +105,7 @@ fn out_of_scope_reason(
         // 申报了 `plans` / `onboarding` / `growth` 但没申报每日签到的家
         // （ZCode 只有「活动福利」）：理由要说准，别让人以为这家整个没接。
         if !declared.daily && (declared.plans || declared.onboarding || declared.growth) {
-            return "本家没有每日签到，福利在下方对应卡片里";
+            return "本家没有每日签到，请到对应活动或任务标签查看";
         }
         return "没有签到链路";
     }

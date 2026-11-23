@@ -171,3 +171,49 @@ fn secret_values_do_not_leak_into_the_preview() {
     assert!(!view.contains("private-password"));
     assert!(view.contains("123"));
 }
+
+#[test]
+fn latest_active_skips_restored_commits_and_resolves_newest_backup() {
+    test_support::isolated(
+        concat!(
+            module_path!(),
+            "::latest_active_skips_restored_commits_and_resolves_newest_backup"
+        ),
+        || {
+            let home = crate::paths::config_dir();
+            let path = home.join("config.json");
+            let def = registry::find("claude-code").unwrap();
+
+            let p1 = plan(vec![change(&path, Some(br#"{"v":1}"#), Some(br#"{"v":2}"#))]);
+            let t1 = preview::create_restore(def.id, &p1).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            apply_plan(def, &path, &p1, &t1).unwrap();
+            let s1 = applied_status(def.id, &path).unwrap();
+            assert_eq!(s1["canUndo"], true);
+
+            let restore_token = restore_preview(def, &path, false).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            restore(def, &path, false, &restore_token).unwrap();
+            assert_eq!(applied_status(def.id, &path).unwrap()["canUndo"], false);
+
+            let p2 = plan(vec![change(&path, Some(br#"{"v":1}"#), Some(br#"{"v":3}"#))]);
+            let t2 = preview::create_restore(def.id, &p2).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            apply_plan(def, &path, &p2, &t2).unwrap();
+            let s2 = applied_status(def.id, &path).unwrap();
+            assert_eq!(s2["canUndo"], true);
+            assert_ne!(s2["backupId"], s1["backupId"]);
+            let pre_scanned = backups::scan_directory().unwrap();
+            assert_eq!(
+                applied_status_with_ids(def.id, &path, Some(&pre_scanned)).unwrap()["backupId"],
+                s2["backupId"]
+            );
+        },
+    );
+}

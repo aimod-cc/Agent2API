@@ -283,7 +283,10 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
                   <Field orientation='horizontal' className='field-row mt-2'>
                     <FieldLabel htmlFor='batch-model-reasoning-custom'>{t('自定义等级')}</FieldLabel>
                     <Input id='batch-model-reasoning-custom' maxLength={32} value={reasoning.custom}
-                      onChange={event => setReasoning(prev => ({ ...prev, custom: event.currentTarget.value }))} />
+                      onChange={event => {
+                        const custom = event.currentTarget.value
+                        setReasoning(prev => ({ ...prev, custom }))
+                      }} />
                   </Field>
                 ) : null}
                 {!candidates.length && managedReasoning

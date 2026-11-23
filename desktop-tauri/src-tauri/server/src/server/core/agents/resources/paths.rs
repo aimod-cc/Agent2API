@@ -13,8 +13,13 @@ fn dir(env: &str, fallback: PathBuf) -> PathBuf {
 }
 
 pub fn for_client(def: &ClientDef) -> ResourcePaths {
+    let detection = paths::detect(def);
+    for_detection(def, &detection)
+}
+
+pub fn for_detection(def: &ClientDef, detection: &paths::Detection) -> ResourcePaths {
     let home = paths::home();
-    let config = paths::detect(def).path;
+    let config = detection.path.clone();
     let parent = config.parent().map(PathBuf::from).unwrap_or_else(|| home.clone());
     let json_mcp = |path, keys| Some((path, ConfigFormat::Json, keys));
     match def.id {
@@ -46,8 +51,12 @@ pub fn for_client(def: &ClientDef) -> ResourcePaths {
             note: "支持用户级 Skill 与 MCP；Cursor 的全局规则未确认可安全修改的文件格式，暂不开放提示词写入。" },
         "dsh" => {
             let dsh_home = super::super::dsh_paths::home_for(&config);
+            let mcp = (!detection.unsupported)
+                .then(|| detection.resource_path.clone())
+                .flatten()
+                .map(|path| (path, ConfigFormat::Yaml, Vec::new()));
             ResourcePaths { prompt: None, skills: vec![dsh_home.join("skills"), dir("DSH_AGENTS_HOME", home.join(".agents")).join("skills")],
-                mcp: super::dsh::config_path(def).ok().map(|path| (path, ConfigFormat::Yaml, Vec::new())),
+                mcp,
                 note: "DSH 的 Skill 使用共享用户目录；MCP 写入所选运行方式的插件配置，保留其他内容。多套配置请先在 Agent 页选择目标。" }
         }
         "kimi-code" => ResourcePaths { prompt: None, skills: vec![home.join(".kimi/skills"), home.join(".config/agents/skills")],

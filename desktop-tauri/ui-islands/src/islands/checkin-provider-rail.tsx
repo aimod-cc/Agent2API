@@ -1,6 +1,6 @@
 import * as React from 'react'
-import { NavItem, NavList } from '@ui'
-import { ProviderLogo } from './checkin-row'
+import { Button, Collapsible, CollapsibleContent, CollapsibleTrigger, NavItem, NavList } from '@ui'
+import { ChevronIcon, ProviderLogo } from './checkin-row'
 import { t } from '../i18n'
 
 /**
@@ -24,6 +24,8 @@ export type ProviderOption = {
   done: number | null
   /** 这一家在**当前任务**里的账号总数 */
   total: number
+  /** 仅由插件自动化任务挂载（无逐账号列表），不归入「暂无账号」折叠组 */
+  isTask?: boolean
 }
 
 export function ProviderRail({ options, selected, total, onSelect }: {
@@ -32,6 +34,28 @@ export function ProviderRail({ options, selected, total, onSelect }: {
   total: { done: number; all: number }
   onSelect: (id: string) => void
 }): React.ReactElement {
+  const isEmptyOption = (option: ProviderOption) => !option.isTask && option.total === 0
+  const activeOptions = options.filter(option => !isEmptyOption(option))
+  const emptyOptions = options.filter(isEmptyOption)
+  const [emptyExpanded, setEmptyExpanded] = React.useState(false)
+  const hasSelectedEmpty = emptyOptions.some(option => option.id === selected)
+
+  React.useEffect(() => {
+    if (hasSelectedEmpty) setEmptyExpanded(true)
+  }, [hasSelectedEmpty])
+
+  const renderOption = (option: ProviderOption) => (
+    <NavItem
+      key={option.id}
+      active={selected === option.id}
+      icon={<ProviderLogo id={option.id} label={option.label} />}
+      trailing={<Count done={option.done} total={option.total} />}
+      onClick={() => onSelect(option.id)}
+    >
+      {t(option.label)}
+    </NavItem>
+  )
+
   return (
     <aside className='ck-provider-rail'>
       <div className='ck-provider-rail-head'>
@@ -47,19 +71,27 @@ export function ProviderRail({ options, selected, total, onSelect }: {
         >
           {t('全部提供商')}
         </NavItem>
-        {options.map(option => (
-          <NavItem
-            key={option.id}
-            active={selected === option.id}
-            icon={<ProviderLogo id={option.id} label={option.label} />}
-            trailing={<Count done={option.done} total={option.total} />}
-            onClick={() => onSelect(option.id)}
-          >
-            {t(option.label)}
-          </NavItem>
-        ))}
+        {activeOptions.map(renderOption)}
+        {emptyOptions.length > 0 ? (
+          <Collapsible open={emptyExpanded} onOpenChange={setEmptyExpanded} className='ck-provider-empty-group'>
+            <CollapsibleTrigger
+              render={<Button variant='ghost' size='sm' className='ck-provider-empty-trigger w-full justify-start rounded-md' />}
+            >
+              <ChevronIcon open={emptyExpanded} />
+              <span className='min-w-0 flex-1 truncate text-left'>{t('暂无账号')}</span>
+              <span className='ck-provider-count'>{emptyOptions.length}</span>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <div className='ck-provider-empty-list'>
+                {emptyOptions.map(renderOption)}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        ) : null}
       </NavList>
-      <p className='ck-provider-note'>{t('只列当前任务里有账号的提供商。')}</p>
+      {emptyOptions.length === 0 ? (
+        <p className='ck-provider-note'>{t('只列当前任务里有账号的提供商。')}</p>
+      ) : null}
     </aside>
   )
 }

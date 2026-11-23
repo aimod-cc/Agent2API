@@ -15,7 +15,42 @@ use crate::server::logging;
 use super::{account, credentials, http, ID};
 
 pub const CACHE_SCOPE: &str = "codexSubscription";
+pub(super) const IMAGE_MODEL: &str = "gpt-image-2";
 const TTL_MS: i64 = 10 * 60 * 1000;
+
+pub(super) fn is_image_model(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case(IMAGE_MODEL)
+}
+
+fn image_model_view() -> Value {
+    json!({
+        "id": IMAGE_MODEL,
+        "name": "GPT Image 2",
+        "provider": ID,
+        "providerName": "OpenAI",
+        "owned_by": ID,
+        "kind": "image",
+        "output_modalities": ["image"],
+        "supportsImages": true,
+        "supports_image_generation": true,
+        "supports_image_editing": true,
+        "supportsToolCall": false,
+        "supportsReasoning": false,
+        "isDefault": false,
+        "description": "Codex 内置图片生成与参考图编辑模型（实际可用性与额度由账号套餐决定）",
+    })
+}
+
+fn mark_image_capabilities(model: &mut Value) {
+    model["kind"] = json!("image");
+    model["output_modalities"] = json!(["image"]);
+    model["supportsImages"] = json!(true);
+    model["supports_image_generation"] = json!(true);
+    model["supports_image_editing"] = json!(true);
+    model["supportsToolCall"] = json!(false);
+    model["supportsReasoning"] = json!(false);
+    model["isDefault"] = json!(false);
+}
 
 #[derive(Clone)]
 struct AccountCatalog {
@@ -137,6 +172,11 @@ fn list_for(identities: Option<&HashSet<String>>) -> Vec<Value> {
             }
         }
     }
+    if identities.is_none_or(|ids| !ids.is_empty())
+        && !models.keys().any(|id| is_image_model(id))
+    {
+        models.insert(IMAGE_MODEL.to_string(), (i64::MAX, image_model_view()));
+    }
     let mut ordered: Vec<_> = models.into_values().collect();
     ordered.sort_by_key(|(priority, _)| *priority);
     ordered.into_iter().map(|(_, model)| model).collect()
@@ -221,10 +261,16 @@ fn model_view(raw: &Value) -> Option<Value> {
     if let Some(description) = raw.get("description").and_then(Value::as_str) {
         model["description"] = json!(description);
     }
+    if is_image_model(id) {
+        mark_image_capabilities(&mut model);
+    }
     Some(model)
 }
 
 pub(super) fn entry(identity: &str, model: &str) -> Option<Value> {
+    if is_image_model(model) {
+        return None;
+    }
     let state = cache().read().unwrap_or_else(|error| error.into_inner());
     state
         .accounts
@@ -250,6 +296,10 @@ pub(super) fn cooldown_models(
     account_id: &str,
     wire_model: &str,
 ) -> Vec<String> {
+    // 图片生成与对话各自有独立配额桶（image_gen / imagegen_premium），互不连坐冷却。
+    if is_image_model(wire_model) {
+        return vec![wire_model.to_string()];
+    }
     let identity = store
         .plugin_account(account_id)
         .and_then(|value| account::Tokens::read(&value).ok())
@@ -261,7 +311,9 @@ pub(super) fn cooldown_models(
             catalog
                 .models
                 .iter()
-                .filter_map(|raw| raw.get("slug").and_then(Value::as_str).map(str::to_string))
+                .filter_map(|raw| raw.get("slug").and_then(Value::as_str))
+                .filter(|slug| !is_image_model(slug))
+                .map(str::to_string)
                 .collect()
         })
         .unwrap_or_default();
@@ -420,4 +472,32 @@ async fn refresh_one(
     drop(state);
     super::super::catalog::invalidate();
     Ok(Some(count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn includes_builtin_image_model_and_isolates_cooldown() {
+        let items = list();
+        let image = items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(IMAGE_MODEL))
+            .expect("Codex 模型清单应包含内置图像模型");
+        assert_eq!(image["kind"], json!("image"));
+        assert_eq!(image["output_modalities"], json!(["image"]));
+        assert_eq!(image["supports_image_generation"], json!(true));
+        assert_eq!(image["supports_image_editing"], json!(true));
+        assert_eq!(image["supportsImages"], json!(true));
+        assert_eq!(image["supportsToolCall"], json!(false));
+        assert_eq!(image["supportsReasoning"], json!(false));
+        assert!(entry("any-identity", IMAGE_MODEL).is_none());
+
+        let store = AccountStore::with_db(None);
+        assert_eq!(
+            cooldown_models(&store, "acc-1", IMAGE_MODEL),
+            vec![IMAGE_MODEL.to_string()]
+        );
+    }
 }

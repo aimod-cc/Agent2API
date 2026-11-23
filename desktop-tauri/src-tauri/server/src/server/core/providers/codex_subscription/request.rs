@@ -45,12 +45,7 @@ pub fn build_native_request(
     build(account, body, client_headers, true)
 }
 
-fn build(
-    account: &Value,
-    body: &Value,
-    client_headers: &HeaderMap,
-    native: bool,
-) -> Result<ChatRequestPlan, GatewayError> {
+pub(super) fn authorized_tokens(account: &Value) -> Result<Tokens, GatewayError> {
     let secret = account
         .get("secret")
         .or_else(|| account.get("pluginSecret"))
@@ -61,10 +56,60 @@ fn build(
                 .with_code("codex_relogin_required"),
         );
     }
-    let tokens = Tokens::read(account)?;
+    Tokens::read(account)
+}
+
+pub(super) fn build_headers(
+    tokens: &Tokens,
+    client_headers: &HeaderMap,
+    accept: &str,
+    responses_beta: bool,
+    prompt_cache_key: Option<&str>,
+) -> Result<Vec<(String, String)>, GatewayError> {
+    let mut headers = http::account_headers(&tokens.access, &tokens.account_id);
+    headers.extend([
+        ("Content-Type".into(), "application/json".into()),
+        ("Accept".into(), accept.into()),
+        ("version".into(), http::version()),
+    ]);
+    if responses_beta {
+        headers.push(("OpenAI-Beta".into(), "responses=experimental".into()));
+    }
+    for (key, value) in client_headers {
+        let key = key.as_str();
+        if !codex_header(key) || matches!(key, "version" | "session_id" | "conversation_id") {
+            continue;
+        }
+        if let Ok(value) = value.to_str() {
+            headers.push((key.to_string(), value.to_string()));
+        }
+    }
+    if let Some(key) = prompt_cache_key {
+        if key.len() > 512 || HeaderValue::from_str(key).is_err() {
+            return Err(GatewayError::bad_request("Codex 会话缓存标识无效"));
+        }
+        headers.retain(|(name, _)| !matches!(name.as_str(), "session-id" | "thread-id"));
+        headers.push(("session-id".into(), key.to_string()));
+        headers.push(("thread-id".into(), key.to_string()));
+    }
+    Ok(headers)
+}
+
+fn build(
+    account: &Value,
+    body: &Value,
+    client_headers: &HeaderMap,
+    native: bool,
+) -> Result<ChatRequestPlan, GatewayError> {
+    let tokens = authorized_tokens(account)?;
     let model = account::text(body, &["model"]);
     if model.is_empty() {
         return Err(GatewayError::bad_request("Codex 请求缺少模型"));
+    }
+    if models::is_image_model(model) {
+        return Err(GatewayError::bad_request(format!(
+            "{model} 是图片生成模型，请使用 POST /v1/images/generations 或 POST /v1/images/edits"
+        )));
     }
     let identity = tokens.identity();
     let catalog = models::entry(&identity, model);
@@ -221,30 +266,13 @@ fn build(
     let effort = normalize_reasoning(&mut body, catalog.as_ref())?;
     declare_search(&mut body);
     validate_tool_names(&body)?;
-    let mut headers = http::account_headers(&tokens.access, &tokens.account_id);
-    headers.extend([
-        ("Content-Type".into(), "application/json".into()),
-        ("Accept".into(), "text/event-stream".into()),
-        ("OpenAI-Beta".into(), "responses=experimental".into()),
-        ("version".into(), http::version()),
-    ]);
-    for (key, value) in client_headers {
-        let key = key.as_str();
-        if !codex_header(key) || matches!(key, "version" | "session_id" | "conversation_id") {
-            continue;
-        }
-        if let Ok(value) = value.to_str() {
-            headers.push((key.to_string(), value.to_string()));
-        }
-    }
-    if let Some(key) = body.get("prompt_cache_key").and_then(Value::as_str) {
-        if key.len() > 512 || HeaderValue::from_str(key).is_err() {
-            return Err(GatewayError::bad_request("Codex 会话缓存标识无效"));
-        }
-        headers.retain(|(name, _)| !matches!(name.as_str(), "session-id" | "thread-id"));
-        headers.push(("session-id".into(), key.to_string()));
-        headers.push(("thread-id".into(), key.to_string()));
-    }
+    let headers = build_headers(
+        &tokens,
+        client_headers,
+        "text/event-stream",
+        true,
+        body.get("prompt_cache_key").and_then(Value::as_str),
+    )?;
     let mut plan = ChatRequestPlan::chat(
         format!("{}/responses", http::BASE),
         headers,

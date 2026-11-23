@@ -46,7 +46,10 @@ export function PromptRuleTester({ api, config, view, t, onLocate }: {
         </div>
         <div><Label htmlFor='sp-sample-model'>{t('模型')}</Label>
           <Input id='sp-sample-model' value={sample.model} list='sp-model-choices' spellCheck={false}
-            placeholder={t('客户端请求的模型名')} onChange={event => setSample(current => ({ ...current, model: event.currentTarget.value }))} />
+            placeholder={t('客户端请求的模型名')} onChange={event => {
+              const model = event.currentTarget.value
+              setSample(current => ({ ...current, model }))
+            }} />
         </div>
       </div>
       <div className='sp-tester-result' aria-live='polite'>

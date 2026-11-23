@@ -90,7 +90,7 @@ export function cooldownSummary(rule: ErrorRule, settings: ErrorSettings, t: Err
 }
 export function errorPolicyValidation(settings: ErrorSettings, t: ErrorTranslate): string | null {
   const fields: [number, number, number, string][] = [
-    [settings.resends, 0, 10, t('原账号重发')], [settings.switches, 0, 10, t('最多再换账号')],
+    [settings.resends, 0, 10, t('原账号重发')], [settings.switches, 0, 100, t('最多再换账号')],
     [settings.intervalSeconds, 0, 300, t('重发间隔')], [settings.waitBudgetSeconds, 0, 300, t('累计等待上限')],
     [settings.cooldownFloorSeconds, 1, 60, t('最短限流冷却')], [settings.backoffSeconds, 1, 3600, t('首次休息时间')],
     [settings.backoffCapSeconds, settings.backoffSeconds, 3600, t('连续失败最长休息')], [settings.sinkSeconds, 30, 3600, t('最长保留时间')],

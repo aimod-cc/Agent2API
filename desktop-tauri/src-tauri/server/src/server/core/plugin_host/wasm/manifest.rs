@@ -13,7 +13,7 @@ pub const CAPABILITIES: &[&str] = &[
     "login.forms.v1", "checkin.rolling.v1", "errors.v1", "accounts.identity.v1",
     "catalog.accounts.v1", "state.v1", "resources.v1", "images.v1", "tasks.v1",
     "login.interaction.v1", "login.callback.v1", "login.captcha.geetest.v1", "login.captcha.alicom4.v1", "native.helpers.v1",
-    "settings.schema.v1", "login.sms.v1", "login.device.v1", "resources.fetch-public.v1", "protocol.convert.v1",
+    "settings.schema.v1", "login.sms.v1", "login.sms.alicom4.v1", "login.device.v1", "resources.fetch-public.v1", "protocol.convert.v1",
     "http.account-origin.v1", "runtime.platform.v1", "verification.account.v1", "verification.claim.v1",
     "runtime.architecture.v1", "runtime.client-fingerprint.v1", "request.context.v1",
     "login.managed.v1", "login.loopback.v1", "login.captcha.aliyun.v1",
@@ -126,6 +126,7 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         ("verification.claim.v1", &["verification.account.v1"][..]),
         ("login.interaction.v1", &["login.forms.v1", "state.v1"][..]),
         ("login.sms.v1", &["login.forms.v1", "http.v1"][..]),
+        ("login.sms.alicom4.v1", &["login.sms.v1", "login.captcha.alicom4.v1"][..]),
         ("login.device.v1", &["login.sms.v1"][..]),
         ("login.captcha.geetest.v1", &["login.interaction.v1"][..]),
         ("login.captcha.alicom4.v1", &["login.interaction.v1"][..]),
@@ -145,6 +146,9 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     }
     if requires("crypto.monkeycode-cap.v1") && !matches!(manifest.providers[0].id.as_str(), "monkeycode" | "monkeycode-intl") {
         return Err("MonkeyCode 官方计算验证不能跨提供商使用".into());
+    }
+    if requires("login.sms.alicom4.v1") && manifest.providers[0].id.as_str() != "codar" {
+        return Err("短信 Alicom4 人机验证能力不能跨提供商使用".into());
     }
     if requires("desktop.credentials.v1") && super::desktop_credentials::helper(manifest.providers[0].id.as_str())
         .is_none_or(|id| !spec.helpers.iter().any(|helper| helper == id)) {

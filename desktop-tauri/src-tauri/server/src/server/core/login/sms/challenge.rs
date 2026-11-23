@@ -3,11 +3,26 @@ use serde_json::Value;
 
 use crate::server::errors::GatewayError;
 
-#[derive(Clone, Deserialize, Serialize)]
+pub(crate) const ALICOM4_CODAR_CAPTCHA_ID: &str = "bb7f810ecc9f6d21dcf72bcae120c8c5";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum Challenge {
+pub(crate) enum Challenge {
     Geetest { gt: String, challenge: String, success: bool, new_captcha: bool },
+    Alicom4 { #[serde(rename = "captchaId")] captcha_id: String },
     External { url: String },
+}
+
+pub(crate) fn check_alicom4_response(value: &Value) -> bool {
+    let Some(reply) = value.as_object() else { return false; };
+    let keys = ["lot_number", "captcha_output", "pass_token", "gen_time"];
+    reply.len() == keys.len()
+        && reply.iter().all(|(key, value)| {
+            keys.contains(&key.as_str())
+                && value.as_str().is_some_and(|text| {
+                    !text.is_empty() && text.len() <= 8192 && !text.chars().any(char::is_control)
+                })
+        })
 }
 
 impl Challenge {
@@ -15,6 +30,7 @@ impl Challenge {
         let valid = match self {
             Self::Geetest { gt, challenge, .. } => !gt.is_empty() && gt.len() <= 128
                 && !challenge.is_empty() && challenge.len() <= 256,
+            Self::Alicom4 { captcha_id } => captcha_id == ALICOM4_CODAR_CAPTCHA_ID,
             Self::External { url } => url.len() <= 8192 && !url.chars().any(|ch| ch.is_control() || ch.is_whitespace())
                 && url::Url::parse(url).is_ok_and(|url|
                 url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty()
@@ -26,6 +42,7 @@ impl Challenge {
     pub fn check(&self, value: &Value) -> Result<(), GatewayError> {
         let valid = match self {
             Self::External { .. } => value.is_null(),
+            Self::Alicom4 { .. } => check_alicom4_response(value),
             Self::Geetest { challenge, .. } => value["geetest_challenge"].as_str().is_some_and(|text|
                 !text.is_empty() && text.len() <= 512 && text.starts_with(challenge))
                 && ["geetest_validate", "geetest_seccode"].iter().all(|key|

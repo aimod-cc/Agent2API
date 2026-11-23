@@ -11,10 +11,13 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, LPARAM, WAIT_OBJECT_0, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, LPARAM, STILL_ACTIVE, WAIT_OBJECT_0, WPARAM,
+};
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
-    PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+    WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE};
 
@@ -110,6 +113,10 @@ fn run_as_node_pids(system: &mut sysinfo::System, candidates: &[sysinfo::Pid]) -
     }).map(|pid| pid.as_u32()).collect()
 }
 
+fn observed_exe(process: &sysinfo::Process) -> Option<&Path> {
+    process.exe().filter(|path| !path.as_os_str().is_empty())
+}
+
 pub fn running_executables(names: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut system = system();
     let candidates: Vec<_> = system.processes().iter().filter(|(_, process)| {
@@ -120,7 +127,7 @@ pub fn running_executables(names: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut unique: Vec<PathBuf> = Vec::new();
     for pid in candidates {
         if node_pids.contains(&pid.as_u32()) { continue; }
-        let Some(path) = system.process(pid).and_then(|process| process.exe()) else { continue; };
+        let Some(path) = system.process(pid).and_then(observed_exe) else { continue; };
         if !unique.iter().any(|existing| paths::same(existing, path)) {
             unique.push(path.to_path_buf());
         }
@@ -138,7 +145,7 @@ fn has_explicit_profile(cmd: &[OsString]) -> bool {
 
 fn main_root_pids(system: &mut sysinfo::System, executable: &Path) -> HashSet<u32> {
     let candidates: Vec<_> = system.processes().iter().filter(|(_, process)| {
-        process.exe().is_some_and(|path| paths::same(path, executable)) && !is_non_main_cmd(process.cmd())
+        observed_exe(process).is_some_and(|path| paths::same(path, executable)) && !is_non_main_cmd(process.cmd())
     }).map(|(pid, _)| *pid).collect();
     let node_pids = run_as_node_pids(system, &candidates);
     let raw_roots: HashSet<u32> = candidates.into_iter().map(|pid| pid.as_u32())
@@ -171,7 +178,7 @@ fn expand_descendants(system: &sysinfo::System, roots: &HashSet<u32>, root_dir: 
             if system.process(sysinfo::Pid::from_u32(parent_pid)).is_some_and(|parent| parent.start_time() > process.start_time()) {
                 continue;
             }
-            if process.exe().is_some_and(|path| paths::checked(path, false).is_ok_and(|path| path.starts_with(root_dir))) {
+            if observed_exe(process).is_some_and(|path| paths::checked(path, false).is_ok_and(|path| path.starts_with(root_dir))) {
                 changed |= selected.insert(pid_u32);
             }
         }
@@ -185,16 +192,34 @@ fn verified_processes(system: &sysinfo::System, pids: &HashSet<u32>, root_dir: &
     for (pid, process) in system.processes() {
         let pid_u32 = pid.as_u32();
         if !pids.contains(&pid_u32) { continue; }
-        let Some((actual, started)) = process_identity(pid_u32)? else { continue; };
-        let path = match process.exe() {
-            Some(path) => paths::checked(path, false)?,
-            None => actual.clone(),
-        };
-        if !path.starts_with(root_dir) || !actual.starts_with(root_dir) {
-            return Err("客户端子进程不属于原安装目录".into());
+        let observed = observed_exe(process);
+        match process_state(pid_u32)? {
+            HandleState::Exited => continue,
+            HandleState::Active(actual, started) => {
+                let path = match observed {
+                    Some(path) => paths::checked(path, false)?,
+                    None => actual.clone(),
+                };
+                if !path.starts_with(root_dir) || !actual.starts_with(root_dir) {
+                    return Err("客户端子进程不属于原安装目录".into());
+                }
+                if !paths::same(&actual, &path) { return Err("客户端进程路径已变化，未结束程序".into()); }
+                result.push((pid_u32, actual, started));
+            }
+            HandleState::Exiting(started) => {
+                let Some(observed) = observed else {
+                    return Err("无法重新核对客户端进程，未结束程序".into());
+                };
+                let path = paths::checked(observed, false)?;
+                if !path.starts_with(root_dir) {
+                    return Err("客户端子进程不属于原安装目录".into());
+                }
+                let Some(started) = started else {
+                    return Err("无法重新核对客户端进程，未结束程序".into());
+                };
+                result.push((pid_u32, path, started));
+            }
         }
-        if !paths::same(&actual, &path) { return Err("客户端进程路径已变化，未结束程序".into()); }
-        result.push((pid_u32, actual, started));
     }
     Ok(result)
 }
@@ -248,8 +273,11 @@ pub fn stop_hot_services(executable: &Path, targets: &HotSwitchTargets) -> Resul
     let executable = paths::checked(executable, false)?;
     let root_dir = executable.parent().ok_or("客户端安装目录不可用")?;
     for root in &targets.roots {
-        let Some((actual, started)) = process_identity(root.pid).map_err(|_| "客户端进程已变化，未重载后台服务".to_string())? else {
-            return Err("客户端进程已退出，请重新启动客户端".into());
+        let (actual, started) = match process_state(root.pid).map_err(|_| "客户端进程已变化，未重载后台服务".to_string())? {
+            HandleState::Active(actual, started) => (actual, started),
+            HandleState::Exited | HandleState::Exiting(_) => {
+                return Err("客户端进程已退出，请重新启动客户端".into());
+            }
         };
         if started != root.started || !paths::same(&actual, &root.path) {
             return Err("客户端进程已变化，未重载后台服务".into());
@@ -257,7 +285,7 @@ pub fn stop_hot_services(executable: &Path, targets: &HotSwitchTargets) -> Resul
     }
     for service in &targets.services {
         if !service.path.starts_with(root_dir) { return Err("客户端子进程不属于原安装目录".into()); }
-        if let Ok(Some((actual, started))) = process_identity(service.pid) {
+        if let Ok(HandleState::Active(actual, started)) = process_state(service.pid) {
             if started == service.started && paths::same(&actual, &service.path) {
                 terminate(service.pid, &service.path, service.started)?;
             }
@@ -265,12 +293,17 @@ pub fn stop_hot_services(executable: &Path, targets: &HotSwitchTargets) -> Resul
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        let any_alive = targets.services.iter().any(|service| {
-            process_identity(service.pid).is_ok_and(|item| item.is_some_and(|(actual, started)| started == service.started && paths::same(&actual, &service.path)))
+        let any_alive = targets.services.iter().any(|service| match process_state(service.pid) {
+            Ok(HandleState::Active(actual, started)) => started == service.started && paths::same(&actual, &service.path),
+            Ok(HandleState::Exiting(_)) | Err(_) => true,
+            Ok(HandleState::Exited) => false,
         });
         if !any_alive {
             let roots_alive = targets.roots.iter().all(|root| {
-                process_identity(root.pid).is_ok_and(|item| item.is_some_and(|(actual, started)| started == root.started && paths::same(&actual, &root.path)))
+                matches!(
+                    process_state(root.pid),
+                    Ok(HandleState::Active(actual, started)) if started == root.started && paths::same(&actual, &root.path)
+                )
             });
             return if roots_alive { Ok(()) } else { Err("客户端进程已退出，请重新启动客户端".into()) };
         }
@@ -290,7 +323,10 @@ pub fn wait_hot_services_respawn(executable: &Path, hot_switch: &HotSwitch, prev
         if cancel.is_cancelled() { return Ok(HotSwitchRespawn::Canceled); }
         let system = system();
         let surviving_roots: HashSet<u32> = previous.roots.iter().filter(|root| {
-            process_identity(root.pid).is_ok_and(|item| item.is_some_and(|(actual, started)| started == root.started && paths::same(&actual, &root.path)))
+            matches!(
+                process_state(root.pid),
+                Ok(HandleState::Active(actual, started)) if started == root.started && paths::same(&actual, &root.path)
+            )
         }).map(|root| root.pid).collect();
         if surviving_roots.is_empty() { return Ok(HotSwitchRespawn::ClientClosed); }
         let descendants = expand_descendants(&system, &surviving_roots, root_dir);
@@ -328,8 +364,24 @@ unsafe extern "system" fn close_window(window: windows::Win32::Foundation::HWND,
 struct Handle(HANDLE);
 impl Drop for Handle { fn drop(&mut self) { unsafe { let _ = CloseHandle(self.0); } } }
 
+enum HandleState {
+    Active(PathBuf, u64),
+    Exiting(Option<u64>),
+    Exited,
+}
+
+fn wait_exited(handle: HANDLE, timeout_ms: u32) -> bool {
+    unsafe { WaitForSingleObject(handle, timeout_ms) == WAIT_OBJECT_0 }
+}
+
 fn process_exited(handle: HANDLE) -> bool {
-    unsafe { WaitForSingleObject(handle, 0) == WAIT_OBJECT_0 }
+    wait_exited(handle, 0)
+}
+
+fn process_exiting(handle: HANDLE) -> bool {
+    if process_exited(handle) { return true; }
+    let mut code = 0u32;
+    unsafe { GetExitCodeProcess(handle, &mut code).is_ok() && code != STILL_ACTIVE.0 as u32 }
 }
 
 fn open_query(pid: u32, extra: PROCESS_ACCESS_RIGHTS, deny_message: &str) -> Result<Option<Handle>, String> {
@@ -350,18 +402,31 @@ fn created(handle: HANDLE) -> Result<u64, String> {
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
 
-fn inspect_handle(handle: HANDLE) -> Result<Option<(PathBuf, u64)>, String> {
-    if process_exited(handle) { return Ok(None); }
+fn inspect_handle(handle: HANDLE) -> Result<HandleState, String> {
+    if process_exited(handle) { return Ok(HandleState::Exited); }
     match (process_path(handle), created(handle)) {
-        (Ok(path), Ok(started)) => Ok(Some((path, started))),
-        _ if process_exited(handle) => Ok(None),
-        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(path), Ok(started)) => Ok(HandleState::Active(path, started)),
+        (path_res, time_res) => {
+            if process_exited(handle) { return Ok(HandleState::Exited); }
+            // Windows 进程进入内核退出收尾后，在 WaitForSingleObject 变为 WAIT_OBJECT_0 之前，
+            // QueryFullProcessImageNameW 可能先因 STATUS_PROCESS_IS_TERMINATING 返回拒绝访问。
+            let exiting = process_exiting(handle);
+            let wait_ms = if exiting { 250 } else { 50 };
+            if wait_exited(handle, wait_ms) { return Ok(HandleState::Exited); }
+            if exiting || process_exiting(handle) {
+                return Ok(HandleState::Exiting(time_res.ok()));
+            }
+            match (path_res, time_res) {
+                (Err(error), _) | (_, Err(error)) => Err(error),
+                (Ok(_), Ok(_)) => unreachable!(),
+            }
+        }
     }
 }
 
-fn process_identity(pid: u32) -> Result<Option<(PathBuf, u64)>, String> {
+fn process_state(pid: u32) -> Result<HandleState, String> {
     let Some(handle) = open_query(pid, PROCESS_ACCESS_RIGHTS(0), "无法核对客户端进程路径，未关闭程序")? else {
-        return Ok(None);
+        return Ok(HandleState::Exited);
     };
     inspect_handle(handle.0)
 }
@@ -375,11 +440,19 @@ fn process_path(handle: HANDLE) -> Result<PathBuf, String> {
 }
 
 fn terminate(pid: u32, expected: &Path, started: u64) -> Result<(), String> {
-    let Some(handle) = open_query(pid, PROCESS_TERMINATE, "无法结束客户端，请先手动关闭程序")? else {
-        return Ok(());
+    let handle = match open_query(pid, PROCESS_TERMINATE, "无法结束客户端，请先手动关闭程序") {
+        Ok(Some(handle)) => handle,
+        Ok(None) => return Ok(()),
+        Err(deny) => {
+            return match process_state(pid) {
+                Ok(HandleState::Exited | HandleState::Exiting(_)) => Ok(()),
+                _ => Err(deny),
+            };
+        }
     };
-    let Some((actual, creation)) = inspect_handle(handle.0)? else {
-        return Ok(());
+    let (actual, creation) = match inspect_handle(handle.0)? {
+        HandleState::Exited | HandleState::Exiting(_) => return Ok(()),
+        HandleState::Active(actual, creation) => (actual, creation),
     };
     if creation != started { return Err("客户端进程已变化，未结束新进程".into()); }
     if !paths::same(&actual, expected) {
@@ -387,7 +460,7 @@ fn terminate(pid: u32, expected: &Path, started: u64) -> Result<(), String> {
     }
     match unsafe { TerminateProcess(handle.0, 0) } {
         Ok(()) => Ok(()),
-        Err(_) if process_exited(handle.0) => Ok(()),
+        Err(_) if process_exiting(handle.0) => Ok(()),
         Err(_) => Err("客户端未能关闭，请手动关闭后重试".into()),
     }
 }
@@ -398,13 +471,21 @@ fn remaining(executable: &Path, original: &[(u32, PathBuf, u64)]) -> Result<Vec<
     for (id, path, started) in original {
         if current.iter().any(|(current_id, _, _)| current_id == id) { continue; }
         if let Some(process) = system.process(sysinfo::Pid::from_u32(*id)) {
-            let Some((actual, creation)) = process_identity(*id)? else { continue; };
-            if creation != *started { continue; }
-            if let Some(observed) = process.exe() {
-                if !paths::same(observed, path) { return Err("客户端进程路径已变化，未结束程序".into()); }
+            match process_state(*id)? {
+                HandleState::Exited => continue,
+                HandleState::Exiting(creation) => {
+                    if creation.is_some_and(|creation| creation != *started) { continue; }
+                    current.push((*id, path.clone(), *started));
+                }
+                HandleState::Active(actual, creation) => {
+                    if creation != *started { continue; }
+                    if let Some(observed) = observed_exe(process) {
+                        if !paths::same(observed, path) { return Err("客户端进程路径已变化，未结束程序".into()); }
+                    }
+                    if !paths::same(&actual, path) { return Err("客户端进程路径已变化，未结束程序".into()); }
+                    current.push((*id, path.clone(), *started));
+                }
             }
-            if !paths::same(&actual, path) { return Err("客户端进程路径已变化，未结束程序".into()); }
-            current.push((*id, path.clone(), *started));
         }
     }
     Ok(current)
@@ -419,7 +500,7 @@ fn spawned_from_known(system: &sysinfo::System, pid: u32, known: &HashMap<u32, (
         let Some(parent) = system.process(sysinfo::Pid::from_u32(parent_pid)) else { return false; };
         if parent.start_time() > process.start_time() { return false; }
         if known.contains_key(&parent_pid) {
-            return process.exe().is_some_and(|exe| paths::checked(exe, false).is_ok_and(|checked| checked.starts_with(root_dir)));
+            return observed_exe(process).is_some_and(|exe| paths::checked(exe, false).is_ok_and(|checked| checked.starts_with(root_dir)));
         }
         current = Some(parent);
     }
@@ -492,4 +573,61 @@ pub fn start(executable: &Path, proxy: Option<&super::super::proxy::LaunchProxy>
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("凭证已切换，但客户端启动结果未确认".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_and_terminate_tolerate_exiting_process() {
+        let comspec = std::env::var_os("ComSpec").map(PathBuf::from).expect("ComSpec missing");
+        for force_kill in [false, true] {
+            for _ in 0..5 {
+                let args: &[&str] = if force_kill {
+                    &["/c", "for /L %i in (1,1,1000000) do @rem"]
+                } else {
+                    &["/c", "exit", "0"]
+                };
+                let mut child = std::process::Command::new(&comspec)
+                    .args(args)
+                    .creation_flags(0x08000000)
+                    .spawn()
+                    .expect("spawn cmd.exe");
+                let pid = child.id();
+                let handle = open_query(pid, PROCESS_TERMINATE, "open failed").expect("open_query");
+                let Some(handle) = handle else {
+                    let _ = child.wait();
+                    continue;
+                };
+                let active = match inspect_handle(handle.0).expect("initial inspect") {
+                    HandleState::Active(path, started) => Some((path, started)),
+                    HandleState::Exited | HandleState::Exiting(_) => None,
+                };
+                if force_kill {
+                    if let Some((path, started)) = &active {
+                        terminate(pid, path, *started).expect("terminate should succeed");
+                    }
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut saw_exited = false;
+                while Instant::now() < deadline {
+                    match inspect_handle(handle.0).expect("inspect across exit must not fail") {
+                        HandleState::Exited => {
+                            saw_exited = true;
+                            break;
+                        }
+                        HandleState::Active(_, _) | HandleState::Exiting(_) => {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                    }
+                }
+                assert!(saw_exited, "process handle did not signal exit in time");
+                if let Some((path, started)) = active {
+                    terminate(pid, &path, started).expect("terminate after exit must be idempotent");
+                }
+                let _ = child.wait();
+            }
+        }
+    }
 }

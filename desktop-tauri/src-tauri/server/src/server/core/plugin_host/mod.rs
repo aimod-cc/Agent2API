@@ -63,6 +63,7 @@ pub mod startup;
 mod support;
 mod switching;
 pub mod update;
+pub(crate) mod usage_policy;
 pub(crate) mod wasm;
 pub use registry::dynamic_login;
 pub use wasm::owns as is_wasm_provider;
@@ -345,6 +346,7 @@ pub struct Host {
     providers: StdMutex<Vec<proto::ProviderInfo>>,
     provider_settings: StdMutex<std::collections::BTreeMap<String, provider_settings::Schema>>,
     error_rules: StdMutex<std::collections::BTreeMap<String, crate::server::config::error_policy::DeclaredErrorPolicy>>,
+    usage_policies: StdMutex<std::collections::BTreeMap<String, usage_policy::UsageQueryPolicy>>,
     /// 回调处理器（网关侧实现，见 [`GatewayCallbacks`]）。
     callbacks: Arc<dyn GatewayCallbacks>,
 }
@@ -431,6 +433,7 @@ impl Host {
             providers: StdMutex::new(Vec::new()),
             provider_settings: StdMutex::new(std::collections::BTreeMap::new()),
             error_rules: StdMutex::new(std::collections::BTreeMap::new()),
+            usage_policies: StdMutex::new(std::collections::BTreeMap::new()),
             callbacks,
         }
     }

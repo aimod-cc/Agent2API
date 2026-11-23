@@ -338,13 +338,15 @@ pub fn restore(
 }
 
 pub fn applied_status(client: &str, path: &Path) -> Result<Value, String> {
-    let backups = backups::list(client, path)?;
-    let Some(last) = backups.iter().rev().find(|b| {
-        matches!(
-            b.phase.as_str(),
-            "committed" | "prepared" | "restore_prepared"
-        )
-    }) else {
+    applied_status_with_ids(client, path, None)
+}
+
+pub fn applied_status_with_ids(
+    client: &str,
+    path: &Path,
+    pre_scanned: Option<&[String]>,
+) -> Result<Value, String> {
+    let Some(last) = backups::latest_active(client, path, pre_scanned)? else {
         return Ok(json!({ "canUndo": false, "canDisconnect": false }));
     };
     let unchanged = last.files.iter().all(|file| {

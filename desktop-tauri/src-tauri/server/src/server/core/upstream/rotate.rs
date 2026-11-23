@@ -333,7 +333,7 @@ fn select_target_account_sync(
                 Some(decision),
             ));
         }
-        excluded.push(entry.id.clone());
+        excluded.push(crate::server::core::routing_groups::attempt_key(&entry.account));
     }
 
     let enabled: Vec<Value> = candidates
@@ -363,7 +363,7 @@ fn select_target_account_sync(
         ));
     }
 
-    if super::account_admission::all_busy(&candidates, &counts, tried_ids) {
+    if super::account_admission::all_busy(&candidates, &counts, &excluded) {
         return Err(GatewayError::with_status(503, "当前路由内的账号均已达到并发上限")
             .with_code("account_busy"));
     }

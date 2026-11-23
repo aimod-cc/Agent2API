@@ -66,7 +66,7 @@ import { ModelsFetchTable, type RefreshItem, type Row } from './models-fetch-tab
 type Account = {
   id?: unknown; provider?: string; name?: string; nickname?: string; email?: string
   nameCustom?: boolean
-  available?: boolean; hasCredentials?: boolean
+  available?: boolean; enabled?: boolean; hasCredentials?: boolean
 }
 
 /** 内置家注册表里的一项（`wbProviders.all()`）；自定义家目录里的一项（`customList()`） */
@@ -201,20 +201,25 @@ function accountLabel(account: Account): string {
   return name || t('未命名账号')
 }
 
-/** 目录来源只要求有凭据；账号停用不影响刷新，顺序沿用账号优先级。 */
+/** 仅启用且凭证可用的账号参与目录范围与「模型来源」选择（与模型管理页左栏口径一致）。 */
+function isUsableAccount(account: Account): boolean {
+  return account?.enabled !== false && account?.available !== false && account?.hasCredentials !== false
+}
+
+/** 该家可用于拉取目录的账号（「模型来源」下拉的选项）；顺序沿用账号优先级。 */
 function sourceAccounts(providerId: string): Account[] {
   if (ACCOUNTLESS_REFRESH.has(providerId)) return []
   const order = shared().wbAccountsModel?.byPriorityOrder
   const list = accounts().filter(account => (account?.provider || 'workbuddy') === providerId
-    && account?.hasCredentials !== false)
+    && isUsableAccount(account))
   return order ? list.sort(order) : list
 }
 
-/** 刷新范围包含模型页已有提供商和有凭据的账号所属提供商。 */
+/** 刷新范围包含模型页已有提供商和有启用可用账号的提供商。 */
 function scopeProviders(): string[] {
   const ids = new Set(shared().wbModelsPanel?.builtinProviders?.() || [])
   for (const account of accounts()) {
-    if (account?.hasCredentials === false) continue
+    if (!isUsableAccount(account)) continue
     ids.add(account?.provider || 'workbuddy')
   }
   return [...ids]
@@ -316,7 +321,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
       const refreshTask = shared().wbApp?.refresh?.({ force: true })
       if (refreshTask) tasks.push(refreshTask)
     }
-    const loadPanelTask = shared().wbModelsPanel?.load?.()
+    const loadPanelTask = shared().wbModelsPanel?.load?.({ force: true })
     if (loadPanelTask) tasks.push(Promise.resolve(loadPanelTask))
     if (tasks.length) {
       void Promise.allSettled(tasks).then(() => {
@@ -742,7 +747,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
                 )}
                 <Button variant={(!custom && unfetchedRows.length > 0 && unfetchedRows.length < rows.length) ? 'outline' : 'default'} size='sm'
                   title={custom ? t('从该提供商上游获取模型清单') : t('刷新全部提供商（逐家请求上游）')}
-                  disabled={busy}
+                  disabled={busy || (!custom && !rows.length)}
                   onClick={() => { void load() }}>
                   {busyKind === 'load' ? t('获取中…') : fetched ? t('重新获取') : (!custom && unfetchedRows.length > 0 && unfetchedRows.length < rows.length ? t('全部获取') : t('获取模型'))}
                 </Button>

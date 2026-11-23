@@ -567,6 +567,44 @@ pub async fn pick_folder(app: AppHandle, default_dir: Option<String>) -> Result<
     Ok(json!({ "canceled": false, "path": path.to_string_lossy() }))
 }
 
+#[tauri::command]
+pub async fn pick_agent_config_file(
+    app: AppHandle,
+    default_path: Option<String>,
+) -> Result<Value, String> {
+    if app.get_webview_window(crate::MAIN_WINDOW_LABEL).is_none() {
+        return Err("本机配置文件选择仅用于桌面主窗口".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut picker = tauri_plugin_dialog::DialogExt::dialog(&app)
+            .file()
+            .set_title("选择客户端配置文件")
+            .add_filter(
+                "配置文件",
+                &["json", "jsonc", "toml", "yaml", "yml", "env"],
+            )
+            .add_filter("所有文件", &["*"]);
+        if let Some(dir) = default_path
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .map(std::path::Path::new)
+            .and_then(|path| if path.is_dir() { Some(path) } else { path.parent() })
+            .filter(|dir| dir.is_dir())
+        {
+            picker = picker.set_directory(dir);
+        }
+        let Some(file) = picker.blocking_pick_file() else {
+            return Ok(json!({ "canceled": true }));
+        };
+        let path = file
+            .into_path()
+            .map_err(|error| format!("配置文件路径无效: {error}"))?;
+        Ok(json!({ "canceled": false, "path": path.to_string_lossy() }))
+    })
+    .await
+    .map_err(|_| "配置文件选择未完成".to_string())?
+}
+
 /// 读取应用设置。
 ///
 /// `autostart` 以系统注册表的实际状态为准，而不是设置文件里的值：

@@ -1,19 +1,32 @@
 import * as React from 'react'
-import { Alert, Button, Empty, StatusDot, cn } from '@ui'
+import { Alert, Button, Empty, EmptyDescription, EmptyTitle, StatusDot, cn } from '@ui'
 import { t } from '../i18n'
-import { confirm, errorMessage, getAgentStore, removeConfiguration, subscribeAgentStore, toast } from './agent-state'
+import { confirm, errorMessage, getAgentStore, loadPanel, removeConfiguration, subscribeAgentStore, toast } from './agent-state'
 import { kindLabel, protocolLabel } from './agent-model'
+import { quickBlockReason } from './agent-quick-model'
 import { ProfileDialog } from './agent-profile-dialog'
 import { ApplyDialog } from './agent-preview'
 import { AgentActions, AgentIcon } from './agent-actions'
 import type { AgentClient, AgentOperation, AgentProfile } from './agent-types'
 
-export function ProfileEditor({ client }: { client: AgentClient }) {
+export function ProfileEditor({
+  client,
+  onAdd,
+  onQuickConnect,
+  onOpenPath,
+}: {
+  client: AgentClient
+  onAdd: () => void
+  onQuickConnect: () => void
+  onOpenPath: () => void
+}) {
   const store = React.useSyncExternalStore(subscribeAgentStore, getAgentStore, getAgentStore)
   const [editor, setEditor] = React.useState<AgentProfile | null>(null)
   const [applying, setApplying] = React.useState<{ profile: AgentProfile; operation: AgentOperation } | null>(null)
-  const disabled = Boolean(store.busy) || store.loading || Boolean(client.storeError)
+  const busy = Boolean(store.busy)
+  const disabled = busy || Boolean(client.storeError)
   const profiles = client.configurations
+  const canQuickConnect = client.writable && !quickBlockReason(client)
   const remove = async (profile: AgentProfile) => {
     if (profile.liveId) { setApplying({ profile, operation: 'config-delete' }); return }
     if (!await confirm(t('删除配置？'), t('此配置未在客户端中使用，删除不会改变当前使用的配置。'), t('删除'))) return
@@ -22,11 +35,34 @@ export function ProfileEditor({ client }: { client: AgentClient }) {
   }
   return <>
     <div className='agent-configurations' aria-label={t('配置列表')}>
-      {client.readError && <Alert variant='destructive'>{client.readError}</Alert>}
+      {client.readError && <Alert variant='destructive' className='flex flex-wrap items-center justify-between gap-3'>
+        <div className='min-w-0 flex-1'>
+          <div className='font-medium'>{t('配置文件读取失败')}</div>
+          <div className='mt-0.5 text-xs opacity-90'>{client.readError}</div>
+        </div>
+        <div className='flex shrink-0 items-center gap-2'>
+          <Button variant='outline' size='sm' disabled={busy} onClick={() => void loadPanel({ force: true })}>{t('重新检测')}</Button>
+          <Button variant='outline' size='sm' disabled={busy} onClick={onOpenPath}>{t('指定配置文件')}</Button>
+        </div>
+      </Alert>}
       {client.storeError && <Alert variant='destructive'>{client.storeError}</Alert>}
       {!client.readError && !client.storeError && !profiles.length && <Empty className='agent-configuration-empty'>
-        <span className='text-sm font-medium'>{t('还没有配置')}</span>
-        <p>{client.writable ? t('点击右上角「新增配置」，添加网关或其他服务') : t('未读取到可识别的客户端配置')}</p>
+        <EmptyTitle>{t('还没有配置')}</EmptyTitle>
+        <EmptyDescription>
+          {client.writable
+            ? canQuickConnect
+              ? t('可以直接一键接入本网关，或手动添加其他服务配置')
+              : t('手动新增一套配置后即可应用到客户端')
+            : t('未读取到可识别的客户端配置')}
+        </EmptyDescription>
+        {client.writable && <div className='mt-2 flex flex-wrap items-center justify-center gap-2'>
+          {canQuickConnect && <Button size='sm' disabled={disabled} onClick={onQuickConnect}>
+            <AgentIcon name='bolt' />{t('一键接入本网关')}
+          </Button>}
+          <Button variant={canQuickConnect ? 'outline' : 'default'} size='sm' disabled={disabled} onClick={onAdd}>
+            <AgentIcon name='plus' />{t('手动新增配置')}
+          </Button>
+        </div>}
       </Empty>}
       {profiles.map(profile => {
         const active = profile.status === 'active' || profile.status === 'enabled'

@@ -16,7 +16,7 @@ pub(super) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(super) const BASE: &str = "https://chatgpt.com/backend-api/codex";
 pub(super) const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub(super) const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
-const REFERENCE_VERSION: &str = "0.159.0";
+const REFERENCE_VERSION: &str = "0.171.0";
 const TIMEOUT: Duration = Duration::from_secs(25);
 
 static SEEN_VERSION: OnceLock<Mutex<String>> = OnceLock::new();
@@ -209,6 +209,8 @@ pub(super) fn code(body: &Value) -> Option<String> {
     token_error_code(body).or_else(|| {
         body.pointer("/error/type")
             .and_then(Value::as_str)
+            .or_else(|| body.pointer("/detail/code").and_then(Value::as_str))
+            .or_else(|| body.pointer("/detail/type").and_then(Value::as_str))
             .filter(|value| {
                 !value.is_empty()
                     && value.len() <= 80

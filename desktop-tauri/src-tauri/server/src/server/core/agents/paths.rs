@@ -1,11 +1,15 @@
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::{files, ClientDef};
+use super::{files, ClientDef, CLIENTS};
 
-#[derive(Default, Serialize, Deserialize)]
-struct Preferences {
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Preferences {
     paths: std::collections::BTreeMap<String, String>,
 }
 
@@ -13,7 +17,7 @@ fn preferences_file() -> PathBuf {
     crate::paths::config_dir().join("agent-paths.json")
 }
 
-fn preferences() -> Result<Preferences, String> {
+pub fn load_preferences() -> Result<Preferences, String> {
     let Some(bytes) = files::read(&preferences_file())? else {
         return Ok(Preferences::default());
     };
@@ -21,14 +25,15 @@ fn preferences() -> Result<Preferences, String> {
         .map_err(|error| format!("配置路径偏好无法读取，拒绝覆盖: {error}"))
 }
 
+#[allow(dead_code)]
 pub fn path_override(id: &str) -> Option<String> {
-    preferences().ok()?.paths.remove(id)
+    load_preferences().ok()?.paths.remove(id)
 }
 
 pub fn save_override(def: &ClientDef, raw: &str) -> Result<(), String> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().map_err(|_| "配置路径锁不可用")?;
-    let mut preferences = preferences()?;
+    let mut preferences = load_preferences()?;
     let raw = raw.trim();
     if raw.is_empty() {
         preferences.paths.remove(def.id);
@@ -65,7 +70,9 @@ pub fn save_override(def: &ClientDef, raw: &str) -> Result<(), String> {
     }
     let text =
         serde_json::to_vec_pretty(&preferences).map_err(|e| format!("保存配置路径失败: {e}"))?;
-    files::write_atomic(&preferences_file(), &text)
+    files::write_atomic(&preferences_file(), &text)?;
+    invalidate_caches();
+    Ok(())
 }
 
 pub fn home() -> PathBuf {
@@ -170,6 +177,7 @@ pub fn candidates(def: &ClientDef) -> Vec<PathBuf> {
 
 pub struct Detection {
     pub path: PathBuf,
+    pub override_path: String,
     pub detected: bool,
     pub evidence: Vec<String>,
     pub version: String,
@@ -179,23 +187,194 @@ pub struct Detection {
     pub resource_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Default)]
+pub struct BinaryIndex {
+    matches: HashMap<&'static str, Vec<(usize, PathBuf)>>,
+}
+
+impl BinaryIndex {
+    pub fn find(&self, def: &ClientDef) -> Option<PathBuf> {
+        for name in def.binaries {
+            if let Some(candidates) = self.matches.get(*name) {
+                if let Some((_, path)) = candidates.iter().find(|(_, path)| {
+                    *name != "agent"
+                        || path
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .contains("cursor")
+                }) {
+                    return Some(path.clone());
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct BinaryCacheKey {
+    path: OsString,
+    pathext: OsString,
+    home: PathBuf,
+    appdata: Option<PathBuf>,
+    localappdata: Option<PathBuf>,
+}
+
+static BINARY_INDEX_CACHE: OnceLock<Mutex<Option<(Instant, BinaryCacheKey, BinaryIndex)>>> = OnceLock::new();
+
+pub fn invalidate_caches() {
+    if let Some(cache) = BINARY_INDEX_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
+pub fn binary_index(use_cache: bool) -> BinaryIndex {
+    let key = BinaryCacheKey {
+        path: std::env::var_os("PATH").unwrap_or_default(),
+        pathext: std::env::var_os("PATHEXT").unwrap_or_default(),
+        home: home(),
+        appdata: env_dir("APPDATA"),
+        localappdata: env_dir("LOCALAPPDATA"),
+    };
+    let cache = BINARY_INDEX_CACHE.get_or_init(Default::default);
+    if use_cache {
+        if let Ok(guard) = cache.lock() {
+            if let Some((built_at, cached_key, index)) = guard.as_ref() {
+                if *cached_key == key && built_at.elapsed() < Duration::from_secs(60) {
+                    return index.clone();
+                }
+            }
+        }
+    }
+    let index = build_binary_index(&key);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), key, index.clone()));
+    }
+    index
+}
+
+fn build_binary_index(key: &BinaryCacheKey) -> BinaryIndex {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&key.path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    dirs.extend([
+        key.home.join(".local/bin"),
+        key.home.join(".npm-global/bin"),
+        key.home.join(".bun/bin"),
+    ]);
+    if let Some(ref appdata) = key.appdata {
+        dirs.push(appdata.join("npm"));
+    }
+    if let Some(ref local) = key.localappdata {
+        dirs.push(local.join("Microsoft/WinGet/Links"));
+    }
+    let mut seen_dirs = HashSet::new();
+    dirs.retain(|dir| seen_dirs.insert(dir.clone()));
+
+    let extensions: Vec<String> = if cfg!(windows) {
+        key.pathext
+            .to_string_lossy()
+            .split(';')
+            .map(|ext| ext.trim().to_ascii_lowercase())
+            .filter(|ext| !ext.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut expected: HashMap<String, (&'static str, usize)> = HashMap::new();
+    for client in CLIENTS {
+        for &stem in client.binaries {
+            let norm = if cfg!(windows) {
+                stem.to_ascii_lowercase()
+            } else {
+                stem.to_string()
+            };
+            expected.entry(norm.clone()).or_insert((stem, 0));
+            for (ext_idx, ext) in extensions.iter().enumerate() {
+                expected
+                    .entry(format!("{norm}{ext}"))
+                    .or_insert((stem, ext_idx + 1));
+            }
+        }
+    }
+
+    let stride = 1 + extensions.len();
+    let mut matches: HashMap<&'static str, Vec<(usize, PathBuf)>> = HashMap::new();
+    for (dir_idx, dir) in dirs.iter().enumerate() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let raw_name = file_name.to_string_lossy();
+            let lookup = if cfg!(windows) {
+                raw_name.to_ascii_lowercase()
+            } else {
+                raw_name.into_owned()
+            };
+            let Some(&(stem, ext_rank)) = expected.get(&lookup) else {
+                continue;
+            };
+            let path = entry.path();
+            if path.is_file() {
+                matches
+                    .entry(stem)
+                    .or_default()
+                    .push((dir_idx * stride + ext_rank, path));
+            }
+        }
+    }
+    for list in matches.values_mut() {
+        list.sort_by_key(|(rank, _)| *rank);
+    }
+    BinaryIndex { matches }
+}
+
 pub fn detect(def: &ClientDef) -> Detection {
-    let preferences = preferences();
+    let preferences = load_preferences();
+    let index = binary_index(true);
+    detect_with_context(def, &preferences, &index, true)
+}
+
+pub fn detect_with_context(
+    def: &ClientDef,
+    preferences: &Result<Preferences, String>,
+    binaries: &BinaryIndex,
+    allow_spawn: bool,
+) -> Detection {
     let preference_error = preferences.as_ref().err().cloned();
     let override_path = preferences
+        .as_ref()
         .ok()
-        .and_then(|mut preferences| preferences.paths.remove(def.id));
+        .and_then(|prefs| prefs.paths.get(def.id).cloned());
+    let override_str = override_path.clone().unwrap_or_default();
+    let binary = binaries.find(def);
     if def.id == "dsh" {
-        let binary = find_binary(def);
-        let found = super::dsh_paths::detect(binary.as_deref(), override_path.as_deref().map(Path::new));
+        let found = super::dsh_paths::detect_with_options(
+            binary.as_deref(),
+            override_path.as_deref().map(Path::new),
+            allow_spawn,
+        );
         let mut evidence = Vec::new();
         if found.path.is_file() { evidence.push(format!("发现配置文件: {}", found.path.display())); }
         if let Some(binary) = binary { evidence.push(format!("发现客户端程序: {}", binary.display())); }
         if !found.source.as_os_str().is_empty() { evidence.push(format!("版本信息来源: {}", found.source.display())); }
         if override_path.is_some() { evidence.push("使用手动指定的配置路径".into()); }
         let note = preference_error.or(found.error);
-        return Detection { path: found.path, detected: found.detected, version: found.version,
-            unsupported: note.is_some(), note, evidence, config_targets: found.targets, resource_path: found.resource_path };
+        return Detection {
+            path: found.path,
+            override_path: override_str,
+            detected: found.detected,
+            version: found.version,
+            unsupported: note.is_some(),
+            note,
+            evidence,
+            config_targets: found.targets,
+            resource_path: found.resource_path,
+        };
     }
     let paths = candidates(def);
     let path = override_path
@@ -223,7 +402,6 @@ pub fn detect(def: &ClientDef) -> Detection {
     if override_path.is_some() {
         evidence.push("使用手动指定的配置路径".into());
     }
-    let binary = find_binary(def);
     if let Some(ref binary) = binary {
         evidence.push(format!("发现客户端程序: {}", binary.display()));
     }
@@ -256,6 +434,7 @@ pub fn detect(def: &ClientDef) -> Detection {
     Detection {
         detected: !evidence.is_empty(),
         path,
+        override_path: override_str,
         evidence,
         version,
         unsupported,
@@ -266,56 +445,7 @@ pub fn detect(def: &ClientDef) -> Detection {
 }
 
 pub(super) fn find_binary(def: &ClientDef) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    let home = home();
-    dirs.extend([
-        home.join(".local/bin"),
-        home.join(".npm-global/bin"),
-        home.join(".bun/bin"),
-    ]);
-    if let Some(appdata) = env_dir("APPDATA") {
-        dirs.push(appdata.join("npm"));
-    }
-    if let Some(local) = env_dir("LOCALAPPDATA") {
-        dirs.push(local.join("Microsoft/WinGet/Links"));
-    }
-    let extensions: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
-            .split(';')
-            .map(str::to_ascii_lowercase)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    for name in def.binaries {
-        for dir in &dirs {
-            let plain = dir.join(name);
-            if plain.is_file()
-                && (*name != "agent"
-                    || plain
-                        .to_string_lossy()
-                        .to_ascii_lowercase()
-                        .contains("cursor"))
-            {
-                return Some(plain);
-            }
-            for ext in &extensions {
-                let path = dir.join(format!("{name}{ext}"));
-                if path.is_file()
-                    && (*name != "agent"
-                        || path
-                            .to_string_lossy()
-                            .to_ascii_lowercase()
-                            .contains("cursor"))
-                {
-                    return Some(path);
-                }
-            }
-        }
-    }
-    None
+    binary_index(true).find(def)
 }
 
 fn app_path(def: &ClientDef) -> Option<PathBuf> {

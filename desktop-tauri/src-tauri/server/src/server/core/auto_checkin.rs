@@ -159,16 +159,32 @@ pub fn default_providers() -> Vec<String> {
 /// 按「此刻可用」过滤会把读出来的清单塌成空数组，下一次保存就把配置写没了。
 /// 界面渲染（签到中心分组、范围复选框）一律用
 /// [`available_checkin_providers`]。
+/// 某个已安装插件当前是否实际声明支持每日签到：
+/// 优先看 `CheckinInfo.daily`（显式声明了 `daily: false` 的如活动福利/按需任务不进每日签到），
+/// 未声明 `CheckinInfo` 的旧插件回落到 `capabilities.checkin`。
+pub(crate) fn plugin_supports_daily_checkin(id: &str) -> bool {
+    if let Some(declared) = crate::server::core::plugin_host::checkin_of(id) {
+        return declared.daily;
+    }
+    crate::server::core::providers::adapter::adapter_by_id(id)
+        .and_then(|adapter| adapter.plugin_checkin_capability())
+        == Some(true)
+}
+
 pub fn checkin_providers() -> Vec<String> {
-    let mut list: Vec<String> = CHECKIN_PROVIDERS.iter().map(|id| id.to_string()).collect();
+    let mut list: Vec<String> = CHECKIN_PROVIDERS
+        .iter()
+        .filter(|id| {
+            !crate::server::core::plugin_host::serves_provider(id)
+                || plugin_supports_daily_checkin(id)
+        })
+        .map(|id| id.to_string())
+        .collect();
     for id in crate::server::core::plugin_host::installed_ids() {
         if list.iter().any(|known| known == &id) {
             continue;
         }
-        let supported = crate::server::core::providers::adapter::adapter_by_id(&id)
-            .and_then(|adapter| adapter.plugin_checkin_capability())
-            == Some(true);
-        if supported {
+        if plugin_supports_daily_checkin(&id) {
             list.push(id);
         }
     }
@@ -186,9 +202,17 @@ pub fn checkin_providers() -> Vec<String> {
     })
     .unwrap_or_default();
     for id in seen {
-        if !list.iter().any(|known| known == &id) {
-            list.push(id);
+        if list.iter().any(|known| known == &id) {
+            continue;
         }
+        // 已运行且明确关闭每日签到的插件不再沿用历史缓存（避免下架后仍留空条目），
+        // 仅在插件未加载/停用时保留范围设置。
+        if crate::server::core::plugin_host::serves_provider(&id)
+            && !plugin_supports_daily_checkin(&id)
+        {
+            continue;
+        }
+        list.push(id);
     }
     list
 }
@@ -211,7 +235,10 @@ pub fn checkin_providers() -> Vec<String> {
 pub fn available_checkin_providers(_store: &AccountStore) -> Vec<String> {
     checkin_providers()
         .into_iter()
-        .filter(|id| crate::server::core::plugin_host::serves_provider(id))
+        .filter(|id| {
+            crate::server::core::plugin_host::serves_provider(id)
+                && plugin_supports_daily_checkin(id)
+        })
         .collect()
 }
 /// ── 为什么需要一个版本号（而不是读的时候无条件补齐）───────────

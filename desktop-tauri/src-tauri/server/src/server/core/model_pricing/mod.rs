@@ -2,6 +2,7 @@
 
 pub mod calc;
 pub mod catalog;
+pub mod cn_prices;
 pub mod fx;
 pub mod peak;
 pub mod types;

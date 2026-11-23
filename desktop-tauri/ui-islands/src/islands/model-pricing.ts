@@ -18,6 +18,7 @@ export type ModelPrice = {
   cacheWrite1h?: number
   tiers?: ModelPriceTier[]
   peak?: string
+  currency?: 'usd' | 'cny'
 }
 
 export type RateWindow = {
@@ -56,6 +57,7 @@ export type ModelPricingInfo = {
   activeWindowRate?: number | null
   inPeak?: boolean
   peak?: string | null
+  currency?: 'usd' | 'cny'
   base?: ModelPrice | null
   effective?: ModelPrice | null
 }
@@ -179,17 +181,31 @@ export function formatCost(amountUsd: number, currency: 'usd' | 'cny', rate: num
   return `${sign}${amount.toFixed(4)}`
 }
 
-export function formatUnitPrice(usdPerMillion: number | undefined | null, currency: 'usd' | 'cny', rate: number): string {
-  if (usdPerMillion === null || usdPerMillion === undefined || !Number.isFinite(usdPerMillion) || usdPerMillion < 0) {
+export function formatUnitPrice(
+  amount: number | undefined | null,
+  currency: 'usd' | 'cny',
+  rate: number,
+  sourceCurrency: 'usd' | 'cny' = 'usd',
+): string {
+  if (amount === null || amount === undefined || !Number.isFinite(amount) || amount < 0) {
     return '—'
   }
-  const useCny = currency === 'cny' && rate > 0
-  const amount = useCny ? usdPerMillion * rate : usdPerMillion
-  const sign = useCny ? '¥' : '$'
-  if (amount === 0) return `${sign}0`
-  if (amount >= 100) return `${sign}${amount.toFixed(0)}`
-  if (amount >= 1) return `${sign}${Number(amount.toFixed(2))}`
-  return `${sign}${Number(amount.toFixed(4))}`
+  const src: 'usd' | 'cny' = sourceCurrency === 'cny' ? 'cny' : 'usd'
+  const dst: 'usd' | 'cny' = currency === 'cny' ? 'cny' : 'usd'
+  const sign = dst === 'cny' ? '¥' : '$'
+  let converted = amount
+  if (src !== dst) {
+    if (!(rate > 0)) return '—'
+    converted = dst === 'cny' ? amount * rate : amount / rate
+  }
+  if (converted === 0) return `${sign}0`
+  if (src === dst) {
+    if (converted >= 0.01) return `${sign}${Number(converted.toFixed(3))}`
+    return `${sign}${Number(converted.toFixed(4))}`
+  }
+  if (converted >= 0.05) return `${sign}${Number(converted.toFixed(2))}`
+  if (converted >= 0.005) return `${sign}${Number(converted.toFixed(3))}`
+  return `${sign}${Number(converted.toFixed(4))}`
 }
 
 export function pricingSourceLabel(source: ModelPricingInfo['source']): string {

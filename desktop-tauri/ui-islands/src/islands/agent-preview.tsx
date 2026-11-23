@@ -68,7 +68,7 @@ export function ApplyDialog({ client, profile, operation, onClose }: {
               : client.supportsDefault ? t('确认后将切换到此配置，原配置会保留在列表中。') : t('确认后将此配置加入客户端，已有配置会保留。')}</p>
           {preview.warnings.map((warning, index) => <p key={index} className='text-xs leading-relaxed text-subtle'>{warning}</p>)}
           <Collapsible open={detailsOpen} onOpenChange={setDetailsOpen}>
-            <CollapsibleTrigger render={<Button variant='ghost' size='sm' />}><AgentIcon name='chevron' />{t('查看文件改动')}</CollapsibleTrigger>
+            <CollapsibleTrigger render={<Button variant='ghost' size='sm' />}><span className={detailsOpen ? 'agent-chevron is-open' : 'agent-chevron'}><AgentIcon name='chevron' /></span>{t('查看文件改动')}</CollapsibleTrigger>
             <CollapsibleContent><WritePreview preview={preview} showWarnings={false} /></CollapsibleContent>
           </Collapsible>
         </> : <WritePreview preview={preview} /> : null}

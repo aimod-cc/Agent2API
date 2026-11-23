@@ -502,14 +502,15 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
       case 'pricing': {
         const info = model.pricing
         const eff = info?.effective
+        const srcCurrency = eff?.currency || info?.currency || 'usd'
         const priced = Boolean(info?.priced && eff)
         const titleLines: string[] = []
         if (priced && eff) {
           titleLines.push(`${t('来源')}：${pricingSourceLabel(info?.source ?? null)}${info?.sameAs ? ` (${info.sameAs})` : ''}`)
-          titleLines.push(`${t('输入')}：${formatUnitPrice(eff.input, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
-          titleLines.push(`${t('输出')}：${formatUnitPrice(eff.output, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
-          if ((eff.cacheRead ?? 0) > 0) titleLines.push(`${t('缓存读')}：${formatUnitPrice(eff.cacheRead, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
-          if ((eff.cacheWrite ?? 0) > 0) titleLines.push(`${t('缓存写')}：${formatUnitPrice(eff.cacheWrite, pricingDisplay.currency, pricingDisplay.exchangeRate)} / M`)
+          titleLines.push(`${t('输入')}：${formatUnitPrice(eff.input, pricingDisplay.currency, pricingDisplay.exchangeRate, srcCurrency)} / M`)
+          titleLines.push(`${t('输出')}：${formatUnitPrice(eff.output, pricingDisplay.currency, pricingDisplay.exchangeRate, srcCurrency)} / M`)
+          if ((eff.cacheRead ?? 0) > 0) titleLines.push(`${t('缓存读')}：${formatUnitPrice(eff.cacheRead, pricingDisplay.currency, pricingDisplay.exchangeRate, srcCurrency)} / M`)
+          if ((eff.cacheWrite ?? 0) > 0) titleLines.push(`${t('缓存写')}：${formatUnitPrice(eff.cacheWrite, pricingDisplay.currency, pricingDisplay.exchangeRate, srcCurrency)} / M`)
           if (info?.priceRate && info.priceRate !== 1) titleLines.push(`${t('提供商倍率')}：×${info.priceRate}`)
           if (info?.activeWindowRate && info.activeWindowRate !== 1) titleLines.push(`${t('当前时段倍率')}：×${info.activeWindowRate}`)
           if (info?.inPeak) titleLines.push(t('当前处于高峰时段 (2×)'))
@@ -532,7 +533,7 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
                   <span className='max-w-full truncate font-mono text-[11.5px] font-medium'>
                     {eff.input === 0 && eff.output === 0
                       ? t('免费')
-                      : `${formatUnitPrice(eff.input, pricingDisplay.currency, pricingDisplay.exchangeRate)} / ${formatUnitPrice(eff.output, pricingDisplay.currency, pricingDisplay.exchangeRate)}`}
+                      : `${formatUnitPrice(eff.input, pricingDisplay.currency, pricingDisplay.exchangeRate, srcCurrency)} / ${formatUnitPrice(eff.output, pricingDisplay.currency, pricingDisplay.exchangeRate, srcCurrency)}`}
                   </span>
                   <span className='max-w-full truncate text-[10.5px] text-[var(--text-3)]'>
                     {pricingSourceLabel(info?.source ?? null)}

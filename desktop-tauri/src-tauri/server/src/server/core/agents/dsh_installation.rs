@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
@@ -48,7 +48,51 @@ fn package(path: PathBuf, expected: &str) -> Option<Installation> {
     })
 }
 
+static DESKTOP_CACHE: OnceLock<Mutex<Option<(Instant, Installation)>>> = OnceLock::new();
+static CMD_VERSION_CACHE: OnceLock<Mutex<HashMap<PathBuf, (Option<SystemTime>, Instant, Option<String>)>>> = OnceLock::new();
+static ASAR_CACHE: OnceLock<Mutex<HashMap<PathBuf, (Option<SystemTime>, u64, Arc<AsarIndex>)>>> = OnceLock::new();
+static BUNDLED_CACHE: OnceLock<Mutex<HashMap<(PathBuf, Option<SystemTime>, u64, String), Option<Vec<(PathBuf, String)>>>>> = OnceLock::new();
+
+#[derive(Clone)]
+enum AsarLocation {
+    Packed { offset: u64, size: u64 },
+    Unpacked,
+}
+
+struct AsarIndex {
+    data_offset: u64,
+    file_len: u64,
+    entries: HashMap<String, AsarLocation>,
+}
+
+pub fn invalidate_cache() {
+    if let Some(cache) = DESKTOP_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+    if let Some(cache) = CMD_VERSION_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+    if let Some(cache) = ASAR_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+    if let Some(cache) = BUNDLED_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+}
+
 pub fn cli(binary: Option<&Path>) -> Installation {
+    cli_with_options(binary, true)
+}
+
+pub fn cli_with_options(binary: Option<&Path>, allow_spawn: bool) -> Installation {
     let Some(binary) = binary else {
         return Installation::default();
     };
@@ -72,7 +116,7 @@ pub fn cli(binary: Option<&Path>) -> Installation {
         }
     }
     Installation {
-        version: command_version(binary).unwrap_or_default(),
+        version: command_version(binary, allow_spawn).unwrap_or_default(),
         source: binary.into(),
         package_root: None,
     }
@@ -109,11 +153,10 @@ pub fn package_file(installation: &Installation, name: &str) -> Option<PathBuf> 
 }
 
 pub fn desktop() -> Installation {
-    static CACHE: OnceLock<Mutex<Option<(Instant, Installation)>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
+    let cache = DESKTOP_CACHE.get_or_init(Default::default);
     if let Ok(cache) = cache.lock() {
         if let Some((time, value)) = cache.as_ref() {
-            if time.elapsed() < Duration::from_secs(10) {
+            if time.elapsed() < Duration::from_secs(180) {
                 return value.clone();
             }
         }
@@ -201,8 +244,64 @@ fn desktop_roots() -> Vec<PathBuf> {
     roots
 }
 
-fn asar_bytes(path: &Path, entry: &str) -> Option<Vec<u8>> {
-    use std::io::{Seek, SeekFrom};
+fn collect_asar_entries(
+    node: &Value,
+    prefix: &str,
+    entries: &mut HashMap<String, AsarLocation>,
+    filter_top: bool,
+) {
+    let Some(children) = node.get("files").and_then(Value::as_object) else {
+        return;
+    };
+    for (name, child) in children {
+        if filter_top && name != "dsh" && name != "package.json" {
+            continue;
+        }
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if child.get("link").is_some() {
+            continue;
+        }
+        if child.get("files").is_some() {
+            collect_asar_entries(child, &path, entries, false);
+            continue;
+        }
+        if child.get("unpacked").and_then(Value::as_bool) == Some(true) {
+            entries.insert(path, AsarLocation::Unpacked);
+            continue;
+        }
+        let Some(size) = child.get("size").and_then(Value::as_u64) else {
+            continue;
+        };
+        if size > 1024 * 1024 {
+            continue;
+        }
+        let Some(offset) = child
+            .get("offset")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        entries.insert(path, AsarLocation::Packed { offset, size });
+    }
+}
+
+fn load_asar_index(path: &Path) -> Option<(Option<SystemTime>, u64, Arc<AsarIndex>)> {
+    let meta = path.metadata().ok()?;
+    let modified = meta.modified().ok();
+    let file_len = meta.len();
+    let cache = ASAR_CACHE.get_or_init(Default::default);
+    if let Ok(guard) = cache.lock() {
+        if let Some((cached_mod, cached_len, index)) = guard.get(path) {
+            if *cached_mod == modified && *cached_len == file_len {
+                return Some((modified, file_len, Arc::clone(index)));
+            }
+        }
+    }
     let mut file = std::fs::File::open(path).ok()?;
     let mut prefix = [0u8; 16];
     file.read_exact(&mut prefix).ok()?;
@@ -218,33 +317,43 @@ fn asar_bytes(path: &Path, entry: &str) -> Option<Vec<u8>> {
     let mut bytes = vec![0; json_size as usize];
     file.read_exact(&mut bytes).ok()?;
     let header: Value = serde_json::from_slice(&bytes).ok()?;
-    let mut node = &header;
-    for part in entry.split('/') {
-        node = node.get("files")?.get(part)?;
+    drop(bytes);
+    let mut entries = HashMap::new();
+    collect_asar_entries(&header, "", &mut entries, json_size > 256 * 1024);
+    drop(header);
+    let index = Arc::new(AsarIndex {
+        data_offset: 8u64.checked_add(header_size)?,
+        file_len,
+        entries,
+    });
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(path.to_path_buf(), (modified, file_len, Arc::clone(&index)));
     }
-    if node.get("link").is_some() {
-        return None;
-    }
-    if node.get("unpacked").and_then(Value::as_bool) == Some(true) {
-        return files::read_limited(
+    Some((modified, file_len, index))
+}
+
+fn asar_bytes(path: &Path, entry: &str) -> Option<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+    let (_, _, index) = load_asar_index(path)?;
+    let location = index.entries.get(entry)?;
+    match *location {
+        AsarLocation::Unpacked => files::read_limited(
             &path.with_file_name("app.asar.unpacked").join(entry),
             1024 * 1024,
         )
-        .ok()?;
+        .ok()?,
+        AsarLocation::Packed { offset, size } => {
+            let start = index.data_offset.checked_add(offset)?;
+            if start.checked_add(size)? > index.file_len {
+                return None;
+            }
+            let mut file = std::fs::File::open(path).ok()?;
+            file.seek(SeekFrom::Start(start)).ok()?;
+            let mut bytes = vec![0; size as usize];
+            file.read_exact(&mut bytes).ok()?;
+            Some(bytes)
+        }
     }
-    let length = node.get("size")?.as_u64()?;
-    if length > 1024 * 1024 {
-        return None;
-    }
-    let offset = node.get("offset")?.as_str()?.parse::<u64>().ok()?;
-    let start = 8u64.checked_add(header_size)?.checked_add(offset)?;
-    if start.checked_add(length)? > file.metadata().ok()?.len() {
-        return None;
-    }
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = vec![0; length as usize];
-    file.read_exact(&mut bytes).ok()?;
-    Some(bytes)
 }
 
 fn asar_json(path: &Path, entry: &str) -> Option<Value> {
@@ -255,8 +364,31 @@ pub fn bundled_files(installation: &Installation, name: &str) -> Option<Vec<(Pat
     if installation.source.file_name()?.to_str()? != "app.asar" {
         return None;
     }
+    let meta = installation.source.metadata().ok()?;
+    let modified = meta.modified().ok();
+    let file_len = meta.len();
+    let cache_key = (
+        installation.source.clone(),
+        modified,
+        file_len,
+        name.to_string(),
+    );
+    let cache = BUNDLED_CACHE.get_or_init(Default::default);
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.get(&cache_key) {
+            return cached.clone();
+        }
+    }
+    let result = read_bundled_files(&installation.source, name);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(cache_key, result.clone());
+    }
+    result
+}
+
+fn read_bundled_files(source: &Path, name: &str) -> Option<Vec<(PathBuf, String)>> {
     let root = format!("dsh/node_modules/{name}");
-    let package = asar_json(&installation.source, &format!("{root}/package.json"))?;
+    let package = asar_json(source, &format!("{root}/package.json"))?;
     let patches = package.pointer("/dsh/bundle/patch")?;
     let paths = if let Some(path) = patches.as_str() {
         vec![path]
@@ -273,23 +405,28 @@ pub fn bundled_files(installation: &Installation, name: &str) -> Option<Vec<(Pat
             return None;
         }
         let entry = format!("{root}/{}", path.trim_start_matches("./"));
-        let text = String::from_utf8(asar_bytes(&installation.source, &entry)?).ok()?;
-        files.push((installation.source.join(entry), text));
+        let text = String::from_utf8(asar_bytes(source, &entry)?).ok()?;
+        files.push((source.join(entry), text));
     }
     Some(files)
 }
 
-fn command_version(binary: &Path) -> Option<String> {
-    type Cached = (Option<SystemTime>, Instant, Option<String>);
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cached>>> = OnceLock::new();
+fn command_version(binary: &Path, allow_spawn: bool) -> Option<String> {
     let modified = binary.metadata().ok().and_then(|meta| meta.modified().ok());
-    let cache = CACHE.get_or_init(Default::default);
+    let cache = CMD_VERSION_CACHE.get_or_init(Default::default);
     if let Ok(cache) = cache.lock() {
         if let Some((previous, checked, value)) = cache.get(binary) {
-            if *previous == modified && checked.elapsed() < Duration::from_secs(30) {
+            if *previous == modified && checked.elapsed() < Duration::from_secs(300) {
                 return value.clone();
             }
         }
+    }
+    if !allow_spawn {
+        let binary_buf = binary.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = command_version(&binary_buf, true);
+        });
+        return None;
     }
     let value = run_version(binary);
     if let Ok(mut cache) = cache.lock() {

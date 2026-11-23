@@ -207,6 +207,8 @@ pub(super) fn start(state: &ServerState) -> Result<ServerHandle, PortConflict> {
     // 保留原来的后台整理触发点，不把它冒称为本轮HTTP关闭所跟踪的任务。
     if !shared.stopping() {
         state.start_background_maintenance();
+        #[cfg(not(test))]
+        drop(tokio::task::spawn_blocking(crate::server::core::agents::warm_up));
     }
     startup.complete();
     // 启动装配全部完成后才允许给出最终结果；不能在迟到启动异常之前发布Ok。
