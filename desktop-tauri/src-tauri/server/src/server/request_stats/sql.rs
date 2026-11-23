@@ -684,10 +684,8 @@ pub(super) fn update_request_cost(
     row_id: i64,
     cost_usd: Option<f64>,
 ) -> rusqlite::Result<()> {
-    conn.execute(
-        "UPDATE requests SET cost_usd = ?1 WHERE row_id = ?2",
-        params![cost_usd, row_id],
-    )?;
+    let mut stmt = conn.prepare_cached("UPDATE requests SET cost_usd = ?1 WHERE row_id = ?2")?;
+    stmt.execute(params![cost_usd, row_id])?;
     Ok(())
 }
 

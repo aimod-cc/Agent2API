@@ -97,12 +97,19 @@ static SNAPSHOT: OnceLock<RwLock<Option<Arc<Snapshot>>>> = OnceLock::new();
 /// 进程级库句柄（与 `config` / `providers::catalog_cache` 同一模式）。
 static DB: OnceLock<Option<Db>> = OnceLock::new();
 
-/// 装入库句柄。`bootstrap` 里 `Db` 就绪后调用一次；重复调用忽略。
+/// 装入库句柄并立即预热内存快照。`bootstrap` 里 `Db` 就绪后调用一次。
 ///
-/// 收 `Option<Db>` 与 `catalog_cache::install` 同一形态：库打不开时也照常调用，
-/// 那时只读内嵌快照（功能仍在，只是拿不到刷新结果）。
+/// 在启动阶段直接完成 `kv` 缓存读取，使后续任何调用 `snapshot()` / `lookup()` 的读路径
+/// 均为纯内存访问，绝不会在持有数据库连接锁的调用链（如历史费用回填）中重入 `Db` 互斥锁。
 pub fn install(db: Option<Db>) {
+    let cached = db.as_ref().and_then(read_cache_from);
     let _ = DB.set(db);
+    let loaded = cached.unwrap_or_else(load_builtin);
+    let lock = SNAPSHOT.get_or_init(|| RwLock::new(None));
+    match lock.write() {
+        Ok(mut slot) => *slot = Some(Arc::new(loaded)),
+        Err(poisoned) => *poisoned.into_inner() = Some(Arc::new(loaded)),
+    }
 }
 
 fn db() -> Option<Db> {
@@ -166,11 +173,12 @@ pub fn snapshot() -> Arc<Snapshot> {
     loaded
 }
 
-/// 首次装载：库里的刷新结果优先，没有（或坏了）才用内嵌快照。
+/// 首次装载（仅在未调用 `install` 的单测环境下触发）：直接使用内嵌快照，不在读路径触碰 `Db`。
 fn load() -> Snapshot {
-    if let Some(cached) = read_cache() {
-        return cached;
-    }
+    load_builtin()
+}
+
+fn load_builtin() -> Snapshot {
     // 内嵌快照是构建产物，解析不了属于「发版坏了」；这时给一份空索引而不是
     // panic —— 模型清单本身照常工作，只是所有键都回到「未声明」。
     match parse(EMBEDDED, "builtin") {
@@ -339,8 +347,7 @@ fn parse_record(value: &Value) -> Option<Record> {
 }
 
 /// 读库里的刷新结果（库不可用 / 没写过 / 值坏了 → `None`，由调用方回落地板）。
-fn read_cache() -> Option<Snapshot> {
-    let db = db()?;
+fn read_cache_from(db: &Db) -> Option<Snapshot> {
     // 只读一次库（整份就是一个键），解析放在闭包外做 —— 闭包里不能打日志，
     // 而解析失败的 verbose 要在闭包外补
     let text = db.with(read_text).flatten();

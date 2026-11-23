@@ -120,8 +120,8 @@ pub use retention::Retention;
 // 拆到子模块的三样，这里引回：record / usage_summary 的折算入口、
 // remap 的库操作体、报表装配（均为 `pub(super)`，见 aggregate.rs 的模块头）
 use aggregate::{
-    fold_into_daily, mark_pricing_backfilled, pricing_candidate_days, remap_model_days,
-    reprice_single_day, summarize,
+    compute_day_reprice, fold_into_daily, mark_pricing_backfilled, pricing_candidate_days,
+    read_day_for_reprice, remap_model_days, summarize, write_day_reprice,
 };
 use report::{entry_json, list_entry_json, provider_label, CACHE_WINDOWS};
 
@@ -806,17 +806,34 @@ impl RequestStats {
         let mut all_ok = true;
         let mut any_updated = false;
         for day in days {
-            let res = {
+            let loaded = {
                 let guard = self.guard();
-                self.with_conn_mut(&guard, |conn| reprice_single_day(conn, day, &settings))
+                self.with_conn(&guard, |conn| read_day_for_reprice(conn, day))
             };
-            match res {
-                Some(Some(_)) => any_updated = true,
-                Some(None) => {}
-                None => {
-                    all_ok = false;
-                    break;
-                }
+            let Some((key, items, aggregate_requests)) = loaded else {
+                all_ok = false;
+                break;
+            };
+            if items.is_empty() {
+                continue;
+            }
+            let (updates, rebuilt) =
+                compute_day_reprice(key, items, aggregate_requests, &settings);
+            if updates.is_empty() && rebuilt.is_none() {
+                continue;
+            }
+            let written = {
+                let guard = self.guard();
+                self.with_conn_mut(&guard, |conn| {
+                    write_day_reprice(conn, &updates, rebuilt.as_ref())
+                })
+            };
+            if written.is_none() {
+                all_ok = false;
+                break;
+            }
+            if rebuilt.is_some() || !updates.is_empty() {
+                any_updated = true;
             }
         }
         if only_if_unmarked && all_ok {

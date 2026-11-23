@@ -55,21 +55,33 @@ pub(super) fn pricing_candidate_days(
     Ok(Some(days.into_iter().collect()))
 }
 
-/// 单日费用重算与聚合行同步（单日独立短事务，直接复用内存里更新后的明细折叠日报，避免二次全表读取与跨天长事务锁库）。
-pub(super) fn reprice_single_day(
-    conn: &mut rusqlite::Connection,
+/// 读取单日需要重算费用的明细行与当天日报计数（仅持有短读锁）。
+pub(super) fn read_day_for_reprice(
+    conn: &rusqlite::Connection,
     day: NaiveDate,
-    settings: &crate::server::core::model_pricing::ModelPricingSettings,
-) -> rusqlite::Result<Option<String>> {
+) -> rusqlite::Result<(String, Vec<(i64, RequestEntry)>, i64)> {
     let key = date_key(day);
     let start = local_midnight_ms(day);
     let end = local_midnight_ms(day + ChronoDuration::days(1)).saturating_sub(1);
-    let tx = conn.unchecked_transaction()?;
-    let mut items = sql::select_between_with_row_id(&tx, start, end, false)?;
-    if items.is_empty() {
-        tx.commit()?;
-        return Ok(None);
-    }
+    let items = sql::select_between_with_row_id(conn, start, end, false)?;
+    let aggregate_requests: i64 = conn
+        .query_row(
+            "SELECT requests FROM request_daily WHERE date = ?1",
+            rusqlite::params![key],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    Ok((key, items, aggregate_requests))
+}
+
+/// 在不持有任何数据库或统计锁的纯内存环境下计算单日费用变更与折叠后的日报。
+pub(super) fn compute_day_reprice(
+    key: String,
+    mut items: Vec<(i64, RequestEntry)>,
+    aggregate_requests: i64,
+    settings: &crate::server::core::model_pricing::ModelPricingSettings,
+) -> (Vec<(i64, Option<f64>)>, Option<DailyEntry>) {
+    let mut updates = Vec::new();
     let mut non_test_count = 0i64;
     for (row_id, entry) in &mut items {
         if entry.status == 0 {
@@ -102,31 +114,38 @@ pub(super) fn reprice_single_day(
             .flatten()
         };
         if new_cost != entry.cost_usd {
-            sql::update_request_cost(&tx, *row_id, new_cost)?;
+            updates.push((*row_id, new_cost));
             entry.cost_usd = new_cost;
         }
     }
-    let aggregate_requests: i64 = tx
-        .query_row(
-            "SELECT requests FROM request_daily WHERE date = ?1",
-            rusqlite::params![key],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let updated_day = if non_test_count >= aggregate_requests && aggregate_requests > 0 {
-        let mut rebuilt = DailyEntry::new(key.clone());
+    let rebuilt_day = if non_test_count >= aggregate_requests && aggregate_requests > 0 {
+        let mut rebuilt = DailyEntry::new(key);
         for (_, item) in &items {
             if !item.is_test && item.status != 0 {
                 fold_into_daily(&mut rebuilt, item);
             }
         }
-        daily::upsert_daily(&tx, &rebuilt)?;
-        Some(key)
+        Some(rebuilt)
     } else {
         None
     };
-    tx.commit()?;
-    Ok(updated_day)
+    (updates, rebuilt_day)
+}
+
+/// 将计算完毕的单日费用变更与日报写入数据库（单日短事务）。
+pub(super) fn write_day_reprice(
+    conn: &mut rusqlite::Connection,
+    updates: &[(i64, Option<f64>)],
+    rebuilt: Option<&DailyEntry>,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (row_id, new_cost) in updates {
+        sql::update_request_cost(&tx, *row_id, *new_cost)?;
+    }
+    if let Some(day_entry) = rebuilt {
+        daily::upsert_daily(&tx, day_entry)?;
+    }
+    tx.commit()
 }
 
 pub(super) fn mark_pricing_backfilled(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
