@@ -132,13 +132,19 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   dispatch:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: 解析版本号与 ref
+      - name: 解析版本号、ref 与目标提交 SHA
         id: meta
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
@@ -151,9 +157,67 @@ jobs:
           fi
           # 换行或引号会往下面的 JSON 里注入字段
           [[ "$VERSION" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo "版本号不合法: $VERSION" >&2; exit 1; }
+          TARGET_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$REF" --jq '.sha')"
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "无法解析 $REF 的提交 SHA" >&2; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "派发构建：版本 $VERSION（ref: $REF）"
+          echo "sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "准备派发构建：版本 $VERSION（ref: $REF, commit: $TARGET_SHA）"
+
+      - name: 强制门禁：等待并确认当前提交的前端产物与后端单元测试全部通过
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          REQUIRED_WORKFLOWS=("frontend-artifacts.yml" "rust-tests.yml")
+          echo "→ 检查提交 $TARGET_SHA 的前置质量门禁（${REQUIRED_WORKFLOWS[*]}）…"
+
+          for attempt in $(seq 1 180); do
+            ALL_PASSED=true
+            WAIT_REASONS=()
+
+            for wf in "${REQUIRED_WORKFLOWS[@]}"; do
+              RUN_JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/runs?head_sha=$TARGET_SHA&per_page=5" \
+                --jq '.workflow_runs | sort_by(.run_number) | last // empty')"
+
+              if [[ -z "$RUN_JSON" ]]; then
+                if [[ "$attempt" -ge 6 ]]; then
+                  echo "::error::未找到提交 $TARGET_SHA 对应的工作流 $wf 运行记录。请先将发布提交推送到 main 或 beta 分支以触发并通过 CI 校验，再推送版本标签。"
+                  exit 1
+                fi
+                ALL_PASSED=false
+                WAIT_REASONS+=("$wf(等待触发)")
+                continue
+              fi
+
+              STATUS="$(jq -r '.status' <<<"$RUN_JSON")"
+              CONCLUSION="$(jq -r '.conclusion // ""' <<<"$RUN_JSON")"
+              HTML_URL="$(jq -r '.html_url' <<<"$RUN_JSON")"
+
+              if [[ "$STATUS" != "completed" ]]; then
+                ALL_PASSED=false
+                WAIT_REASONS+=("$wf($STATUS)")
+                continue
+              fi
+
+              if [[ "$CONCLUSION" != "success" ]]; then
+                echo "::error::发版门禁拦截：工作流 $wf 在提交 $TARGET_SHA 上未通过（结果: $CONCLUSION），已中止向构建仓库派发打包！详情: $HTML_URL"
+                exit 1
+              fi
+            done
+
+            if [[ "$ALL_PASSED" == "true" ]]; then
+              echo "✅ 提交 $TARGET_SHA 的前端产物一致性校验（frontend-artifacts）与后端单元测试（rust-tests）全部通过，放行发版派发！"
+              exit 0
+            fi
+
+            echo "⏳ [$attempt/180] 等待前置测试完成: ${WAIT_REASONS[*]}（15 秒后复查）…"
+            sleep 15
+          done
+
+          echo "::error::等待提交 $TARGET_SHA 的前置测试工作流超时（45 分钟），已中止发版派发。"
+          exit 1
 
       - name: 派发到构建仓库
         uses: peter-evans/repository-dispatch@v3

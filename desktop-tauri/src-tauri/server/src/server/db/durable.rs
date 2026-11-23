@@ -9,10 +9,14 @@ pub(crate) enum Durable<T, E> {
 }
 
 impl Db {
+    #[track_caller]
     pub(crate) fn plugin_state_transaction<T, E>(
         &self,
         action: impl FnOnce(&rusqlite::Connection) -> Result<T, E>,
     ) -> Durable<T, E> {
+        let Some(_reentrant_guard) = super::ThreadLockGuard::enter(&self.inner) else {
+            return Durable::Unconfirmed;
+        };
         let state = match self.inner.conn.lock() {
             Ok(state) => state,
             Err(_) => return Durable::Unconfirmed,

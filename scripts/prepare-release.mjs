@@ -207,9 +207,13 @@ function main() {
   }
 
   if (!flags.has('skip-checks')) {
-    console.log('\n→ 刷新 Cargo.lock 并校验 Rust 编译（cargo check）…')
-    const cargoRes = runSpawn('cargo', ['check', '--manifest-path', 'desktop-tauri/src-tauri/Cargo.toml'], { cwd: ROOT })
-    if (cargoRes.status !== 0) throw new Error('cargo check 失败')
+    console.log('\n→ 刷新 Cargo.lock 并校验主程序与测试代码编译（cargo check --tests）…')
+    const cargoRes = runSpawn('cargo', ['check', '--manifest-path', 'desktop-tauri/src-tauri/Cargo.toml', '--tests'], { cwd: ROOT })
+    if (cargoRes.status !== 0) throw new Error('cargo check --tests 失败')
+
+    console.log('\n→ 运行全链路启动、存量数据整理与管理面板核心接口冒烟测试…')
+    const smokeRes = runSpawn('node', ['scripts/cargo-test.mjs', '--lib', 'server::native_gateway_tests::full_lifecycle_bootstrap_maintenance_and_panel_smoke'], { cwd: ROOT })
+    if (smokeRes.status !== 0) throw new Error('全链路启动冒烟测试未通过，已拦截发版准备')
 
     console.log('\n→ 重建手机端界面产物（同步新版本号与缓存哈希）…')
     const mobileRes = runSpawn('npm', ['run', 'mobile:build'], { cwd: ROOT, useNpmOnWin: true })
