@@ -117,6 +117,8 @@ impl ProviderAdapter for TestAdapter {
         _: &'a Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ErrorPolicy> + Send + 'a>> {
         let policy = ErrorPolicy {
+            stop: self.stop,
+            stop_switching: self.stop,
             suspend_account: self.suspend,
             ..Default::default()
         };
@@ -365,7 +367,7 @@ async fn provider_stop_and_suspension_override_retry_advice() {
     }
 }
 
-/// 内容被拒绝在统一错误处理策略中属于直接返回错误（`hard_stop`），无论是否降级都不原地重发。
+/// 内容被拒绝在统一错误处理策略中默认切换提供商（不走原账号原地重发），无论是否降级都不原地重发。
 #[tokio::test]
 async fn content_blocking_is_not_retried_in_place() {
     let adapter = TestAdapter {
@@ -391,7 +393,7 @@ async fn content_blocking_is_not_retried_in_place() {
             error.class,
             UpstreamErrorClass::ContentBlocked { .. }
         ));
-        assert!(error.stop);
+        assert!(!error.stop);
         assert_eq!(upstream.hits.load(Ordering::SeqCst), 1);
         assert_eq!(budget.remaining, 2);
     }

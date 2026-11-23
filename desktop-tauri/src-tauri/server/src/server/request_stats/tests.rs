@@ -367,6 +367,13 @@ fn missing_database_returns_the_same_empty_query_shape() {
     let page: Value = stats.query_requests(&RequestQuery::default());
     assert_eq!(
         page,
-        json!({"entries": [], "total": 0, "matched": 0, "running": 0})
+        json!({
+            "entries": [],
+            "total": 0,
+            "matched": 0,
+            "running": 0,
+            "currency": "usd",
+            "exchangeRate": 7.2
+        })
     );
 }
