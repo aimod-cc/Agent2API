@@ -61,8 +61,32 @@ pub(super) fn summary<'a>(members: impl Iterator<Item = &'a Value>, records: &Ha
         "expiring": { "count": packs.len(), "todayCount": today.len(), "amounts": amounts(&packs), "todayAmounts": amounts(&today) } })
 }
 
+fn window_order_rank(window: Option<&str>) -> u8 {
+    match window.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "5h" => 0,
+        "daily" => 1,
+        "weekly" => 2,
+        "monthly" => 3,
+        _ => 4,
+    }
+}
+
 fn ratio_of(usage: &Value, value: Option<f64>) -> Option<Value> {
-    let rows = usage["windows"].as_array().into_iter().flatten().filter(|row| row["aside"] != true).collect::<Vec<_>>();
+    let mut rows = usage["windows"].as_array().into_iter().flatten().filter(|row| row["aside"] != true).collect::<Vec<_>>();
+    let mut first_group_index = std::collections::HashMap::<&str, usize>::new();
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(group) = row["group"].as_str().map(str::trim).filter(|group| !group.is_empty()) {
+            first_group_index.entry(group).or_insert(index);
+        }
+    }
+    let mut ordered = rows.iter().copied().enumerate().collect::<Vec<_>>();
+    ordered.sort_by_key(|(index, row)| {
+        let group_slot = row["group"].as_str().map(str::trim).filter(|group| !group.is_empty())
+            .and_then(|group| first_group_index.get(group).copied())
+            .unwrap_or(*index);
+        (group_slot, window_order_rank(row["window"].as_str()), *index)
+    });
+    rows = ordered.into_iter().map(|(_, row)| row).collect();
     let exhausted = rows.iter().filter(|row| matches!(row["window"].as_str(), Some("weekly" | "monthly"))
         && row["unlimited"] != true && (number(&row["remainingPercent"]).is_some_and(|value| value <= 0.0)
         || number(&row["remaining"]).is_some_and(|value| value <= 0.0)))
@@ -78,9 +102,18 @@ fn ratio_of(usage: &Value, value: Option<f64>) -> Option<Value> {
         json!({ "label": label,
             "percent": if blocked { Some(0.0) } else { percent }, "unlimited": !blocked && row["unlimited"] == true, "shortWindow": short })
     }).collect::<Vec<_>>();
+    let exhausted_without_short = exhausted.iter().any(|group| {
+        !rows.iter().any(|row| {
+            row["group"].as_str().unwrap_or("") == *group
+                && matches!(row["window"].as_str(), Some("daily" | "5h"))
+                && (row["unlimited"] == true || number(&row["remainingPercent"]).is_some())
+        })
+    });
     let short = windows.iter().any(|row| row["shortWindow"] == true && (row["unlimited"] == true || number(&row["percent"]).is_some()));
     let percent = windows.iter().filter(|row| !short || row["shortWindow"] == true)
-        .filter_map(|row| if row["unlimited"] == true { Some(100.0) } else { number(&row["percent"]) }).reduce(f64::min);
+        .filter_map(|row| if row["unlimited"] == true { Some(100.0) } else { number(&row["percent"]) })
+        .chain((short && exhausted_without_short).then_some(0.0))
+        .reduce(f64::min);
     if let Some(percent) = percent { return Some(json!({ "percent": percent, "hasShortWindow": short, "adjusted": adjusted, "windows": windows })); }
     value.map(|value| json!({ "percent": value.clamp(0.0, 100.0), "hasShortWindow": false, "adjusted": false,
         "windows": [{ "label": "", "percent": value.clamp(0.0, 100.0), "unlimited": false }] }))
@@ -115,4 +148,48 @@ fn amounts(packs: &[Value]) -> Vec<Value> {
         if !unit.is_empty() && unit != "%" { if let Some(remain) = remain { item.2 = Some(item.2.unwrap_or(0.0) + remain); } }
     }
     grouped.into_iter().map(|(unit, (count, unknown_count, sum))| json!({ "unit": unit, "count": count, "unknownCount": unknown_count, "sum": sum })).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ratio_of;
+    use serde_json::json;
+
+    #[test]
+    fn ratio_of_orders_short_window_before_weekly_within_each_group() {
+        let usage = json!({
+            "windows": [
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 60.25 },
+                { "group": "Gemini", "window": "5h", "remainingPercent": 13.13 },
+                { "group": "Claude/GPT", "window": "weekly", "remainingPercent": 100.0 },
+                { "group": "Claude/GPT", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Gemini 4 Argon", "window": "weekly", "remainingPercent": 1.06 }
+            ]
+        });
+        let ratio = ratio_of(&usage, None).expect("ratio");
+        let labels = ratio["windows"].as_array().unwrap().iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec![
+            "Gemini · 5h",
+            "Gemini · weekly",
+            "Claude/GPT · 5h",
+            "Claude/GPT · weekly",
+            "Gemini 4 Argon · weekly",
+        ]);
+        assert_eq!(ratio["percent"].as_f64(), Some(13.13));
+    }
+
+    #[test]
+    fn ratio_of_counts_exhausted_group_without_short_window_as_zero() {
+        let usage = json!({
+            "windows": [
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 43.2 },
+                { "group": "Gemini", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Claude/GPT", "window": "weekly", "remainingPercent": 0.0 }
+            ]
+        });
+        let ratio = ratio_of(&usage, None).expect("ratio");
+        assert_eq!(ratio["percent"].as_f64(), Some(0.0));
+    }
 }

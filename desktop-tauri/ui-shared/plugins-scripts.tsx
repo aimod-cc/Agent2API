@@ -189,7 +189,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
               description={recommendedDescription(item, t)} version={item.version}
               onDetails={() => { setSettingsId(null); setDetailsRecommendation(item) }}
               highlightedSource={scriptOfficialBadge(item)} sourceLabel={scriptSourceLabel(item, t)}
-              icon={iconUrl(item.icon)} status='missing' providerCount={item.providers.length || undefined}
+              icon={iconUrl(item.icon)} status='missing' providerCount={item.providers.length > 1 ? item.providers.length : undefined}
               selection={selection?.(scriptSelectionKey(item))}
               metadata={<ScriptRepository item={item} onOpenExternal={onOpenExternal} t={t} />}
               feedback={<>{unavailable ? <p className='m-0 break-words text-xs text-muted-foreground'>{unavailable}</p> : null}{progress}</>}
@@ -214,7 +214,8 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
               {update && !selection ? <Button variant='outline' size='sm' disabled={locked}
                 onClick={() => openInstall(reinstallRequest(pack))}>{t('更新')}</Button> : null}
             </> : null}
-            providerCount={pack.providers.length} enabledCount={pack.providers.filter(provider => provider.enabled).length}
+            providerCount={pack.providers.length > 1 ? pack.providers.length : undefined}
+            enabledCount={pack.providers.length > 1 ? pack.providers.filter(provider => provider.enabled).length : undefined}
             actions={<>
               <PluginSettingsButton name={name} t={t} onClick={() => openDetails(pack, 'settings')} />
               <Switch checked={pack.enabled} disabled={locked} aria-label={`${t('启用')} ${name}`}

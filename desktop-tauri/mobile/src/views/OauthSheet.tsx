@@ -6,7 +6,7 @@ import {
   startOauthBind,
   type OauthSettingsData,
 } from '../core/api'
-import { apiBase, isPackaged } from '../core/servers'
+import { apiBase, isPackaged, openExternalUrl } from '../core/servers'
 import { store } from '../core/store'
 import {
   BottomSheet,
@@ -96,7 +96,7 @@ export function OauthSheet({ onClose }: { onClose: () => void }) {
         origin,
         patch: buildPatch(),
       })
-      window.open(authorizeUrl, '_blank', 'noopener,noreferrer')
+      void openExternalUrl(authorizeUrl)
       const startedAt = Date.now()
       while (Date.now() - startedAt < 180_000) {
         await new Promise(resolve => setTimeout(resolve, 1200))

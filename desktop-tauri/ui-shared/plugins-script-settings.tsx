@@ -31,6 +31,7 @@ export function ScriptPluginSettings({ pack, recommended, disabled, error, initi
   const startup = usePluginLoadStatus(pack.id, pack.startup)
   const [search, setSearch] = React.useState('')
   const prefix = React.useId()
+  const showProviders = pack.providers.length > 1
   const keyword = search.trim().toLocaleLowerCase()
   const providers = pack.providers.filter(provider => !keyword
     || `${t(provider.label)} ${provider.id}`.toLocaleLowerCase().includes(keyword))
@@ -67,7 +68,7 @@ export function ScriptPluginSettings({ pack, recommended, disabled, error, initi
         </p> : null}
         {pack.source?.kind === 'magpie' ? <p className='m-0 break-all'>{t('Magpie 社区分发源')} · SHA-512</p> : null}
       </DialogSection>
-      <DialogSection>
+      {showProviders ? <DialogSection>
         <h3 className='m-0 flex items-baseline justify-between gap-3'>
           <span>{t('提供商启停')}</span>
           <span className='text-[11.5px] font-normal text-muted-foreground'>
@@ -88,7 +89,7 @@ export function ScriptPluginSettings({ pack, recommended, disabled, error, initi
           </div>)}
           {!providers.length ? <p className='m-0 py-3 text-center'>{t('没有匹配「{keyword}」的提供商', { keyword: search.trim() })}</p> : null}
         </div>
-      </DialogSection>
+      </DialogSection> : null}
       <ScriptPluginOptions pack={pack} disabled={disabled} request={request} refresh={refresh} t={t} />
       {error ? <p role='alert' className='m-0 break-words text-[12px] text-destructive'>{error}</p> : null}
     </>} />

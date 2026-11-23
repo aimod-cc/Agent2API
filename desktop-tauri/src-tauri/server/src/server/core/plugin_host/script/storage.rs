@@ -51,6 +51,25 @@ pub struct Package {
     pub error: Option<String>,
 }
 
+impl Package {
+    pub(super) fn single_provider_id(&self) -> Option<&str> {
+        match self.providers.as_slice() {
+            [provider] => Some(provider.as_str()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn normalize_single_provider(&mut self) {
+        let Some(provider_id) = self.single_provider_id().map(str::to_string) else {
+            return;
+        };
+        if self.disabled_providers.iter().any(|id| id == &provider_id) {
+            self.enabled = false;
+            self.disabled_providers.retain(|id| id != &provider_id);
+        }
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
@@ -62,8 +81,14 @@ pub struct Registry {
 pub fn read() -> Result<Registry, String> {
     let path = super::root().join("registry.json");
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|_| "脚本插件登记信息损坏，未用空清单覆盖".into()),
+        Ok(bytes) => {
+            let mut registry: Registry = serde_json::from_slice(&bytes)
+                .map_err(|_| "脚本插件登记信息损坏，未用空清单覆盖")?;
+            for package in &mut registry.packages {
+                package.normalize_single_provider();
+            }
+            Ok(registry)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
         Err(error) => Err(format!("读取脚本插件登记信息失败：{error}")),
     }

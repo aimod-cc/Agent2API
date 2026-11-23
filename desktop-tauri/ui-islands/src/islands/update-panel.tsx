@@ -30,8 +30,8 @@ const POLL_MS = 1000
  */
 const RESTART_SECONDS = 8
 
-/** 探活重试次数与间隔：容器冷启动通常 1-3 秒，给到 10 秒足够 */
-const HEALTH_RETRIES = 10
+/** 探活重试次数与间隔：覆盖服务端 55 秒优雅停机上限与容器冷启动耗时 */
+const HEALTH_RETRIES = 60
 const HEALTH_INTERVAL_MS = 1000
 
 /** 徽章语义色记号（app.js 的 renderTopbarStatus 优先读 data-tone，见其 mirror 注释） */
@@ -702,7 +702,7 @@ function beginRestartCountdown(version: string): void {
       : t('服务正在重启，页面会在恢复后自动刷新…（{seconds}s）', { seconds: Math.max(0, seconds) }))
     if (seconds <= 0) {
       window.clearInterval(timer)
-      void waitForServiceThenReload()
+      void waitForServiceThenReload(version)
       return
     }
     seconds -= 1
@@ -712,19 +712,30 @@ function beginRestartCountdown(version: string): void {
   tick()
 }
 
+function normalizeVersionTag(value: string | null | undefined): string {
+  return String(value || '').trim().replace(/^v/i, '')
+}
+
+function isRestartReady(probe: UpdateInfo | null | undefined, targetVersion: string): boolean {
+  if (!probe || probe.pendingRestart === true) return false
+  const expected = normalizeVersionTag(targetVersion)
+  const current = normalizeVersionTag(probe.currentVersion)
+  return !expected || !current || expected === current
+}
+
 /**
  * 探活后整页刷新。
  *
  * 用桥（`getUpdateStatus`）而不是裸 fetch /health：分端口部署（AGENT2API_PANEL_PORT）
  * 下面板与网关不在同一个端口，/health 只在网关那个端口上；桥走的是面板自己的
- * /api/*，两种部署都通。探不通也照样刷新 —— 服务已经重启，刷新本身就是用户想要的
- * 那一步，卡在加载上比停在旧页面更糟。
+ * /api/*，两种部署都通。必须确认返回已不再是旧进程的「待重启」态（且目标版本就位）
+ * 再刷新，避免优雅停机排空期间误刷新回旧页面；超时后恢复可交互状态并提示手动刷新。
  */
-async function waitForServiceThenReload(): Promise<void> {
+async function waitForServiceThenReload(version: string): Promise<void> {
   for (let attempt = 0; attempt < HEALTH_RETRIES; attempt += 1) {
     try {
       const probe = await shared().workbuddyDesktop?.getUpdateStatus()
-      if (probe) {
+      if (isRestartReady(probe, version)) {
         window.location.reload()
         return
       }
@@ -733,7 +744,9 @@ async function waitForServiceThenReload(): Promise<void> {
     }
     await new Promise<void>(resolve => { window.setTimeout(resolve, HEALTH_INTERVAL_MS) })
   }
-  window.location.reload()
+  publish({ phase: 'idle', restartSeconds: 0 })
+  setBadge(t('等待恢复'), 'warn')
+  setState(t('服务重启耗时较长，请稍后手动刷新页面确认新版本状态。'), true)
 }
 
 /* ─── 面板流程（对外契约的实现）────────────────── */

@@ -80,5 +80,37 @@ pub async fn download_plan(value: &str) -> Result<Value, UpdateError> {
     assert_downloadable(value)?;
     let (sha256, size) = trusted_digest(value).await
         .ok_or_else(|| UpdateError::new("未取得官网安装包校验值，已拒绝下载，请重新检查更新"))?;
-    Ok(json!({ "url": value, "sha256": sha256, "size": size }))
+    // 旧版（如 v3.4.2 Android）读取 urls 数组，新版读取 url；同时保留两字段以保证向后兼容。
+    Ok(json!({ "url": value, "urls": [value], "sha256": sha256, "size": size }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn download_plan_includes_url_and_legacy_urls_array() {
+        let repository = "Agent2Builder/agent2api-releases";
+        let tag = "v3.5.0-test-compat";
+        let name = "Agent2API_3.5.0-test-compat_android.apk";
+        let url = format!("https://agent2api.dev/downloads/{repository}/{tag}/{name}");
+        let hex_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let payload = json!({
+            "tag_name": tag,
+            "assets": [{
+                "name": name,
+                "browser_download_url": url,
+                "size": 1024_u64,
+                "digest": format!("sha256:{hex_hash}"),
+            }],
+        });
+
+        remember_website_release(&payload, repository);
+        let plan = download_plan(&url).await.expect("cached release digest should produce download plan");
+
+        assert_eq!(plan["url"], json!(url));
+        assert_eq!(plan["urls"], json!([url]));
+        assert_eq!(plan["sha256"], json!(hex_hash));
+        assert_eq!(plan["size"], json!(1024_u64));
+    }
 }

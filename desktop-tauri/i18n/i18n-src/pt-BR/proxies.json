@@ -340,7 +340,7 @@
   "请选择要导入的 YAML 文件": "Selecione um arquivo YAML para importar",
   "请选择要导入的内核文件": "Selecione o arquivo do kernel para importar",
   "读取失败：{reason}": "Falha ao ler: {reason}",
-  "赞助商": "",
+  "赞助商": "Patrocinadores",
   "起始端口不能大于结束端口": "A porta inicial não pode ser maior que a porta final",
   "跳过 {n} 个（Clash 同步）": "{n} ignorados (sincronização do Clash)",
   "跳过 {n} 个（EasyClash 同步）": "{n} ignorados (sincronização do EasyClash)",

@@ -5,7 +5,7 @@ import { probe } from '../core/client'
 import { formatBytes, formatNumber } from '../core/format'
 import { localeOptions, rawLocale, setLocale, t } from '../core/i18n'
 import { isChineseUnits, type UnitsPreference } from '../core/units'
-import { baseLabel, nativePlatform, serverIdentity } from '../core/servers'
+import { baseLabel, nativePlatform, openExternalUrl, serverIdentity } from '../core/servers'
 import { store, useStore, type ThemeMode } from '../core/store'
 import {
   APP_VERSION,
@@ -175,13 +175,13 @@ export function SettingsView() {
 
   const handleOpenExternalUpdate = () => {
     const target = hasDirectIpa ? updateInfo?.asset?.url : updatePageUrl
-    window.open(target || updatePageUrl, '_blank', 'noopener,noreferrer')
+    void openExternalUrl(target || updatePageUrl)
   }
 
   const handleDownloadApk = async () => {
     const url = updateInfo?.asset?.url
     if (!url) {
-      window.open(resolveUpdatePageUrl(updateInfo?.pageUrl), '_blank', 'noopener,noreferrer')
+      void openExternalUrl(resolveUpdatePageUrl(updateInfo?.pageUrl))
       return
     }
     setUpdatePhase('downloading')
@@ -525,7 +525,7 @@ export function SettingsView() {
               <button
                 type='button'
                 className='fc-btn is-tonal is-sm is-pill'
-                onClick={() => window.open(updatePageUrl, '_blank', 'noopener,noreferrer')}
+                onClick={() => void openExternalUrl(updatePageUrl)}
               >
                 官网下载页
               </button>

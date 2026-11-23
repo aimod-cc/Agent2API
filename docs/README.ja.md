@@ -42,24 +42,14 @@ Agent2API は **AI ルーティングゲートウェイと Agent クライアン
 <td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="Beichen API" width="64" /><br /><strong>北辰 API</strong></a></td>
 <td><strong>1 つの API で複数の主要モデルを利用。</strong><br />北辰は OpenAI 互換の AI API 中継サービスを提供し、ストリーミング応答と長時間推論モデルの接続に対応しています。Agent2API の「アカウント追加 → API テンプレート」の先頭カードを選ぶと接続先が入力されるので、自分の API Key を設定してください。<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>登録 / API Key を取得 ↗</strong></a></td>
 </tr>
-</table>
-
-<table>
 <tr>
 <td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPWO 住宅用 IP</strong></a></td>
 <td><strong>動的・静的・無制限の住宅用プロキシを用途に合わせて選択。</strong><br />IPWO は複数地域の住宅用 IP を提供し、国・都市単位の指定と HTTP(S) / SOCKS5 に対応しています。取得したプロキシアドレスを Agent2API の「ネットワークプロキシ」に追加すると、アカウントやサービスの通信経路に利用できます。<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>プランを見る / 住宅用 IP を取得 ↗</strong></a></td>
 </tr>
-</table>
-
-<a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane（スポンサー）" width="100%" /></a>
-
-<table>
-
 <tr>
-<td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> は AI アカウント専用のネイティブ静的住宅用 IP（Static Residential ISP）を提供しています。実在の家庭向けブロードバンド事業者の IP を使い、Scamalytics の不正スコアが低く、IP は 1 つずつ専有、通信量は無制限、$3.90 から。「ネットワークプロキシ」ページでアカウントごとに出口を 1 つ割り当てるだけです。初回購入はコード <code>AGENT2API25</code> で 25% オフ。</td>
+<td width="180" align="center"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="140" /></picture><br /><strong>ProxyLane 静的住宅用 IP</strong></a></td>
+<td><strong>AI アカウント専用のネイティブ静的住宅用 ISP プロキシ。</strong><br />実在の家庭向けブロードバンド事業者の IP を採用し、Scamalytics の不正スコアが低く、1 IP ごとに専有・通信量無制限で $3.90 から利用できます。Agent2API の「ネットワークプロキシ」ページでアカウントごとに出口を 1 つ割り当ててください。初回購入はコード <code>AGENT2API25</code> で 25% オフ。<br /><br /><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><strong>プランを見る / 静的住宅用 IP を取得 ↗</strong></a></td>
 </tr>
-
 </table>
 
 ## 💬 コミュニティとサポート

@@ -42,24 +42,14 @@ Agent2API는 **AI 라우팅 게이트웨이와 Agent 클라이언트 설정 관�
 <td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="Beichen API" width="64" /><br /><strong>Beichen API</strong></a></td>
 <td><strong>하나의 API로 여러 주요 모델을 연결합니다.</strong><br />Beichen은 OpenAI 호환 AI API 중계 서비스를 제공하며 스트리밍 응답과 장시간 추론 모델의 연결을 지원합니다. Agent2API의 "계정 추가 → API 템플릿"에서 첫 번째 카드를 선택하면 접속 주소가 자동 입력되므로, 본인의 API Key를 입력하면 됩니다.<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>가입 / API Key 받기 ↗</strong></a></td>
 </tr>
-</table>
-
-<table>
 <tr>
 <td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPWO 주거용 IP</strong></a></td>
 <td><strong>동적·고정·무제한 주거용 프록시를 용도에 맞게 선택하세요.</strong><br />IPWO는 여러 지역의 주거용 IP를 제공하며 국가·도시 단위 지정과 HTTP(S) / SOCKS5를 지원합니다. 받은 프록시 주소를 Agent2API의 "네트워크 프록시"에 추가하면 계정과 서비스 연결 경로에 사용할 수 있습니다.<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>요금제 보기 / 주거용 IP 받기 ↗</strong></a></td>
 </tr>
-</table>
-
-<a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane(스폰서)" width="100%" /></a>
-
-<table>
-
 <tr>
-<td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a>은 AI 계정 전용 네이티브 정적 주거용 IP(Static Residential ISP)를 제공합니다. 실제 가정용 브로드밴드 사업자의 IP를 사용하며 Scamalytics 사기 점수가 낮고, IP는 1개씩 전용, 트래픽 무제한, $3.90부터. "네트워크 프록시" 페이지에서 계정마다 출구 하나를 지정하면 됩니다. 첫 구매 시 코드 <code>AGENT2API25</code>로 25% 할인됩니다.</td>
+<td width="180" align="center"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="140" /></picture><br /><strong>ProxyLane 정적 주거용 IP</strong></a></td>
+<td><strong>AI 계정 전용 네이티브 정적 주거용 ISP 프록시.</strong><br />실제 가정용 브로드밴드 사업자의 IP를 사용하며 Scamalytics 사기 점수가 낮고, IP마다 단독 할당되며 트래픽 무제한으로 $3.90부터 이용할 수 있습니다. Agent2API의 "네트워크 프록시" 페이지에서 계정마다 출구 하나를 지정하면 됩니다. 첫 구매 시 코드 <code>AGENT2API25</code>로 25% 할인됩니다.<br /><br /><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><strong>요금제 보기 / 정적 주거용 IP 받기 ↗</strong></a></td>
 </tr>
-
 </table>
 
 ## 💬 커뮤니티 및 지원

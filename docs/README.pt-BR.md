@@ -42,24 +42,14 @@ Agradecemos à Beichen API, à IPWO e à ProxyLane por patrocinarem este projeto
 <td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="Beichen API" width="64" /><br /><strong>Beichen API</strong></a></td>
 <td><strong>Uma API para vários modelos de referência.</strong><br />A Beichen oferece uma API de IA intermediária compatível com OpenAI, com respostas em streaming e suporte à conexão de modelos de raciocínio prolongado. Selecione o primeiro cartão em Adicionar conta → Modelos de API no Agent2API e informe sua API Key junto ao endereço preenchido automaticamente.<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>Cadastrar / Obter API Key ↗</strong></a></td>
 </tr>
-</table>
-
-<table>
 <tr>
 <td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPs residenciais IPWO</strong></a></td>
 <td><strong>Planos de proxies residenciais dinâmicos, estáticos e ilimitados.</strong><br />A IPWO oferece IPs residenciais em várias regiões, com seleção por país e cidade e suporte a HTTP(S) / SOCKS5. Adicione o endereço recebido na página "Proxy de rede" do Agent2API para usar com contas e rotas de serviço.<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>Ver planos / Obter IPs residenciais ↗</strong></a></td>
 </tr>
-</table>
-
-<a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane (patrocinador)" width="100%" /></a>
-
-<table>
-
 <tr>
-<td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td>A <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> oferece proxies de IP residencial estático nativos para contas de IA (Static Residential ISP): os IPs vêm de operadoras de banda larga residenciais reais, com pontuação de fraude baixa no Scamalytics, cada IP é dedicado a você, com tráfego ilimitado, a partir de $3.90. Adicione uma saída por conta na página "Proxy de rede". Use o código <code>AGENT2API25</code> para 25% de desconto na primeira compra.</td>
+<td width="180" align="center"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="140" /></picture><br /><strong>ProxyLane IP Estático</strong></a></td>
+<td><strong>Proxies residenciais estáticos ISP dedicados para contas de IA.</strong><br />Os IPs vêm de operadoras de banda larga residenciais reais, com pontuação de fraude baixa no Scamalytics; cada IP é dedicado a você com tráfego ilimitado, a partir de $3.90. Adicione uma saída por conta na página "Proxy de rede" do Agent2API e use o código <code>AGENT2API25</code> para 25% de desconto na primeira compra.<br /><br /><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><strong>Ver planos / Obter IPs estáticos ↗</strong></a></td>
 </tr>
-
 </table>
 
 ## 💬 Comunidade e suporte

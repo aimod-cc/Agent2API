@@ -45,6 +45,16 @@ export type ModelQuotaReading = {
 
 type WindowGroup = { id: string; name: string; rows: UsageWindowReading[] }
 
+function windowOrderRank(code: string): number {
+  switch (code.trim().toLowerCase()) {
+    case '5h': return 0
+    case 'daily': return 1
+    case 'weekly': return 2
+    case 'monthly': return 3
+    default: return 4
+  }
+}
+
 function windowLabel(code: string): string {
   switch (code.trim().toLowerCase()) {
     case '5h': return t('{n} 小时', { n: 5 })
@@ -91,7 +101,7 @@ export function usageWindows(entry: UsageEntry): UsageWindowReading[] {
       aside: row.aside === true,
     })
   }
-  return readings
+  return groupWindows(readings).flatMap(group => group.rows)
 }
 
 export function usageModelQuotas(entry: UsageEntry): ModelQuotaReading[] {
@@ -119,6 +129,9 @@ function groupWindows(rows: UsageWindowReading[]): WindowGroup[] {
       groups.set(key, group)
     }
     group.rows.push(row)
+  }
+  for (const group of groups.values()) {
+    group.rows.sort((left, right) => windowOrderRank(left.windowCode) - windowOrderRank(right.windowCode))
   }
   return [...groups.values()]
 }

@@ -42,24 +42,14 @@ Agent2API 是一个 **AI 路由网关 + Agent 客户端接管**项目。它将�
 <td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="北辰 API" width="64" /><br /><strong>北辰 API 中转站</strong></a></td>
 <td><strong>一个接口，连接多家主流模型。</strong><br />北辰提供兼容 OpenAI 协议的 AI 接口中转服务，支持流式响应与长思考模型连接。可在 Agent2API「添加账号 → API 模板」首张卡片中选用，预填接入地址后填写自己的 API Key。<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>注册 / 获取 API Key ↗</strong></a></td>
 </tr>
-</table>
-
-<table>
 <tr>
 <td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPWO 家庭住宅 IP</strong></a></td>
 <td><strong>动态、静态与不限量住宅代理，按需选择网络出口。</strong><br />IPWO 提供多地区住宅 IP，支持国家及城市级定位，以及 HTTP(S) / SOCKS5 协议。获取代理地址后，可在 Agent2API「网络代理」中添加，供账号与服务线路使用。<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>了解套餐 / 获取住宅 IP ↗</strong></a></td>
 </tr>
-</table>
-
-<a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane（赞助位）" width="100%" /></a>
-
-<table>
-
 <tr>
-<td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> 提供 AI 账号专用的原生静态住宅 IP（Static Residential ISP）：IP 来自真实家庭宽带运营商，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。在「网络代理」页给每个账号配一个出口即可。首次购买使用优惠码 <code>AGENT2API25</code> 享 75 折。</td>
+<td width="180" align="center"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="140" /></picture><br /><strong>ProxyLane 静态住宅 IP</strong></a></td>
+<td><strong>AI 账号专用原生静态住宅 IP，独享出口不限流量。</strong><br />ProxyLane 提供静态住宅 ISP 代理：IP 来自真实家庭宽带运营商，Scamalytics 欺诈评分低，每个 IP 独享且不限流量，$3.90 起。可在 Agent2API「网络代理」页给每个账号配一个出口，首次购买使用优惠码 <code>AGENT2API25</code> 享 75 折。<br /><br /><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><strong>了解套餐 / 获取静态住宅 IP ↗</strong></a></td>
 </tr>
-
 </table>
 
 ## 💬 社区与支持

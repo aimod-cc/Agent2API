@@ -14,6 +14,7 @@ import {
   type DynamicLoginStart,
 } from '../core/api'
 import { copyText, formatRelativeTime, providerDisplayName } from '../core/format'
+import { openExternalUrl } from '../core/servers'
 import { store, useStore } from '../core/store'
 import {
   BottomSheet,
@@ -298,7 +299,7 @@ export function AddAccountSheet({
       setLoginFlow(flow)
       const authUrl = flow.authUrl || flow.url
       if (authUrl) {
-        window.open(authUrl, '_blank', 'noopener,noreferrer')
+        void openExternalUrl(authUrl)
       }
     } catch (err) {
       store.toast(err instanceof Error ? err.message : '启动登录失败', 'danger')

@@ -46,13 +46,17 @@ pub(super) async fn forward(
         error_policy::attach(&mut error, &decision);
         error_policy::note(telemetry, &decision, blocked_or_started.then_some("已进入不可重放状态，只记录账号状态，不重发不换号"));
         if policy.suspend_account && !account.is_empty() {
-            crate::server::core::blocking::in_place(|| store.suspend_upstream_account(account, &policy.reason));
+            super::error_policy_finish::persist_account_action(store, account, true, None, &policy.reason);
         }
         if blocked_or_started || decision.hard_stop {
             if decision.hard_stop && !account.is_empty() {
-                if let Some(until) = policy.account_cooldown_until {
-                    crate::server::core::blocking::in_place(|| store.cooldown_upstream_account(account, until, &policy.reason));
-                }
+                super::error_policy_finish::persist_account_action(
+                    store,
+                    account,
+                    false,
+                    policy.account_cooldown_until,
+                    &policy.reason,
+                );
             }
             return Err(error);
         }

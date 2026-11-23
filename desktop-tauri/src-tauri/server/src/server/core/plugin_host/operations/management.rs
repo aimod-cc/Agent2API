@@ -46,7 +46,14 @@ async fn apply(id: &str, change: PackChange) -> Result<Value, GatewayError> {
             }
         }
         PackChange::Uninstall => after.packs.retain(|pack| pack.id != id),
-        PackChange::Enabled(enabled) => pack.enabled = *enabled,
+        PackChange::Enabled(enabled) => {
+            pack.enabled = *enabled;
+            if let Some(provider_id) = pack.single_provider_id().map(str::to_string) {
+                if pack.providers.get(&provider_id) == Some(&false) {
+                    pack.providers.insert(provider_id, true);
+                }
+            }
+        }
         PackChange::Provider { id, enabled } => {
             if !pack.manifest_providers.iter().any(|provider| provider.id.as_str() == id) {
                 return Err(GatewayError::bad_request("这个插件包里没有指定的提供商"));
@@ -55,7 +62,12 @@ async fn apply(id: &str, change: PackChange) -> Result<Value, GatewayError> {
                 return Err(GatewayError::with_status(409,
                     format!("该提供商已由插件 {owner} 接管，请到对应插件中管理")));
             }
-            pack.providers.insert(id.clone(), *enabled);
+            if pack.single_provider_id() == Some(id.as_str()) {
+                pack.enabled = *enabled;
+                pack.providers.insert(id.clone(), true);
+            } else {
+                pack.providers.insert(id.clone(), *enabled);
+            }
         }
     }
     let scope = ChangeScope::between(&before, &after, id, None);

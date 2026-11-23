@@ -23,12 +23,13 @@ export function scriptUpdate(state: ScriptPluginsState | undefined, id: string):
 /**
  * 「可更新」徽章的文案。
  *
- * npm 与 magpie 分发来源的最新版是版本号，就写出来（「可更新 v0.2.3」）；GitHub
- * 来源的最新版是一个提交短号，数字开头之外的情况不拼 `v` —— 「可更新 v6f3a1b」
- * 读起来像版本号，会让人以为它真有版本。
+ * npm 与 magpie 分发来源的最新版是带点号的版本号，就写出来（「可更新 v0.2.3」）；
+ * GitHub 来源的最新版是一段十六进制提交短号（也可能以数字开头，如 `4d9d2f32d7c2`），
+ * 仅展示「可更新」，避免「可更新 v4d9d2f32d7c2」让人误以为它真有版本号。
  */
 export function updateLabel(update: ScriptUpdate, t: PluginTranslate): string {
-  return /^\d/.test(update.latest) ? t('可更新 v{version}', { version: update.latest }) : t('可更新')
+  const isVersion = /^\d+\.\d+/.test(update.latest) && !/^[0-9a-f]{7,40}$/i.test(update.latest)
+  return isVersion ? t('可更新 v{version}', { version: update.latest }) : t('可更新')
 }
 
 /**

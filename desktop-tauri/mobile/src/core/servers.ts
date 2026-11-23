@@ -1,3 +1,5 @@
+import { Capacitor, registerPlugin } from '@capacitor/core'
+
 export type ServerEntry = {
   id: string
   name: string
@@ -225,4 +227,25 @@ export function clearServerAuth(id: string): void {
     /* ignore */
   }
   notifyManagementSessionChanged(id)
+}
+
+type ExternalUrlPlugin = {
+  open: (options: { url: string }) => Promise<void>
+}
+
+const ExternalUrl = registerPlugin<ExternalUrlPlugin>('ExternalUrl')
+
+export async function openExternalUrl(rawUrl: string): Promise<boolean> {
+  const url = rawUrl.trim()
+  if (!/^https?:\/\//i.test(url)) return false
+  if (isPackaged() && Capacitor.isPluginAvailable('ExternalUrl')) {
+    try {
+      await ExternalUrl.open({ url })
+      return true
+    } catch {
+      /* fallback to window.open when native launch is rejected */
+    }
+  }
+  const win = typeof window !== 'undefined' ? window.open(url, '_blank', 'noopener,noreferrer') : null
+  return Boolean(win)
 }

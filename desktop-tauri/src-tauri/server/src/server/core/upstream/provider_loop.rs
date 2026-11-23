@@ -1431,17 +1431,18 @@ async fn attempt_queue(
                         return Err(failure.error);
                     }
                     if let Some(account_id) = target.account_id.as_deref() {
-                        if failure.policy.suspend_account {
-                            let _ = crate::server::core::blocking::in_place(|| {
-                                service.store.suspend_upstream_account(account_id, &failure.policy.reason)
-                            });
-                        } else if failure.stop {
-                            if let Some(until) = failure.policy.account_cooldown_until {
-                                let _ = crate::server::core::blocking::in_place(|| {
-                                    service.store.cooldown_upstream_account(account_id, until, &failure.policy.reason)
-                                });
-                            }
-                        }
+                        let cooldown_until = if !failure.policy.suspend_account && failure.stop {
+                            failure.policy.account_cooldown_until
+                        } else {
+                            None
+                        };
+                        super::error_policy_finish::persist_account_action(
+                            &service.store,
+                            account_id,
+                            failure.policy.suspend_account,
+                            cooldown_until,
+                            &failure.policy.reason,
+                        );
                     }
                     if ctx.telemetry.replay_guard().blocked() || failure.stop {
                         ctx.telemetry.finish_last_attempt(

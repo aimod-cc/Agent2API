@@ -63,8 +63,14 @@ function groupRatioOf(windows: UsageWindowReading[], rawValue: number | null): G
     }
   })
   const shortReadings = readings.filter(row => row.shortWindow && (row.percent !== null || row.unlimited))
-  const candidates = (shortReadings.length ? shortReadings : readings)
-    .flatMap(row => row.unlimited ? [100] : row.percent === null ? [] : [row.percent])
+  const exhaustedWithoutShort = [...exhaustedGroups].some(group =>
+    !measured.some(row => row.group === group && isShortWindow(row) && (row.percent !== null || row.unlimited)),
+  )
+  const candidates = [
+    ...(shortReadings.length ? shortReadings : readings)
+      .flatMap(row => row.unlimited ? [100] : row.percent === null ? [] : [row.percent]),
+    ...(shortReadings.length && exhaustedWithoutShort ? [0] : []),
+  ]
   if (candidates.length) {
     return {
       percent: Math.min(...candidates),

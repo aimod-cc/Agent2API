@@ -52,8 +52,34 @@ public class ImageSaverPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 }
 
+@objc(ExternalUrlPlugin)
+public class ExternalUrlPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "ExternalUrlPlugin"
+    public let jsName = "ExternalUrl"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "open", returnType: CAPPluginReturnPromise)
+    ]
+
+    @objc func open(_ call: CAPPluginCall) {
+        guard let raw = call.getString("url")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            call.reject("Invalid external URL")
+            return
+        }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:]) { opened in
+                if opened { call.resolve() }
+                else { call.reject("Failed to open external URL") }
+            }
+        }
+    }
+}
+
 class AppBridgeViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(ImageSaverPlugin())
+        bridge?.registerPluginInstance(ExternalUrlPlugin())
     }
 }

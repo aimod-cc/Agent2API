@@ -29,6 +29,8 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
   const [search, setSearch] = React.useState('')
   const locked = disabled
   const idPrefix = React.useId()
+  const singleProvider = pack.providers.length === 1 ? pack.providers[0] : null
+  const showProviders = pack.providers.length > 1
   const keyword = search.trim().toLocaleLowerCase()
   const providers = pack.providers.filter(provider => !keyword
     || `${t(provider.label)} ${provider.id}`.toLocaleLowerCase().includes(keyword))
@@ -46,6 +48,7 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
           {t('启用')}<Switch id={`${idPrefix}-enabled`} checked={pack.supportState !== 'legacy_unsupported' && pack.enabled} disabled={locked || Boolean(pack.unavailableReason)} onCheckedChange={onEnabled} />
         </Label>
         {pack.unavailableReason ? <Alert>{t(pack.unavailableReason)}</Alert> : null}
+        {!pack.unavailableReason && singleProvider?.overriddenBy ? <Alert>{t('已由其他插件接管，请到对应插件中管理。')}</Alert> : null}
         <PluginStartupSummary id={pack.id} status={startup} enabled={pack.enabled}
           running={pack.host?.running && pack.entryPresent && !pack.updateRequired} error={pack.host?.lastError}
           disabled={locked} onDiagnostics={diagnostics} retry={onReload} t={t} />
@@ -60,7 +63,7 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
         <h3 className='m-0'>{t('版本')}</h3>
         <PluginUpdateDetails pack={pack} update={update} operation={operation} disabled={locked} onUpdate={onUpdate} onNotes={onNotes} />
       </DialogSection>
-      <DialogSection>
+      {showProviders ? <DialogSection>
         <h3 className='m-0 flex items-baseline justify-between gap-3'>
           <span>{t('提供商启停')}</span>
           <span className='text-[11.5px] font-normal text-muted-foreground'>
@@ -84,6 +87,6 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
           </div>)}
           {!providers.length ? <p className='m-0 py-3 text-center'>{t('没有匹配「{keyword}」的提供商', { keyword: search.trim() })}</p> : null}
         </div>
-      </DialogSection>
+      </DialogSection> : null}
     </>} />
 }

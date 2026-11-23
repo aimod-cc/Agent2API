@@ -115,7 +115,7 @@ export function PluginStoreCard({ name, description, version, icon, artwork, hig
         {pending ? <Spinner className='size-3' /> : status !== 'missing' ? <StatusDot variant={running ? 'success' : failed ? 'warning' : 'muted'} /> : null}
         {statusText}
       </span>
-      {providerCount !== undefined ? <>
+      {providerCount !== undefined && providerCount > 1 ? <>
         <span className='opacity-40' aria-hidden='true'>·</span>
         <span className='tabular-nums'>{t('{count} 家提供商', {
           count: enabledCount === undefined ? providerCount : `${enabledCount}/${providerCount}`,

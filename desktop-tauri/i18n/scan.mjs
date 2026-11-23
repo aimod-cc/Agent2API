@@ -68,15 +68,15 @@ const DOMAIN_ORDER = [
  * 未命中的文件归入 'common' 并在报告里 warning（提示把新文件登记进来）。
  */
 const DOMAIN_RULES = [
-  { domain: 'common', files: ['index.html', 'm.html', 'desktop-shell.tsx', 'desktop-titlebar.tsx', 'desktop-tooltip.tsx', 'island-registry.ts', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js', 'App.tsx', 'main.tsx', 'Shell.tsx', 'NavBar.tsx', 'Icon.tsx', 'ProviderLogo.tsx', 'ui.tsx', 'PullToRefresh.tsx', 'AppUpdatePanel.tsx', 'CommunitySheet.tsx', 'i18n.ts', 'client.ts', 'gateway.ts', 'format.ts', 'providers.ts', 'providerFacts.ts', 'usePolling.ts', 'pwa.ts', 'usePwa.ts', 'appUpdate.ts', 'community.ts', 'servers.ts', 'auth.ts', 'store.ts', 'routes.ts'] },
+  { domain: 'common', files: ['index.html', 'm.html', 'desktop-shell.tsx', 'desktop-titlebar.tsx', 'desktop-tooltip.tsx', 'desktop-tray.ts', 'island-registry.ts', 'island-lazy.ts', 'uikit.tsx', 'advertisements.ts', 'date-range-fields.tsx', 'dialog-segmented.ts', 'provider-icon.ts', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js', 'App.tsx', 'main.tsx', 'Shell.tsx', 'NavBar.tsx', 'Icon.tsx', 'ProviderLogo.tsx', 'ui.tsx', 'components.tsx', 'icons.tsx', 'pickers.tsx', 'NavCustomizerSheet.tsx', 'PullToRefresh.tsx', 'AppUpdatePanel.tsx', 'CommunitySheet.tsx', 'i18n.ts', 'client.ts', 'gateway.ts', 'format.ts', 'providers.ts', 'providerFacts.ts', 'usePolling.ts', 'pwa.ts', 'usePwa.ts', 'appUpdate.ts', 'community.ts', 'servers.ts', 'auth.ts', 'store.ts', 'routes.ts', 'api.ts', 'api-extras.ts', 'api-features.ts', 'units.ts'] },
   { domain: 'common', files: ['PageAutoRefresh.tsx'], prefixes: ['page-auto-refresh'] },
-  { domain: 'login', files: ['login.html', 'login-page.tsx', 'panel-captcha.js', 'turnstile-widget.tsx'] },
-  { domain: 'account-settings', files: ['accounts-settings-dialog.tsx', 'accounts-settings-fields.tsx', 'account-server-permissions.tsx'] },
+  { domain: 'login', files: ['login.html', 'login-page.tsx', 'login-entry.tsx', 'panel-captcha.js', 'turnstile-widget.tsx', 'AuthView.tsx'] },
+  { domain: 'account-settings', files: ['accounts-settings-dialog.tsx', 'accounts-settings-fields.tsx', 'account-server-permissions.tsx', 'plugin-account-origin-permissions.tsx'] },
   { domain: 'desktop-launch', files: ['plugin-desktop-launch.ts', 'plugin-desktop-launch-dialog.tsx', 'accounts-desktop-launch.tsx', 'accounts-desktop-recovery.tsx'] },
-  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountsListBody.tsx', 'useAccountsList.ts', 'AccountSheet.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-sort.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'proxy-system.ts', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'credit-expiry.ts', 'credential-expiry.ts', 'usage-readings.ts', 'usage-query-state.ts', 'usage-query-task.ts', 'useAccountUsage.ts', 'accounts-usage.ts', 'accounts-usage-cache.ts', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-list-', 'accounts-group-order', 'accounts-limiter-', 'accounts-usage-', 'accounts-export', 'accounts-authorization'] },
+  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountsView.tsx', 'AccountsListBody.tsx', 'useAccountsList.ts', 'AccountSheet.tsx', 'AccountSheets.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-sort.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-batch-refresh.ts', 'accounts-features.ts', 'accounts-index-refresh.ts', 'accounts-limited-snapshot.ts', 'accounts-live-state.ts', 'accounts-realtime.ts', 'accounts-table-row.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'proxy-system.ts', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'credit-expiry.ts', 'credential-expiry.ts', 'usage-readings.ts', 'usage-query-state.ts', 'usage-query-task.ts', 'useAccountUsage.ts', 'accounts-usage.ts', 'accounts-usage-cache.ts', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-list-', 'accounts-group-order', 'accounts-limiter-', 'accounts-usage-', 'accounts-export', 'accounts-authorization'] },
   { domain: 'add-account', files: ['plugin-codearts-enrollment.tsx', 'plugin-desktop-import.tsx', 'plugin-credential-file.tsx', 'plugin-secret-textarea.tsx', 'plugin-login-interaction.tsx', 'add-dynamic-provider.tsx', 'add-custom-provider.tsx', 'custom-provider-ui.js', 'providers.js', 'preset-providers.js', 'web-login.js', 'autoclaw-oauth.js', 'aliyun-captcha.js', 'zcode-claim.js', 'zcode-captcha-pool.js', 'codearts-welfare.js'], prefixes: ['plugin-login-', 'add-account-', 'add-provider-', 'add-workbuddy-', 'add-doubaowork-'] },
-  { domain: 'models', files: ['ModelsPage.tsx', 'model-capability.ts', 'model-capability-dialog.tsx', 'model-test-dialog.tsx', 'model-test-result.tsx'], prefixes: ['models-'] },
-  { domain: 'routing', prefixes: ['routing-'] },
+  { domain: 'models', files: ['ModelsPage.tsx', 'ModelsView.tsx', 'PricingSheet.tsx', 'pricing.ts', 'model-capability.ts', 'model-capability-dialog.tsx', 'model-pricing.ts', 'model-pricing-dialog.tsx', 'provider-pricing-dialog.tsx', 'model-test-dialog.tsx', 'model-test-result.tsx'], prefixes: ['models-'] },
+  { domain: 'routing', files: ['api-routing.ts'], prefixes: ['routing-', 'Routing'] },
   // 「Agent」页：本机 AI 客户端的配置接管（客户端清单 / 配置编辑 / 写入预览）
   { domain: 'agent', files: ['AgentPage.tsx'], prefixes: ['agent-'] },
   // 「工具服务」页：网络搜索 / 视觉分析（服务列表 / 详情 / 上游配置 / 本机接入）
@@ -84,36 +84,37 @@ const DOMAIN_RULES = [
   // 「设置 → 版本信息」面板（桌面端 system-info-pane.tsx 与手机端
   // SystemInfoSheet.tsx 共用同一批文案：版本 / 环境 / 路径 / 开关）。
   // 归 settings 域 —— 它读的就是设置页的分类之一，文案与设置页其它面板同类。
-  { domain: 'settings', files: ['plugin-provider-settings.tsx', 'branding.ts', 'units.js', 'SettingsPage.tsx', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx', 'system-info-pane.tsx', 'SystemInfoSheet.tsx', 'sidebar-layout.js', 'vision-compat.ts', 'prompt-rules.ts'], prefixes: ['settings-', 'sidebar-', 'client-identification', 'provider-settings'] },
+  { domain: 'settings', files: ['plugin-provider-settings.tsx', 'branding.ts', 'units.js', 'SettingsPage.tsx', 'SettingsView.tsx', 'SettingsSheets.tsx', 'ForwardingSheets.tsx', 'NotificationSheet.tsx', 'OauthSheet.tsx', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx', 'system-info-pane.tsx', 'SystemInfoSheet.tsx', 'sidebar-layout.js', 'vision-compat.ts', 'prompt-rules.ts'], prefixes: ['settings-', 'sidebar-', 'client-identification', 'provider-settings'] },
   // AI 助手（侧边栏「智能」组的一级页 + 设置页「AI 助手」分类）：
   // 对话页、工具集、设置面板三块
-  { domain: 'assistant', files: ['AssistantPage.tsx', 'AssistantHistory.tsx', 'AssistantModelPicker.tsx', 'assistant.ts', 'assistantTools.ts', 'MarkdownLite.tsx'], prefixes: ['assistant-'] },
-  { domain: 'update', files: ['upgrade-panel.js', 'UpdateProxySettings.tsx', 'RequiredUpdateGate.tsx', 'updates.ts'], prefixes: ['update-'] },
-  { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx', 'model-api-key.ts', 'model-api-key-field.tsx', 'model-api-key-memory.ts', 'use-model-api-keys.ts'] },
-  { domain: 'proxies', files: ['ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxy-editor-sheet.tsx', 'proxy-retirement-dialog.tsx', 'proxy-import.ts', 'proxy-batch-editor.tsx', 'sponsor.ts', 'sponsor-card.tsx', 'proxy-sponsor-cards.tsx'] },
+  { domain: 'assistant', files: ['AssistantPage.tsx', 'ChatView.tsx', 'AssistantHistory.tsx', 'AssistantModelPicker.tsx', 'assistant.ts', 'assistantTools.ts', 'MarkdownLite.tsx'], prefixes: ['assistant-'] },
+  { domain: 'update', files: ['upgrade-panel.js', 'UpdateProxySettings.tsx', 'RequiredUpdateGate.tsx', 'updates.ts', 'updater.ts'], prefixes: ['update-'] },
+  { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx', 'KeysView.tsx', 'model-api-key.ts', 'model-api-key-field.tsx', 'model-api-key-memory.ts', 'use-model-api-keys.ts'] },
+  { domain: 'proxies', files: ['ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxy-editor-sheet.tsx', 'proxy-retirement-dialog.tsx', 'proxy-import.ts', 'proxy-batch-editor.tsx', 'proxy-pool-cache.ts', 'sponsor.ts', 'sponsor-card.tsx', 'proxy-sponsor-cards.tsx'] },
   { domain: 'docs', files: ['docs-page.tsx', 'DocsPage.tsx', 'DocsProviderData.ts', 'provider-docs-view.tsx'], prefixes: ['docs-provider-', 'docs-api-'] },
-  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'usage-donuts.tsx', 'activity-panel.tsx', 'cache-panels.tsx', 'overview-panel.tsx', 'rank-panel.tsx', 'usage-data.ts', 'compact-value.tsx', 'use-width.ts', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
-  { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'zcode-plans.ts', 'zcode-claim-verification.js', 'CheckinPage.tsx', 'ZcodeCaptchaPanel.tsx'], prefixes: ['checkin-', 'Checkin'] },
+  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'DashboardView.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'usage-donuts.tsx', 'activity-panel.tsx', 'cache-panels.tsx', 'overview-panel.tsx', 'rank-panel.tsx', 'usage-data.ts', 'compact-value.tsx', 'use-width.ts', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
+  { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'api-checkin.ts', 'api-zcode.ts', 'zcode-plans.ts', 'zcode-claim-verification.js', 'CheckinPage.tsx', 'ZcodeCaptchaPanel.tsx'], prefixes: ['checkin-', 'Checkin'] },
   { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx', 'maintenance.ts'], prefixes: ['maintenance-'] },
   { domain: 'logs', files: ['logs.ts', 'LogsPage.tsx'], prefixes: ['logs-'] },
   { domain: 'requests', files: ['RequestsPage.tsx', 'requests-page.tsx', 'request-detail.tsx', 'request-raw-panes.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js', 'source-filters.tsx', 'request-cells.tsx', 'request-phase.ts', 'request-vision-detail.tsx'] },
-  { domain: 'tables', files: ['table-columns.js', 'table-col-settings.tsx', 'table-shell.tsx'] },
+  { domain: 'tables', files: ['table-columns.js', 'mobile-columns.js', 'table-col-settings.tsx', 'table-shell.tsx'] },
   { domain: 'port', files: ['port-panel.tsx'] },
   // 提供商插件页（一级菜单）：整页文案都在这一个文件里，量不大（三十来条），
   // 单开一个域会让 i18n-src 多出五份几乎空的 JSON —— 归 common，与它实际
   // 的规模相称。菜单名「提供商插件」在 sidebar-layout.js 里，归 settings 域
   // （侧边栏布局那条规则已经收了它）。
-  { domain: 'common', files: ['runtime-capacity.ts', 'runtime-capacity-panel.tsx', 'plugin-task-settings.tsx', 'plugin-tasks.tsx', 'plugin-helpers.tsx', 'plugin-managed-task-permissions.tsx', 'plugin-startup.ts', 'plugin-startup-view.tsx', 'plugin-hidden.ts', 'plugins.ts', 'PluginsPage.tsx', 'PluginCards.tsx', 'PluginSettingsSheet.tsx', 'PluginPackSettingsSheet.tsx'], prefixes: ['plugins-'] },
+  { domain: 'common', files: ['runtime-capacity.ts', 'runtime-capacity-panel.tsx', 'plugin-artwork-appearance.ts', 'plugin-artwork.tsx', 'plugin-permission-reads.ts', 'plugin-task-settings.tsx', 'plugin-tasks.tsx', 'plugin-task-types.ts', 'plugin-helpers.tsx', 'plugin-managed-task-permissions.tsx', 'plugin-startup.ts', 'plugin-startup-view.tsx', 'plugin-hidden.ts', 'plugins.ts', 'PluginsPage.tsx', 'PluginCards.tsx', 'PluginSettingsSheet.tsx', 'PluginPackSettingsSheet.tsx'], prefixes: ['plugins-'] },
 ]
 
 /* ─── 文件枚举 ─────────────────────────────── */
 
 /**
- * 排除清单：i18n 基础设施自身。它们是「查表 / 注入」的实现（内部到处是 t(key) 这种
- * 拿变量的调用），不含产品文案，扫进来只会刷一堆无意义的 warning。
+ * 排除清单：i18n 基础设施自身与 Service Worker 脚本。它们不是界面文案源，
+ * 扫进来只会刷无意义的 warning。
  */
 const EXCLUDED = new Set([
   path.join(UI, 'i18n.js'),
+  path.join(UI, 'sw.js'),
   path.join(ISLANDS_SRC, 'i18n.ts'),
   path.join(UI_KIT_SRC, 'i18n.ts'),
 ])

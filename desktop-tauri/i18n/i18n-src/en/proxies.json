@@ -349,7 +349,7 @@
   "请选择要导入的 YAML 文件": "Select a YAML file to import first",
   "请选择要导入的内核文件": "Select a kernel file to import",
   "读取失败：{reason}": "Load failed: {reason}",
-  "赞助商": "",
+  "赞助商": "Sponsors",
   "起始端口不能大于结束端口": "The start port cannot be greater than the end port",
   "跳过 {n} 个（Clash 同步）": "skipped {n} (Clash sync)",
   "跳过 {n} 个（EasyClash 同步）": "skipped {n} (EasyClash sync)",

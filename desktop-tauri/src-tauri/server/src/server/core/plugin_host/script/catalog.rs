@@ -13,10 +13,6 @@ pub(crate) async fn refresh_now(force: bool) -> Result<(usize, usize, Option<Str
     refresh::refresh_now(force).await
 }
 
-pub(super) fn github_commit(repository: &str) -> Option<String> {
-    github_commit_for(repository, "")
-}
-
 pub(super) fn github_commit_for(repository: &str, reference: &str) -> Option<String> {
     cache::entries()
         .iter()

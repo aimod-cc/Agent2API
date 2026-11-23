@@ -113,18 +113,22 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
   const legacy = pack.supportState === 'legacy_unsupported'
   const running = !legacy && pack.enabled && packHost?.running === true && pack.entryPresent && !pack.updateRequired
   const name = pluginName(pack.id, store?.name || pack.name)
+  const singleOverridden = !legacy && pack.providers.length === 1 && Boolean(pack.providers[0]?.overriddenBy)
+  const multiProvider = pack.providers.length > 1
   return <PluginStoreCard t={t} name={name} description={pluginDescription(pack.id, store?.description || pack.description)}
     version={pack.version} icon={pack.icon || store?.icon} artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'}
     status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'} startup={startup} selection={selection}
     onDetails={onDetails}
     footerAction={pack.enabled && (pluginFailed(startup) || startup?.phase === 'blocked' || (!startup && packHost?.lastError))
       ? <Button variant='link' size='xs' onClick={() => requestPluginDiagnostics(pack.id)}>{t('加载诊断')}</Button> : null}
-    providerCount={pack.providers.length} enabledCount={legacy ? 0 : pack.providers.filter(provider => provider.enabled && !provider.overriddenBy).length}
+    providerCount={multiProvider ? pack.providers.length : undefined}
+    enabledCount={multiProvider ? (legacy ? 0 : pack.providers.filter(provider => provider.enabled && !provider.overriddenBy).length) : undefined}
     badges={<>
       {pack.updateRequired ? <Badge variant='destructive' shape='tag'>{t('接口不兼容')}</Badge>
         : update?.available ? <Badge variant='brand' shape='tag'>{t('有更新')}{update.latest ? ` v${update.latest}` : ''}</Badge> : null}
       {pack.version.includes('-') ? <BetaBadge /> : null}
       {pack.unavailableReason ? <Badge variant='secondary' shape='tag'>{legacy ? t('旧插件已停止支持') : t('暂未开放')}</Badge> : null}
+      {!pack.unavailableReason && singleOverridden ? <Badge variant='secondary' shape='tag'>{t('由其他插件接管')}</Badge> : null}
       {!pack.entryPresent ? <Badge variant='destructive' shape='tag'>{t('文件缺失')}</Badge> : null}
     </>}
     actions={<>

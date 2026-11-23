@@ -140,7 +140,7 @@ impl PreparedPack {
                 .unwrap_or(provider.default_enabled);
             (id, enabled)
         }).collect();
-        InstalledPack {
+        let mut pack = InstalledPack {
             id: self.manifest.id.clone(), version: self.manifest.version.clone(),
             enabled: previous.map(|pack| pack.enabled).unwrap_or(true)
                 && self.manifest.providers.iter().any(|provider|
@@ -149,7 +149,9 @@ impl PreparedPack {
             entry: self.entry.clone(), sha256: self.sha256.clone(), signed: self.signed,
             installed_at: crate::server::logging::now_ms(),
             manifest_providers: self.manifest.providers.clone(),
-        }
+        };
+        pack.normalize_single_provider();
+        pack
     }
 
     pub fn install(self) -> Result<PackSummary, String> {

@@ -48,15 +48,30 @@ pub(super) fn begin(action: &str, target: Value) -> Result<(), String> {
 
 pub(super) fn finished(result: Result<(), String>) {
     super::icons::wake(false);
-    // 装了／更了／卸了之后可更新状态必须重算：自动检查的间隔是 6 小时，不强制的话
-    // 刚更新完的插件会顶着一小时前的旧结论继续显示「可更新」（点进去才发现没有）。
-    super::updates::wake(true);
     if let Ok(mut value) = state().lock() {
         value["active"] = json!(false);
         value["updatedAt"] = json!(crate::server::logging::now_ms());
         value["stage"] = json!(if result.is_ok() { "done" } else { "failed" });
         value["error"] = json!(result.err());
     }
+}
+
+fn allow_catalog_fallback(
+    expected_id: Option<&str>,
+    packages: &[super::storage::Package],
+    source: &super::source::InstallSource,
+) -> bool {
+    expected_id.is_none()
+        && !match source {
+            super::source::InstallSource::Github { repository, .. } => packages.iter().any(|package| {
+                matches!(
+                    &package.source,
+                    Some(super::storage::PackageSource::Github { repository: installed, .. })
+                        if installed.eq_ignore_ascii_case(repository)
+                )
+            }),
+            _ => false,
+        }
 }
 
 pub fn install(
@@ -66,11 +81,13 @@ pub fn install(
         return Err("安装脚本插件前必须确认信任来源；脚本并非操作系统沙箱".into());
     }
     let source = super::source::InstallSource::parse(&name, &version)?;
+    let before_registry = super::storage::read()?;
     if let Some(id) = &expected_id {
-        if !super::storage::read()?.packages.iter().any(|package| &package.id == id) {
+        if !before_registry.packages.iter().any(|package| &package.id == id) {
             return Err("待更新的脚本插件不存在".into());
         }
     }
+    let allow_fallback = allow_catalog_fallback(expected_id.as_deref(), &before_registry.packages, &source);
     let mut target = match &source {
         super::source::InstallSource::Local { path } => json!({ "source": format!("file:{}", path.display()) }),
         super::source::InstallSource::Npm { name, version } => json!({
@@ -88,7 +105,7 @@ pub fn install(
     crate::spawn_task(async move {
         let result = async {
             let executable = super::bun::ensure().await?;
-            let mut package = source.download().await?;
+            let (mut package, installed_latest) = source.download(allow_fallback).await?;
             super::dependencies::install(&package, &executable).await?;
             if expected_id.as_ref().is_some_and(|id| id != &package.id) {
                 return Err("下载的脚本插件包名与待更新插件不一致，未替换原插件".into());
@@ -109,7 +126,7 @@ pub fn install(
                 package.settings_schema = previous.settings_schema.clone();
                 package.provider_aliases = previous.provider_aliases.clone();
                 package.disabled_providers = previous.disabled_providers.clone();
-                *previous = package;
+                *previous = package.clone();
             } else {
                 if let Some(aliases) = after.identities.get(&package.id) {
                     package.provider_aliases = aliases.clone();
@@ -118,12 +135,20 @@ pub fn install(
                 if after.packages.len() >= 64 {
                     return Err("最多安装 64 个脚本插件".into());
                 }
-                after.packages.push(package);
+                after.packages.push(package.clone());
             }
-            switch(before, after, executable, None).await
+            switch(before, after, executable, None).await?;
+            Ok((package, installed_latest))
         }
         .await;
-        finished(result);
+        let finish_result = match result {
+            Ok((package, installed_latest)) => {
+                super::updates::record_installed(&package, installed_latest).await;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        };
+        finished(finish_result);
     });
     Ok(operation())
 }
@@ -146,14 +171,22 @@ pub fn change(
         "reload" => {
             if !package.enabled { return Err("插件已停用，请先启用后再重新加载".into()); }
         }
-        "enable" => package.enabled = enabled.ok_or("缺少启停状态")?,
+        "enable" => {
+            package.enabled = enabled.ok_or("缺少启停状态")?;
+            if let Some(provider_id) = package.single_provider_id().map(str::to_string) {
+                package.disabled_providers.retain(|id| id != &provider_id);
+            }
+        }
         "checkin" => return Err("签到及附带任务已默认允许，请在签到中心管理执行计划".into()),
         "provider" => {
             let provider = provider
                 .filter(|provider| package.providers.contains(provider))
                 .ok_or("提供商不属于该脚本插件")?;
+            let enabled = enabled.ok_or("缺少启停状态")?;
             package.disabled_providers.retain(|id| id != &provider);
-            if !enabled.ok_or("缺少启停状态")? {
+            if package.single_provider_id() == Some(provider.as_str()) {
+                package.enabled = enabled;
+            } else if !enabled {
                 package.disabled_providers.push(provider);
             }
         }
@@ -166,6 +199,7 @@ pub fn change(
         },
         _ => return Err("未知的脚本插件操作".into()),
     }
+    let remove_id = (action == "remove").then(|| id.clone());
     begin(&action, target)?;
     crate::spawn_task(async move {
         let result = async {
@@ -177,6 +211,11 @@ pub fn change(
             switch(before, after, executable, (action == "reload").then_some(id.as_str())).await
         }
         .await;
+        if result.is_ok() {
+            if let Some(id) = remove_id {
+                super::updates::remove_entry(&id).await;
+            }
+        }
         finished(result);
     });
     Ok(operation())
@@ -282,4 +321,45 @@ pub(super) async fn switch(
     crate::server::core::checkin_schedules::extend_plugin_providers_once();
     plugin_host::schedules::wake();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn catalog_fallback_disabled_for_updates_and_reinstalls() {
+        let installed = super::super::storage::Package {
+            id: "script-d72104d02a8d1e3c8fe14e59".into(),
+            name: "magpie-amazon-quick".into(),
+            version: "0.2.20".into(),
+            icon: None,
+            provider_icons: BTreeMap::new(),
+            source: Some(super::super::storage::PackageSource::Github {
+                repository: "3056810551/magpie-amazon-quick".into(),
+                reference: "main".into(),
+                commit: "8572d4704447d307ecd4709ab31029ae9ada61d8".into(),
+                sha256: "0".repeat(64),
+            }),
+            directory: "script-d72104d02a8d1e3c8fe14e59/dir".into(),
+            enabled: true,
+            installed_at: 0,
+            providers: Vec::new(),
+            disabled_providers: Vec::new(),
+            options: Value::Null,
+            provider_options: Value::Null,
+            settings_schema: Value::Null,
+            provider_aliases: BTreeMap::new(),
+            error: None,
+        };
+        let source = super::super::source::InstallSource::parse(
+            "github:3056810551/magpie-amazon-quick",
+            "main",
+        )
+        .unwrap();
+        assert!(!allow_catalog_fallback(Some(&installed.id), &[], &source));
+        assert!(!allow_catalog_fallback(None, &[installed], &source));
+        assert!(allow_catalog_fallback(None, &[], &source));
+    }
 }

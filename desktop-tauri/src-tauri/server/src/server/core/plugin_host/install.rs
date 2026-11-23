@@ -295,6 +295,28 @@ fn yes() -> bool {
     true
 }
 
+impl InstalledPack {
+    pub(super) fn single_provider_id(&self) -> Option<&str> {
+        match self.manifest_providers.as_slice() {
+            [provider] => Some(provider.id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// 单提供商包的启停以包级 `enabled` 为唯一真相：
+    /// 历史上允许「包启用、唯一提供商停用」，读入或写入时折合为包停用并恢复该项标记，
+    /// 既保留用户的停用选择，也避免再次打开包开关时被隐藏的子开关卡住。
+    pub(super) fn normalize_single_provider(&mut self) {
+        let Some(provider_id) = self.single_provider_id().map(str::to_string) else {
+            return;
+        };
+        if self.providers.get(&provider_id) == Some(&false) {
+            self.enabled = false;
+            self.providers.insert(provider_id, true);
+        }
+    }
+}
+
 /// 注册表文件（`plugins.json`）。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PackRegistry {
@@ -324,8 +346,13 @@ impl PackRegistry {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        match serde_json::from_str(&text) {
-            Ok(registry) => registry,
+        match serde_json::from_str::<Self>(&text) {
+            Ok(mut registry) => {
+                for pack in &mut registry.packs {
+                    pack.normalize_single_provider();
+                }
+                registry
+            }
             Err(e) => {
                 logging::log("Plugin", &format!("注册表损坏，按空表处理：{e}"));
                 Self::default()
@@ -578,6 +605,11 @@ pub fn set_pack_enabled(id: &str, enabled: bool) -> Result<(), String> {
     }
     let _change = super::packages::provenance::begin_file_change(&pack.id);
     pack.enabled = enabled;
+    if let Some(provider_id) = pack.single_provider_id().map(str::to_string) {
+        if pack.providers.get(&provider_id) == Some(&false) {
+            pack.providers.insert(provider_id, true);
+        }
+    }
     registry.save()?;
     Ok(())
 }
@@ -600,7 +632,12 @@ pub fn set_provider_enabled(id: &str, provider: &str, enabled: bool) -> Result<(
         if let Some(reason) = super::compatibility::installed_error(pack) { return Err(reason); }
     }
     let _change = super::packages::provenance::begin_file_change(&pack.id);
-    pack.providers.insert(provider.to_string(), enabled);
+    if pack.single_provider_id() == Some(provider) {
+        pack.enabled = enabled;
+        pack.providers.insert(provider.to_string(), true);
+    } else {
+        pack.providers.insert(provider.to_string(), enabled);
+    }
     registry.save()?;
     Ok(())
 }

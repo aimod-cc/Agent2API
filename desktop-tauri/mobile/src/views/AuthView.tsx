@@ -8,7 +8,7 @@ import {
   startOauthLoginUrl,
 } from '../core/auth'
 import { probe, storeApiKey, url } from '../core/client'
-import { apiBase, baseLabel, isPackaged, normalizeBase, serverIdentity } from '../core/servers'
+import { apiBase, baseLabel, isPackaged, normalizeBase, openExternalUrl, serverIdentity } from '../core/servers'
 import { store, useStore } from '../core/store'
 import { CommonCard, DashboardCard, ListGroup, ListItem, TonalChip } from '../ui/components'
 import { GlyphIcon } from '../ui/icons'
@@ -316,7 +316,7 @@ export function AuthGateView({ mode }: { mode: 'login' | 'key' }) {
     try {
       const origin = apiBase()
       const { state, authorizeUrl } = await startOauthLoginUrl(oauthProvider, origin)
-      window.open(authorizeUrl, '_blank', 'noopener,noreferrer')
+      void openExternalUrl(authorizeUrl)
       const startedAt = Date.now()
       while (Date.now() - startedAt < 180_000) {
         await new Promise(resolve => setTimeout(resolve, 1200))
