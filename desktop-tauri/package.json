@@ -1,6 +1,6 @@
 {
   "name": "agent2api-desktop-tauri",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "private": true,
   "description": "Agent2API 桌面端 — AI 路由网关与 Agent 客户端接管（Tauri）",
   "license": "AGPL-3.0-only",

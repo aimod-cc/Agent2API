@@ -1,6 +1,6 @@
 {
   "name": "agent2api-mobile",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "private": true,
   "type": "module",
   "description": "Agent2API 手机端 —— 响应式 Web / PWA，消费 ui-kit（Base UI + Tailwind v4），产物落 ui/m/",
