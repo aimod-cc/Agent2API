@@ -1355,8 +1355,8 @@ mod truncation_criteria {
         assert_eq!(9, round.completion, "同一轮里后到的 usage 是最终值");
 
         let rounds = [
-            usage::UsageTokens { prompt: 10, completion: 9, total: 19, cache_read: 4, credit: Some(0.25) },
-            usage::UsageTokens { prompt: 20, completion: 5, total: 25, cache_read: 0, credit: Some(0.5) },
+            usage::UsageTokens { prompt: 10, completion: 9, total: 19, cache_read: 4, cache_creation: 0, cache_creation_1h: 0, credit: Some(0.25) },
+            usage::UsageTokens { prompt: 20, completion: 5, total: 25, cache_read: 0, cache_creation: 0, cache_creation_1h: 0, credit: Some(0.5) },
         ];
         let merged = sum_tokens(&rounds);
         assert_eq!(30, merged.prompt, "每轮的 prompt 都含全部历史，真实成本按轮求和");

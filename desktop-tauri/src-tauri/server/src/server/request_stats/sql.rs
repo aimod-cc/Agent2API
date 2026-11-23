@@ -646,6 +646,18 @@ pub(super) fn select_between(
     Ok(out)
 }
 
+/// 供按日重算费用与折叠日报使用的窄列集合：与 [`REQUEST_COLUMNS`] 保持完全一致的 34 列序号
+/// （复用 [`decode_request`]），但跳过 `attempt_details`、`sensitive_hits` 及完整 `route` 大 JSON 文本解析。
+const REQUEST_REPRICE_COLUMNS: &str = "id, ts, model, account_id, account_name, status, duration_ms, \
+     first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
+     cache_read_tokens, provider, client_model, upstream_model, '[]' AS attempt_details, '[]' AS sensitive_hits, \
+     client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, \
+     CASE WHEN route IS NOT NULL AND instr(route, 'visionCompatibility') > 0 AND json_valid(route) \
+          THEN json_object('visionCompatibility', json_object('mode', json_extract(route, '$.visionCompatibility.mode'))) \
+          ELSE NULL END AS route, \
+     client, api_key_id, api_key_name, api_key_source, credit, client_evidence, \
+     cache_creation_tokens, cache_creation_1h_tokens, cost_usd";
+
 pub(super) fn select_between_with_row_id(
     conn: &Connection,
     from_ms: i64,
@@ -654,7 +666,7 @@ pub(super) fn select_between_with_row_id(
 ) -> rusqlite::Result<Vec<(i64, RequestEntry)>> {
     let filter = if exclude_tests { " AND is_test = 0" } else { "" };
     let sql = format!(
-        "SELECT {REQUEST_COLUMNS}, row_id FROM requests WHERE ts >= ?1 AND ts <= ?2{filter} \
+        "SELECT {REQUEST_REPRICE_COLUMNS}, row_id FROM requests WHERE ts >= ?1 AND ts <= ?2{filter} \
          ORDER BY ts ASC, row_id ASC"
     );
     let mut stmt = conn.prepare(&sql)?;

@@ -35,81 +35,107 @@ use super::legacy;
 /// 为什么需要显式标记（而不是像账号维度回填那样从数据本身检测），见
 /// `RequestStats::remap_model_dimension_once` 的说明。
 const MODEL_UPSTREAM_MARKER: &str = "modelUsageUpstreamRemapped";
-const MODEL_PRICING_BACKFILL_MARKER: &str = "modelPricingBackfilled";
+pub(super) const MODEL_PRICING_BACKFILL_MARKER: &str = "modelPricingBackfilled";
 
-pub(super) fn backfill_pricing_once(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
-    if legacy::marker_present(conn, MODEL_PRICING_BACKFILL_MARKER)? {
-        return Ok(());
+/// 收集需要重算费用的本地自然日列表（若 `only_if_unmarked` 为真且已完成过一次性回填，则返回 `Ok(None)`）。
+pub(super) fn pricing_candidate_days(
+    conn: &rusqlite::Connection,
+    only_if_unmarked: bool,
+) -> rusqlite::Result<Option<Vec<NaiveDate>>> {
+    if only_if_unmarked && legacy::marker_present(conn, MODEL_PRICING_BACKFILL_MARKER)? {
+        return Ok(None);
     }
-    let _ = reprice_intact_days(conn)?;
+    let mut days: BTreeSet<NaiveDate> = BTreeSet::new();
+    let mut stmt = conn.prepare("SELECT DISTINCT ts FROM requests WHERE status <> 0")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let ts: i64 = row.get(0)?;
+        days.insert(day_of(ts));
+    }
+    Ok(Some(days.into_iter().collect()))
+}
+
+/// 单日费用重算与聚合行同步（单日独立短事务，直接复用内存里更新后的明细折叠日报，避免二次全表读取与跨天长事务锁库）。
+pub(super) fn reprice_single_day(
+    conn: &mut rusqlite::Connection,
+    day: NaiveDate,
+    settings: &crate::server::core::model_pricing::ModelPricingSettings,
+) -> rusqlite::Result<Option<String>> {
+    let key = date_key(day);
+    let start = local_midnight_ms(day);
+    let end = local_midnight_ms(day + ChronoDuration::days(1)).saturating_sub(1);
+    let tx = conn.unchecked_transaction()?;
+    let mut items = sql::select_between_with_row_id(&tx, start, end, false)?;
+    if items.is_empty() {
+        tx.commit()?;
+        return Ok(None);
+    }
+    let mut non_test_count = 0i64;
+    for (row_id, entry) in &mut items {
+        if entry.status == 0 {
+            continue;
+        }
+        if !entry.is_test {
+            non_test_count += 1;
+        }
+        let vision_mode = entry
+            .route
+            .pointer("/visionCompatibility/mode")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let failed = !entry.is_success();
+        let new_cost = if failed && vision_mode != "assist_call" {
+            None
+        } else {
+            crate::server::core::model_pricing::calc_request_cost_usd(
+                settings,
+                &entry.provider,
+                &entry.model,
+                &entry.upstream_model,
+                entry.ts,
+                entry.prompt_tokens,
+                entry.completion_tokens,
+                entry.cache_read_tokens,
+                entry.cache_creation_tokens,
+                entry.cache_creation_1h_tokens,
+            )
+            .flatten()
+        };
+        if new_cost != entry.cost_usd {
+            sql::update_request_cost(&tx, *row_id, new_cost)?;
+            entry.cost_usd = new_cost;
+        }
+    }
+    let aggregate_requests: i64 = tx
+        .query_row(
+            "SELECT requests FROM request_daily WHERE date = ?1",
+            rusqlite::params![key],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let updated_day = if non_test_count >= aggregate_requests && aggregate_requests > 0 {
+        let mut rebuilt = DailyEntry::new(key.clone());
+        for (_, item) in &items {
+            if !item.is_test && item.status != 0 {
+                fold_into_daily(&mut rebuilt, item);
+            }
+        }
+        daily::upsert_daily(&tx, &rebuilt)?;
+        Some(key)
+    } else {
+        None
+    };
+    tx.commit()?;
+    Ok(updated_day)
+}
+
+pub(super) fn mark_pricing_backfilled(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO kv (key, value) VALUES (?1, 'true')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![MODEL_PRICING_BACKFILL_MARKER],
     )?;
     Ok(())
-}
-
-pub(super) fn reprice_intact_days(conn: &mut rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
-    let settings = crate::server::core::model_pricing::settings();
-    let tx = conn.unchecked_transaction()?;
-    let mut days: BTreeSet<NaiveDate> = BTreeSet::new();
-    {
-        let mut stmt = tx.prepare("SELECT DISTINCT ts FROM requests WHERE status <> 0")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let ts: i64 = row.get(0)?;
-            days.insert(day_of(ts));
-        }
-    }
-    let mut updated = Vec::new();
-    for day in days {
-        let key = date_key(day);
-        let start = local_midnight_ms(day);
-        let end = local_midnight_ms(day + ChronoDuration::days(1)).saturating_sub(1);
-        let items = sql::select_between_with_row_id(&tx, start, end, false)?;
-        let non_test_count = items.iter().filter(|(_, e)| !e.is_test && e.status != 0).count() as i64;
-        for (row_id, entry) in &items {
-            if entry.status == 0 {
-                continue;
-            }
-            let vision_mode = entry.route.pointer("/visionCompatibility/mode").and_then(Value::as_str).unwrap_or("");
-            let failed = !entry.is_success();
-            let new_cost = if failed && vision_mode != "assist_call" {
-                None
-            } else {
-                crate::server::core::model_pricing::calc_request_cost_usd(
-                    &settings,
-                    &entry.provider,
-                    &entry.model,
-                    &entry.upstream_model,
-                    entry.ts,
-                    entry.prompt_tokens,
-                    entry.completion_tokens,
-                    entry.cache_read_tokens,
-                    entry.cache_creation_tokens,
-                    entry.cache_creation_1h_tokens,
-                )
-                .flatten()
-            };
-            if new_cost != entry.cost_usd {
-                sql::update_request_cost(&tx, *row_id, new_cost)?;
-            }
-        }
-        let aggregate_requests: i64 = tx
-            .query_row(
-                "SELECT requests FROM request_daily WHERE date = ?1",
-                rusqlite::params![key],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if non_test_count >= aggregate_requests && aggregate_requests > 0 {
-            rebuild_day(&tx, day)?;
-            updated.push(key);
-        }
-    }
-    tx.commit()?;
-    Ok(updated)
 }
 
 /// [`RequestStats::remap_model_dimension_once`] 的库操作体：单事务完成

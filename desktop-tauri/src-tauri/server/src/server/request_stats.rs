@@ -119,7 +119,10 @@ use retention::RetentionBounds;
 pub use retention::Retention;
 // 拆到子模块的三样，这里引回：record / usage_summary 的折算入口、
 // remap 的库操作体、报表装配（均为 `pub(super)`，见 aggregate.rs 的模块头）
-use aggregate::{backfill_pricing_once, fold_into_daily, remap_model_days, reprice_intact_days, summarize};
+use aggregate::{
+    fold_into_daily, mark_pricing_backfilled, pricing_candidate_days, remap_model_days,
+    reprice_single_day, summarize,
+};
 use report::{entry_json, list_entry_json, provider_label, CACHE_WINDOWS};
 
 // CompactStart 在此 re-export：api::stats_api 的 compact 路由按它分派响应。
@@ -784,24 +787,44 @@ impl RequestStats {
     }
 
     pub fn backfill_pricing_once(&self) {
-        let outcome = {
-            let guard = self.guard();
-            self.with_conn_mut(&guard, backfill_pricing_once)
-        };
-        if outcome.is_some() {
-            crate::server::core::panel_events::notify_requests();
-        }
+        self.reprice_days_chunked(true);
     }
 
     pub fn reprice_recent_days(&self) {
-        let outcome = {
+        self.reprice_days_chunked(false);
+    }
+
+    fn reprice_days_chunked(&self, only_if_unmarked: bool) {
+        let days = {
             let guard = self.guard();
-            self.with_conn_mut(&guard, reprice_intact_days)
+            self.with_conn(&guard, |conn| pricing_candidate_days(conn, only_if_unmarked))
         };
-        if let Some(updated) = outcome {
-            if !updated.is_empty() {
-                crate::server::core::panel_events::notify_requests();
+        let Some(Some(days)) = days else {
+            return;
+        };
+        let settings = crate::server::core::model_pricing::settings();
+        let mut all_ok = true;
+        let mut any_updated = false;
+        for day in days {
+            let res = {
+                let guard = self.guard();
+                self.with_conn_mut(&guard, |conn| reprice_single_day(conn, day, &settings))
+            };
+            match res {
+                Some(Some(_)) => any_updated = true,
+                Some(None) => {}
+                None => {
+                    all_ok = false;
+                    break;
+                }
             }
+        }
+        if only_if_unmarked && all_ok {
+            let guard = self.guard();
+            let _ = self.with_conn(&guard, mark_pricing_backfilled);
+        }
+        if any_updated || (only_if_unmarked && all_ok) {
+            crate::server::core::panel_events::notify_requests();
         }
     }
 }

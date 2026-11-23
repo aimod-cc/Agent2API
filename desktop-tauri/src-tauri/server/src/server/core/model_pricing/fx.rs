@@ -50,15 +50,20 @@ static DB: OnceLock<Option<Db>> = OnceLock::new();
 static STATE: OnceLock<Mutex<FxState>> = OnceLock::new();
 
 pub fn install(db: Option<Db>) {
+    let loaded = db.as_ref().and_then(read_db_cache_from);
     let _ = DB.set(db);
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
+    guard.db_loaded = true;
+    if let Some(snapshot) = loaded {
+        guard.cached = Some(snapshot);
+    }
 }
 
 fn state() -> &'static Mutex<FxState> {
     STATE.get_or_init(|| Mutex::new(FxState::default()))
 }
 
-fn read_db_cache() -> Option<FxRateSnapshot> {
-    let db = DB.get()?.as_ref()?;
+fn read_db_cache_from(db: &Db) -> Option<FxRateSnapshot> {
     let raw: Option<String> = db.with(|conn: &Connection| {
         conn.query_row(
             "SELECT value FROM kv WHERE key = ?1",
@@ -85,16 +90,13 @@ fn write_db_cache(snapshot: &FxRateSnapshot) {
 }
 
 /// 立即返回当前可用的汇率，并在过期且未处于失败冷却期时后台异步刷新。
+///
+/// 不在读取路径上访问 `Db`（缓存已在 `install` 时装入），避免调用方持有数据库锁时重入死锁。
 pub fn current_rate_soon() -> FxRateSnapshot {
     let now = logging::now_ms();
     let (snapshot, should_refresh) = {
         let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
-        if !guard.db_loaded {
-            guard.db_loaded = true;
-            if let Some(loaded) = read_db_cache() {
-                guard.cached = Some(loaded);
-            }
-        }
+        guard.db_loaded = true;
         let current = guard.cached.clone().unwrap_or(FxRateSnapshot {
             rate: FX_FALLBACK,
             updated_at: 0,

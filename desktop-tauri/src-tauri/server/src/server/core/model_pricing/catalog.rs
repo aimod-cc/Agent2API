@@ -54,7 +54,18 @@ static INDEX: OnceLock<RwLock<Arc<BuiltCatalogIndex>>> = OnceLock::new();
 static REFRESH: OnceLock<Mutex<RefreshGuard>> = OnceLock::new();
 
 pub fn install(db: Option<Db>) {
+    let loaded = db.as_ref().and_then(read_db_catalog_from);
     let _ = DB.set(db);
+    {
+        let mut guard = refresh_lock().lock().unwrap_or_else(|e| e.into_inner());
+        guard.db_loaded = true;
+    }
+    if let Some(cached) = loaded {
+        let built = Arc::new(build_index(&cached));
+        if let Ok(mut w) = index_lock().write() {
+            *w = built;
+        }
+    }
 }
 
 fn index_lock() -> &'static RwLock<Arc<BuiltCatalogIndex>> {
@@ -65,19 +76,14 @@ fn refresh_lock() -> &'static Mutex<RefreshGuard> {
     REFRESH.get_or_init(|| Mutex::new(RefreshGuard::default()))
 }
 
+/// 返回内存中的价格目录索引；若过期则在后台触发异步刷新。
+///
+/// 不在读取路径上访问 `Db`（持久化缓存已在 `install` 时装入），避免在数据库事务闭包内调用计价时重入 `Db` 互斥锁导致死锁。
 fn ensure_loaded() -> Arc<BuiltCatalogIndex> {
     let now = logging::now_ms();
     let trigger = {
         let mut guard = refresh_lock().lock().unwrap_or_else(|e| e.into_inner());
-        if !guard.db_loaded {
-            guard.db_loaded = true;
-            if let Some(cached) = read_db_catalog() {
-                let built = Arc::new(build_index(&cached));
-                if let Ok(mut w) = index_lock().write() {
-                    *w = built;
-                }
-            }
-        }
+        guard.db_loaded = true;
         let updated_at = index_lock()
             .read()
             .map(|r| r.updated_at)
@@ -102,8 +108,7 @@ fn ensure_loaded() -> Arc<BuiltCatalogIndex> {
         .unwrap_or_else(|e| Arc::clone(&e.into_inner()))
 }
 
-fn read_db_catalog() -> Option<CachedProviderPrices> {
-    let db = DB.get()?.as_ref()?;
+fn read_db_catalog_from(db: &Db) -> Option<CachedProviderPrices> {
     let raw: Option<String> = db.with(|conn: &Connection| {
         conn.query_row(
             "SELECT value FROM kv WHERE key = ?1",
