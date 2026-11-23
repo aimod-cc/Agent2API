@@ -8,7 +8,7 @@
 .log-filters #req-provider { max-width: 168px; }
 .log-filters #req-model { max-width: 200px; }
 
-/* 十三列：时间 / 提供商·账号 / 重试 / 状态 / 模型 / 客户端 / API Key / 用时 / 速度 / 积分 / 用量 / 错误 / 详情。
+/* 十四列：时间 / 提供商·账号 / 重试 / 状态 / 模型 / 客户端 / API Key / 用时 / 速度 / 积分 / 费用 / 用量 / 错误 / 详情。
    时间、用时与速度定宽（等宽数字 + tabular-nums，竖着比对才齐），
    其余占弹性宽度（都是不定长内容，给固定宽度会互相挤）：
    模型 1.3fr（claude-sonnet-4-5 这类名字要放得下），
@@ -17,6 +17,7 @@
    「等待响应」四个字（约 76px）—— 68px 那一版会把它压成省略号。
    客户端 110px：最长的一档是「GitHub Copilot」（约 90px），再留一点余量。
    积分 72px：只放「0.06」这类两位小数读数（WorkBuddy 的 usage.credit）。
+   费用 82px：按模型计价表与汇率估算的请求费用（$0.0008 / ¥0.0058 这类读数）。
    详情列定宽（只有一个「详情」按钮或一个「-」）。
 
    --req-cols 是用户拖过的列宽（table-columns.js 写在 #req-list 上，靠继承
@@ -29,7 +30,7 @@
 .req-head {
   display: grid;
   grid-template-columns: var(--req-cols,
-    92px minmax(0, 1.1fr) 52px 96px minmax(0, 1.3fr) 110px 140px 96px 96px 72px minmax(0, 1.6fr) minmax(0, 1.2fr) 60px);
+    92px minmax(0, 1.1fr) 52px 96px minmax(0, 1.3fr) 110px 140px 96px 96px 72px 82px minmax(0, 1.6fr) minmax(0, 1.2fr) 60px);
   gap: 12px;
   align-items: center;
   padding: 10px 14px;
@@ -330,6 +331,21 @@
   white-space: nowrap;
 }
 .req-row .req-credit.is-empty { color: var(--text-3); }
+
+/* 费用：按模型计价表与汇率估算的请求费用，等宽 + tabular-nums + 默认右对齐，
+   窄拖后超出以省略号收住（完整明细在 title 里）；缺失/失败显示「—」（.is-empty）。 */
+.req-row .req-cost {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.req-row .req-cost.is-empty { color: var(--text-3); }
 
 /* 用量两行：in / out / all 与 缓存读取 / 命中率。
    等宽 + tabular-nums，超出省略（完整读数在 title 里）。 */

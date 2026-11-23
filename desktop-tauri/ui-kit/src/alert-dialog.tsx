@@ -48,7 +48,7 @@ function AlertDialogOverlay({ className, ...props }: AlertDialogPrimitive.Backdr
         'fixed inset-0 isolate z-[38] bg-mask backdrop-blur-[3px]',
         'transition-opacity duration-150',
         'data-open:animate-in data-open:fade-in-0',
-        'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards',
+        'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards data-closed:pointer-events-none',
         className
       )}
       {...props}
@@ -77,7 +77,7 @@ function AlertDialogContent({
           'overflow-hidden rounded-lg border border-border bg-surface shadow-3 outline-none',
           'transition-[opacity,transform] duration-200 [transition-timing-function:cubic-bezier(.2,.9,.3,1)]',
           'data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[.985] data-open:slide-in-from-bottom-2.5',
-          'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards',
+          'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards data-closed:pointer-events-none',
           className
         )}
         {...props}

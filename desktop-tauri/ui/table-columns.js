@@ -101,7 +101,20 @@
       id: 'models',
       mode: 'table',
       root: '.page[data-page="gateway"] table.models-table',
-      columns: ['check', 'model', 'rate', 'visibility', 'source', 'budget', 'caps', 'alias', 'act'].map(key => ({ key })),
+      // 与 models-panel-state.ts 的 COLUMNS、models-page.tsx 的 <colgroup> 顺序一致；
+      // 各列给出可读下限 minWidth，避免老用户旧缓存或窄屏下新增的「计价」等列被挤成条。
+      columns: [
+        { key: 'check', minWidth: 40 },
+        { key: 'model', minWidth: 165 },
+        { key: 'rate', minWidth: 64 },
+        { key: 'pricing', minWidth: 112 },
+        { key: 'visibility', minWidth: 66 },
+        { key: 'source', minWidth: 62 },
+        { key: 'budget', minWidth: 108 },
+        { key: 'caps', minWidth: 120 },
+        { key: 'alias', minWidth: 270 },
+        { key: 'act', minWidth: 92 },
+      ],
       columnsOf: visibleColumnsOf(() => window.wbModelsPanel?.visibleColumns?.()),
     },
     {
@@ -143,8 +156,10 @@
         { key: 'dur', sel: '.req-dur', track: '96px' },
         { key: 'speed', sel: '.req-speed', track: '96px' },
         // 积分消耗（WorkBuddy 的 usage.credit）：与 page-requests.css 的默认
-        // grid-template-columns 同步；数值右对齐，宽度只够放「0.06」这类读数。
+        // grid-template-columns 同步；宽度只够放「0.06」这类读数。
         { key: 'credit', sel: '.req-credit', track: '72px' },
+        // 预估费用：与 page-requests.css 的默认 grid-template-columns 同步
+        { key: 'cost', sel: '.req-cost', track: '82px' },
         { key: 'usage', sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
         { key: 'error', sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
         { key: 'detail', sel: '.req-detail', track: '60px' },
@@ -363,7 +378,7 @@
     const { overrides } = stateOf(table);
     let min = 0;
     for (const column of columns) {
-      min += overrides[column.key] || Math.max(MIN_WIDTH, fixedPxOf(table, column));
+      min += overrides[column.key] || Math.max(column.minWidth ?? MIN_WIDTH, fixedPxOf(table, column));
     }
     return Math.round(min);
   }

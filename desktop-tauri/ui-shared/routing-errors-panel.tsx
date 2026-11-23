@@ -98,7 +98,7 @@ export function RoutingErrorsPanel({ api, t, active = true, identity = '', reloa
     </PopoverContent></Popover></div>
     {view.legacy ? <p className='re-legacy'>{t('已保留原重试与失败休息参数，错误处理已统一；429 也计入换号上限，已有冷却记录不清除。')}</p> : null}
     {error ? <Alert variant='destructive'>{error}</Alert> : null}{message ? <p className='re-saved' role='status'>{message}</p> : null}
-    <div className='re-content-grid'><div className='re-primary'>
+    <div className='re-content-grid'><div className={`re-primary${tab === 'rules' ? ' is-rules' : ''}`}>
       {tab === 'rules' ? <>
         <div className='re-rules-switch'>
           <SegmentedControl

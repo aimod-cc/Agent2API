@@ -143,60 +143,6 @@ function providerFormState(id: string, previous: IslandState, direct = false): I
   return next
 }
 
-function AddAccountModal({
-  onClose,
-  onReady,
-  initialProvider,
-}: {
-  onClose: () => void
-  onReady: (handle: IslandHandle | null) => void
-  initialProvider?: string
-}): React.ReactElement {
-  const [state, setState] = React.useState<IslandState>(() => initialProvider
-    ? providerFormState(initialProvider, INITIAL, true) : INITIAL)
-  const { version, availability, refreshCustom } = useAddAccountCatalog()
-  const verifying = React.useSyncExternalStore(subscribeManagedCaptchaBusy, managedCaptchaBusy)
-  /**
-   * 表单层底栏的宿主节点：**在这里 createElement 出来**，而不是 ref + useState。
-   * 后者首帧拿到的是 null，段落会先把按钮渲染在原位、下一帧再 portal 进底栏 ——
-   * 节点一换，引擎在 `create()` 时绑上的 click 就丢了（sms-login.js /
-   * autoclaw-oauth.js 都在 create() 时按 id 绑按钮）。用这个身份稳定的节点，
-   * 首帧按钮就已经在底栏里，之后不再搬家。
-   */
-  const [formFootHost] = React.useState(() => {
-    const node = document.createElement('div')
-    node.className = 'acct-add-foot-host'
-    return node
-  })
-  const reset = React.useCallback(() => {
-    setState(previous => ({ ...previous, step: 'pick', direct: false, pickerRevision: previous.pickerRevision + 1 }))
-  }, [])
-
-  const openNewCustomForm = React.useCallback(() => {
-    setState(previous => providerFormState(NEW_PROVIDER_CARD_ID, previous))
-  }, [])
-
-  const openProvider = React.useCallback((provider: string) => {
-    const id = provider.trim()
-    if (!id || !requireAccountEntry(id)) return
-    setState(previous => providerFormState(id, previous, true))
-  }, [])
-
-  React.useEffect(() => {
-    onReady({ reset, openNewCustomForm, openProvider })
-    return () => onReady(null)
-  }, [onReady, reset, openNewCustomForm, openProvider])
-
-  // 打开时以主进程真实状态复位按钮（旧 openModal 里那一次 refresh）：
-  // 上次若在等待中被关窗，这里会重新可用
-  React.useEffect(() => {
-    void shared().wbWebLogin?.refresh?.()
-  }, [])
-
-  React.useEffect(() => {
-    if (state.step === 'form' && state.provider === CUSTOM_PROVIDER) void refreshCustom()
-  }, [state.step, state.provider, state.showToken, refreshCustom])
-
 function AddAccountFormContent({
   state,
   version,
@@ -413,6 +359,60 @@ function AddAccountFormContent({
     </DialogContent>
   )
 }
+
+function AddAccountModal({
+  onClose,
+  onReady,
+  initialProvider,
+}: {
+  onClose: () => void
+  onReady: (handle: IslandHandle | null) => void
+  initialProvider?: string
+}): React.ReactElement {
+  const [state, setState] = React.useState<IslandState>(() => initialProvider
+    ? providerFormState(initialProvider, INITIAL, true) : INITIAL)
+  const { version, availability, refreshCustom } = useAddAccountCatalog()
+  const verifying = React.useSyncExternalStore(subscribeManagedCaptchaBusy, managedCaptchaBusy)
+  /**
+   * 表单层底栏的宿主节点：**在这里 createElement 出来**，而不是 ref + useState。
+   * 后者首帧拿到的是 null，段落会先把按钮渲染在原位、下一帧再 portal 进底栏 ——
+   * 节点一换，引擎在 `create()` 时绑上的 click 就丢了（sms-login.js /
+   * autoclaw-oauth.js 都在 create() 时按 id 绑按钮）。用这个身份稳定的节点，
+   * 首帧按钮就已经在底栏里，之后不再搬家。
+   */
+  const [formFootHost] = React.useState(() => {
+    const node = document.createElement('div')
+    node.className = 'acct-add-foot-host'
+    return node
+  })
+  const reset = React.useCallback(() => {
+    setState(previous => ({ ...previous, step: 'pick', direct: false, pickerRevision: previous.pickerRevision + 1 }))
+  }, [])
+
+  const openNewCustomForm = React.useCallback(() => {
+    setState(previous => providerFormState(NEW_PROVIDER_CARD_ID, previous))
+  }, [])
+
+  const openProvider = React.useCallback((provider: string) => {
+    const id = provider.trim()
+    if (!id || !requireAccountEntry(id)) return
+    setState(previous => providerFormState(id, previous, true))
+  }, [])
+
+  React.useEffect(() => {
+    onReady({ reset, openNewCustomForm, openProvider })
+    return () => onReady(null)
+  }, [onReady, reset, openNewCustomForm, openProvider])
+
+  // 打开时以主进程真实状态复位按钮（旧 openModal 里那一次 refresh）：
+  // 上次若在等待中被关窗，这里会重新可用
+  React.useEffect(() => {
+    void shared().wbWebLogin?.refresh?.()
+  }, [])
+
+  React.useEffect(() => {
+    if (state.step === 'form' && state.provider === CUSTOM_PROVIDER) void refreshCustom()
+  }, [state.step, state.provider, state.showToken, refreshCustom])
 
   /** 第 1 步点一张卡：三种特殊取值分别落到自定义块的哪种模式（见 pickProvider 的旧注释） */
   const pick = React.useCallback((id: string) => {

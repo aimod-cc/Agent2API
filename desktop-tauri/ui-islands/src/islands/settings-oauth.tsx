@@ -1,8 +1,26 @@
 import * as React from 'react'
 import {
-  Alert, Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Switch, Textarea,
+  Alert,
+  Badge,
+  BadgeDot,
+  Button,
+  Card,
+  CardAction,
+  CardContent,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemMedia,
+  ItemTitle,
+  Switch,
 } from '@ui'
 import { errorMessage, openExternal, shared, toast } from './settings-model'
+import { GitHubMark, GoogleMark, RefreshIcon } from './settings-account-ui'
+import { OauthProviderDialog, type OauthProvider } from './settings-oauth-dialog'
 import { t } from '../i18n'
 
 export type BoundOauthAccount = {
@@ -32,27 +50,80 @@ export type PanelOauthSettingsData = {
   }
 }
 
+function OauthProviderTile({
+  provider,
+  saved,
+  locked,
+  onConfigure,
+  onToggle,
+}: {
+  provider: OauthProvider
+  saved: PanelOauthSettingsData | null
+  locked: boolean
+  onConfigure: () => void
+  onToggle: (next: boolean) => void
+}) {
+  const isGoogle = provider === 'google'
+  const label = isGoogle ? 'Google' : 'GitHub'
+  const item = saved?.[provider]
+  const bound = item?.boundAccounts || []
+  const allowList = provider === 'google' ? (saved?.google.allowedEmails || []) : (saved?.github.allowedUsers || [])
+  const configured = Boolean(item?.clientId?.trim()) && item?.clientSecretSet === true
+
+  let summary = t('未配置')
+  if (!saved) {
+    summary = t('读取中…')
+  } else if (bound.length > 0) {
+    const first = isGoogle
+      ? (bound[0].email || bound[0].name || bound[0].id)
+      : (bound[0].login || bound[0].email || bound[0].id)
+    summary = bound.length > 1
+      ? t('已绑定 {first} 等 {count} 项', { first, count: bound.length })
+      : t('已绑定 {name}', { name: first })
+  } else if (allowList.length > 0) {
+    summary = t('已配置 · 白名单 {count} 项', { count: allowList.length })
+  } else if (configured) {
+    summary = t('已配置凭据')
+  }
+
+  return (
+    <Item variant='outline' className='flex-wrap bg-surface px-3.5 py-2.5 sm:flex-nowrap'>
+      <ItemMedia>
+        <div className='flex size-8 items-center justify-center rounded-sm border border-hairline bg-surface-2'>
+          {isGoogle ? <GoogleMark size={16} /> : <GitHubMark size={16} />}
+        </div>
+      </ItemMedia>
+      <ItemContent>
+        <ItemTitle className='flex items-center gap-2 text-[13px] font-semibold'>
+          <span>{label}</span>
+          {item?.enabled ? <span className='size-1.5 rounded-full bg-success' aria-label={t('已启用')} /> : null}
+        </ItemTitle>
+        <ItemDescription className='truncate'>{summary}</ItemDescription>
+      </ItemContent>
+      <ItemActions>
+        <Button variant='outline' size='sm' disabled={locked} onClick={onConfigure}>
+          {t('配置')}
+        </Button>
+        <Switch
+          checked={item?.enabled === true}
+          disabled={locked}
+          aria-label={isGoogle ? t('启用 Google 登录') : t('启用 GitHub 登录')}
+          onCheckedChange={onToggle}
+        />
+      </ItemActions>
+    </Item>
+  )
+}
+
 export function OauthSettingsPanel() {
   const [saved, setSaved] = React.useState<PanelOauthSettingsData | null>(null)
   const [busy, setBusy] = React.useState(false)
-  const [bindingProvider, setBindingProvider] = React.useState<'google' | 'github' | null>(null)
+  const [bindingProvider, setBindingProvider] = React.useState<OauthProvider | null>(null)
   const [error, setError] = React.useState('')
-
-  const [publicBaseUrl, setPublicBaseUrl] = React.useState('')
   const [backendPort, setBackendPort] = React.useState<number>(3065)
-
-  const [googleEnabled, setGoogleEnabled] = React.useState(false)
-  const [googleClientId, setGoogleClientId] = React.useState('')
-  const [googleClientSecret, setGoogleClientSecret] = React.useState('')
-  const [googleEmails, setGoogleEmails] = React.useState('')
-
-  const [githubEnabled, setGithubEnabled] = React.useState(false)
-  const [githubClientId, setGithubClientId] = React.useState('')
-  const [githubClientSecret, setGithubClientSecret] = React.useState('')
-  const [githubUsers, setGithubUsers] = React.useState('')
+  const [dialogState, setDialogState] = React.useState<{ provider: OauthProvider; forceEnable: boolean } | null>(null)
 
   const pollTimerRef = React.useRef<number | null>(null)
-  const prefix = React.useId()
 
   const stopPolling = React.useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -68,17 +139,6 @@ export function OauthSettingsPanel() {
       throw new Error(t('未能读取第三方登录设置'))
     }
     setSaved(data)
-    setPublicBaseUrl(data.publicBaseUrl || '')
-
-    setGoogleEnabled(data.google.enabled === true)
-    setGoogleClientId(data.google.clientId || '')
-    setGoogleClientSecret('')
-    setGoogleEmails((data.google.allowedEmails || []).join('\n'))
-
-    setGithubEnabled(data.github.enabled === true)
-    setGithubClientId(data.github.clientId || '')
-    setGithubClientSecret('')
-    setGithubUsers((data.github.allowedUsers || []).join('\n'))
   }, [])
 
   const load = React.useCallback(async () => {
@@ -106,7 +166,7 @@ export function OauthSettingsPanel() {
     }
   }, [load])
 
-  const resolvedBaseOrigin = React.useMemo(() => {
+  const resolveBaseOrigin = React.useCallback((publicBaseUrl: string) => {
     const custom = publicBaseUrl.trim().replace(/\/+$/, '')
     if (custom) return custom
     const bridge = shared().workbuddyDesktop
@@ -118,59 +178,40 @@ export function OauthSettingsPanel() {
       return window.location.origin
     }
     return `http://127.0.0.1:${backendPort}`
-  }, [publicBaseUrl, backendPort])
+  }, [backendPort])
 
-  const callbackUrl = `${resolvedBaseOrigin}/api/panel/oauth/callback`
-
-  function buildFullPatch(): Record<string, unknown> {
-    return {
-      publicBaseUrl: publicBaseUrl.trim(),
-      google: {
-        enabled: googleEnabled,
-        clientId: googleClientId.trim(),
-        allowedEmails: googleEmails
-          .split(/[\n,，;；]/)
-          .map(s => s.trim())
-          .filter(Boolean),
-        ...(googleClientSecret.trim() ? { clientSecret: googleClientSecret.trim() } : {}),
-      },
-      github: {
-        enabled: githubEnabled,
-        clientId: githubClientId.trim(),
-        allowedUsers: githubUsers
-          .split(/[\n,，;；]/)
-          .map(s => s.trim())
-          .filter(Boolean),
-        ...(githubClientSecret.trim() ? { clientSecret: githubClientSecret.trim() } : {}),
-      },
-    }
-  }
-
-  async function save(patch: Record<string, unknown>, successMsg = t('第三方登录设置已保存')) {
+  async function save(
+    patch: Record<string, unknown>,
+    successMsg = t('第三方登录设置已保存'),
+    throwOnError = false,
+  ): Promise<boolean> {
     setBusy(true)
     setError('')
     try {
       const result = await shared().workbuddyDesktop?.saveOauthSettings?.(patch) as PanelOauthSettingsData | undefined
       accept(result)
       toast(successMsg, 'ok')
+      return true
     } catch (failure) {
       const msg = errorMessage(failure)
+      if (throwOnError) throw failure
       setError(msg)
       toast(msg, 'err')
+      return false
     } finally {
       setBusy(false)
     }
   }
 
-  async function startBind(provider: 'google' | 'github') {
+  async function startBind(provider: OauthProvider, origin: string, patch: Record<string, unknown>) {
     stopPolling()
     setBindingProvider(provider)
     setError('')
     try {
       const res = await shared().workbuddyDesktop?.startOauthBind?.({
         provider,
-        origin: resolvedBaseOrigin,
-        patch: buildFullPatch(),
+        origin,
+        patch,
       }) as { state?: string; authorizeUrl?: string } | undefined
       if (!res?.state || !res?.authorizeUrl) {
         throw new Error(t('未能生成授权地址'))
@@ -223,265 +264,108 @@ export function OauthSettingsPanel() {
         })()
       }, 1200)
     } catch (failure) {
-      const msg = errorMessage(failure)
-      setError(msg)
-      toast(msg, 'err')
       setBindingProvider(null)
+      throw failure
     }
   }
 
-  async function copyCallbackUrl() {
-    try {
-      await navigator.clipboard.writeText(callbackUrl)
-      toast(t('回调地址已复制'), 'ok')
-    } catch {
-      toast(callbackUrl, 'warn')
+  async function handleToggle(provider: OauthProvider, next: boolean) {
+    if (!saved || busy) return
+    const item = saved[provider]
+    const label = provider === 'google' ? 'Google' : 'GitHub'
+    const configured = Boolean(item.clientId.trim()) && item.clientSecretSet === true
+    if (next && !configured) {
+      setDialogState({ provider, forceEnable: true })
+      toast(t('请先填写 {provider} 应用凭据', { provider: label }), 'warn')
+      return
     }
+    await save(
+      { [provider]: { enabled: next } },
+      next ? t('已开启 {provider} 登录', { provider: label }) : t('已关闭 {provider} 登录', { provider: label }),
+    )
   }
 
   const locked = busy || !saved
+  const anyEnabled = saved !== null && (saved.google.enabled || saved.github.enabled)
+  const customBaseUrl = saved?.publicBaseUrl?.trim() || ''
 
   return (
-    <Card render={<section />} className='panel'>
-      <CardHeader className='flex-row items-center justify-between gap-3'>
-        <div className='flex items-center gap-2'>
-          <CardTitle>{t('第三方登录 (OAuth)')}</CardTitle>
-          {saved && (saved.google.enabled || saved.github.enabled) ? (
-            <Badge variant='success'>{t('已启用')}</Badge>
-          ) : (
-            <Badge variant='outline'>{t('未启用')}</Badge>
-          )}
-        </div>
-        <Button variant='ghost' size='sm' disabled={busy} onClick={() => void load()}>
-          {t('刷新')}
-        </Button>
-      </CardHeader>
-
-      <CardContent className='panel-body flex flex-col gap-4'>
-        <div className='space-y-1.5'>
-          <div className='flex items-center justify-between gap-2'>
-            <Label htmlFor={`${prefix}-base`}>{t('面板外部访问地址（反代或自定义域名时填写，留空自动使用当前地址）')}</Label>
-            <Button variant='outline' size='sm' onClick={() => void copyCallbackUrl()}>
-              {t('复制回调地址')}
+    <>
+      <Card render={<section />} className='panel'>
+        <CardHeader>
+          <div className='flex flex-wrap items-center gap-2'>
+            <CardTitle>{t('第三方登录 (OAuth)')}</CardTitle>
+            {anyEnabled ? (
+              <Badge variant='success'>
+                <BadgeDot />
+                {t('已启用')}
+              </Badge>
+            ) : (
+              <Badge variant='outline'>{t('未启用')}</Badge>
+            )}
+          </div>
+          <CardAction>
+            <Button variant='outline' size='sm' disabled={busy} onClick={() => void load()}>
+              <RefreshIcon />
+              {t('刷新')}
             </Button>
-          </div>
-          <Input
-            id={`${prefix}-base`}
-            value={publicBaseUrl}
-            disabled={locked}
-            placeholder='https://panel.example.com'
-            onChange={e => setPublicBaseUrl(e.target.value)}
-          />
-          <p className='m-0 text-xs text-muted-foreground'>
-            {t('请在 Google / GitHub OAuth 应用中登记回调地址：')}
-            <code className='ml-1 select-all rounded bg-muted px-1.5 py-0.5 text-[11.5px]'>
-              {callbackUrl}
-            </code>
-          </p>
-        </div>
+          </CardAction>
+        </CardHeader>
 
-        {/* Google OAuth */}
-        <div className='rounded-md border border-hairline bg-surface-2 p-3.5 flex flex-col gap-3'>
-          <div className='flex items-center justify-between gap-3'>
-            <div className='flex items-center gap-2'>
-              <span className='text-[13.5px] font-semibold'>Google</span>
-              <Badge variant={saved?.google.enabled ? 'success' : 'outline'}>
-                {saved?.google.enabled ? t('已启用') : t('已关闭')}
-              </Badge>
-            </div>
-            <Switch
-              id={`${prefix}-g-enable`}
-              checked={googleEnabled}
-              disabled={locked}
-              onCheckedChange={setGoogleEnabled}
+        <CardContent className='flex flex-col gap-3'>
+          <div className='grid grid-cols-1 gap-3 lg:grid-cols-2'>
+            <OauthProviderTile
+              provider='google'
+              saved={saved}
+              locked={locked}
+              onConfigure={() => setDialogState({ provider: 'google', forceEnable: false })}
+              onToggle={next => void handleToggle('google', next)}
+            />
+            <OauthProviderTile
+              provider='github'
+              saved={saved}
+              locked={locked}
+              onConfigure={() => setDialogState({ provider: 'github', forceEnable: false })}
+              onToggle={next => void handleToggle('github', next)}
             />
           </div>
 
-          <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
-            <div className='space-y-1.5'>
-              <Label htmlFor={`${prefix}-g-id`}>Client ID</Label>
-              <Input
-                id={`${prefix}-g-id`}
-                value={googleClientId}
-                disabled={locked}
-                placeholder='xxxx.apps.googleusercontent.com'
-                onChange={e => setGoogleClientId(e.target.value)}
-              />
-            </div>
-            <div className='space-y-1.5'>
-              <Label htmlFor={`${prefix}-g-secret`}>Client Secret</Label>
-              <Input
-                id={`${prefix}-g-secret`}
-                type='password'
-                autoComplete='new-password'
-                value={googleClientSecret}
-                disabled={locked}
-                placeholder={
-                  saved?.google.clientSecretSet
-                    ? t('已保存，留空则不修改')
-                    : t('输入 Google Client Secret')
-                }
-                onChange={e => setGoogleClientSecret(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className='space-y-1.5'>
-            <div className='flex items-center justify-between gap-2'>
-              <Label htmlFor={`${prefix}-g-emails`}>{t('允许登录的 Google 邮箱（每行一个，或点击右侧跳转绑定）')}</Label>
-              <Button
-                variant='outline'
-                size='sm'
-                disabled={
-                  locked
-                  || bindingProvider !== null
-                  || !googleClientId.trim()
-                  || (!googleClientSecret.trim() && !saved?.google.clientSecretSet)
-                }
-                onClick={() => void startBind('google')}
-              >
-                {bindingProvider === 'google' ? t('等待授权绑定…') : t('跳转绑定当前 Google 账号')}
-              </Button>
-            </div>
-            <Textarea
-              id={`${prefix}-g-emails`}
-              rows={2}
-              value={googleEmails}
-              disabled={locked}
-              placeholder='yourname@gmail.com'
-              onChange={e => setGoogleEmails(e.target.value)}
-            />
-          </div>
-
-          {saved?.google.boundAccounts && saved.google.boundAccounts.length > 0 ? (
-            <div className='flex flex-wrap items-center gap-2'>
-              <span className='text-xs text-muted-foreground'>{t('已绑定：')}</span>
-              {saved.google.boundAccounts.map(acc => (
-                <Badge key={acc.id} variant='outline' className='flex items-center gap-1.5'>
-                  <span>{acc.email || acc.name || acc.id}</span>
-                  <button
-                    type='button'
-                    className='ml-1 cursor-pointer border-0 bg-transparent p-0 text-muted-foreground hover:text-destructive'
-                    disabled={locked}
-                    onClick={() =>
-                      void save({ google: { unbindId: acc.id } }, t('已解除 Google 账号绑定'))
-                    }
-                  >
-                    ×
-                  </button>
-                </Badge>
-              ))}
-            </div>
+          {error ? (
+            <Alert variant='destructive' className='whitespace-pre-wrap break-words'>
+              {error}
+            </Alert>
           ) : null}
-        </div>
+        </CardContent>
 
-        {/* GitHub OAuth */}
-        <div className='rounded-md border border-hairline bg-surface-2 p-3.5 flex flex-col gap-3'>
-          <div className='flex items-center justify-between gap-3'>
-            <div className='flex items-center gap-2'>
-              <span className='text-[13.5px] font-semibold'>GitHub</span>
-              <Badge variant={saved?.github.enabled ? 'success' : 'outline'}>
-                {saved?.github.enabled ? t('已启用') : t('已关闭')}
-              </Badge>
-            </div>
-            <Switch
-              id={`${prefix}-gh-enable`}
-              checked={githubEnabled}
-              disabled={locked}
-              onCheckedChange={setGithubEnabled}
-            />
-          </div>
-
-          <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
-            <div className='space-y-1.5'>
-              <Label htmlFor={`${prefix}-gh-id`}>Client ID</Label>
-              <Input
-                id={`${prefix}-gh-id`}
-                value={githubClientId}
-                disabled={locked}
-                placeholder='Iv1.xxxx / Ov23li...'
-                onChange={e => setGithubClientId(e.target.value)}
-              />
-            </div>
-            <div className='space-y-1.5'>
-              <Label htmlFor={`${prefix}-gh-secret`}>Client Secret</Label>
-              <Input
-                id={`${prefix}-gh-secret`}
-                type='password'
-                autoComplete='new-password'
-                value={githubClientSecret}
-                disabled={locked}
-                placeholder={
-                  saved?.github.clientSecretSet
-                    ? t('已保存，留空则不修改')
-                    : t('输入 GitHub Client Secret')
-                }
-                onChange={e => setGithubClientSecret(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className='space-y-1.5'>
-            <div className='flex items-center justify-between gap-2'>
-              <Label htmlFor={`${prefix}-gh-users`}>{t('允许登录的 GitHub 用户名（每行一个，或点击右侧跳转绑定）')}</Label>
-              <Button
-                variant='outline'
-                size='sm'
-                disabled={
-                  locked
-                  || bindingProvider !== null
-                  || !githubClientId.trim()
-                  || (!githubClientSecret.trim() && !saved?.github.clientSecretSet)
-                }
-                onClick={() => void startBind('github')}
-              >
-                {bindingProvider === 'github' ? t('等待授权绑定…') : t('跳转绑定当前 GitHub 账号')}
-              </Button>
-            </div>
-            <Textarea
-              id={`${prefix}-gh-users`}
-              rows={2}
-              value={githubUsers}
-              disabled={locked}
-              placeholder='octocat'
-              onChange={e => setGithubUsers(e.target.value)}
-            />
-          </div>
-
-          {saved?.github.boundAccounts && saved.github.boundAccounts.length > 0 ? (
-            <div className='flex flex-wrap items-center gap-2'>
-              <span className='text-xs text-muted-foreground'>{t('已绑定：')}</span>
-              {saved.github.boundAccounts.map(acc => (
-                <Badge key={acc.id} variant='outline' className='flex items-center gap-1.5'>
-                  <span>{acc.login || acc.email || acc.id}</span>
-                  <button
-                    type='button'
-                    className='ml-1 cursor-pointer border-0 bg-transparent p-0 text-muted-foreground hover:text-destructive'
-                    disabled={locked}
-                    onClick={() =>
-                      void save({ github: { unbindId: acc.id } }, t('已解除 GitHub 账号绑定'))
-                    }
-                  >
-                    ×
-                  </button>
-                </Badge>
-              ))}
-            </div>
-          ) : null}
-        </div>
-
-        {error ? (
-          <Alert variant='destructive' className='whitespace-pre-wrap break-words'>
-            {error}
-          </Alert>
+        {customBaseUrl ? (
+          <CardFooter className='bg-surface-2/60'>
+            <span>{t('外部访问地址：')}</span>
+            <code className='font-mono text-[11.5px] text-foreground break-all'>{customBaseUrl}</code>
+          </CardFooter>
         ) : null}
+      </Card>
 
-        <div className='flex items-center justify-end'>
-          <Button disabled={locked} onClick={() => void save(buildFullPatch())}>
-            {busy ? t('保存中…') : t('保存')}
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+      <OauthProviderDialog
+        provider={dialogState?.provider ?? null}
+        open={dialogState !== null}
+        forceEnable={dialogState?.forceEnable === true}
+        saved={saved}
+        busy={busy}
+        bindingProvider={bindingProvider}
+        resolveBaseOrigin={resolveBaseOrigin}
+        onOpenChange={open => {
+          if (!open) setDialogState(null)
+        }}
+        onSave={patch => save(patch, t('第三方登录设置已保存'), true)}
+        onBind={startBind}
+        onUnbind={async (provider, accountId) => {
+          await save(
+            { [provider]: { unbindId: accountId } },
+            provider === 'google' ? t('已解除 Google 账号绑定') : t('已解除 GitHub 账号绑定'),
+            true,
+          )
+        }}
+      />
+    </>
   )
 }

@@ -213,7 +213,7 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
           <DialogTitle>{t('模型计价设置 · {model}', { model: context.modelId })}</DialogTitle>
         </DialogHeader>
         <DialogBody className='flex flex-col gap-3'>
-          <div className='flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-xs'>
+          <div className='flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-[var(--surface-2)] px-3 py-2 text-xs'>
             <div className='flex items-center gap-2'>
               <Badge variant='outline' shape='tag'>
                 {context.pricing?.priced ? pricingSourceLabel(context.pricing.source) : t('未定价')}
@@ -297,7 +297,7 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
                 }])}>{t('＋ 添加长上下文阶梯价')}</Button>
               </div>
               {tiers.length > 0 ? (
-                <div className='flex flex-col gap-2 rounded-md border border-[var(--line)] p-2.5'>
+                <div className='flex flex-col gap-2 rounded-md border border-border p-2.5'>
                   {tiers.map((tier, idx) => (
                     <div key={idx} className='grid grid-cols-3 gap-2 items-end sm:grid-cols-6'>
                       <Field>

@@ -519,31 +519,30 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
         }
         return (
           <TableCell className={cellClass('cell-pricing', column.align)}>
-            <button
+            <Button
+              size='default'
+              variant='ghost'
               type='button'
-              className={cn(
-                'inline-flex flex-col items-start gap-0.5 rounded px-1.5 py-0.5 text-left text-xs transition hover:bg-[var(--surface-2)]',
-                !priced && 'text-[var(--text-3)]',
-              )}
+              className='caps-open pricing-open'
               title={titleLines.join('\n')}
               onClick={() => setPricingTarget(model)}
             >
               {priced && eff ? (
                 <>
-                  <span className='font-mono text-[11.5px] font-medium whitespace-nowrap'>
+                  <span className='max-w-full truncate font-mono text-[11.5px] font-medium'>
                     {eff.input === 0 && eff.output === 0
                       ? t('免费')
                       : `${formatUnitPrice(eff.input, pricingDisplay.currency, pricingDisplay.exchangeRate)} / ${formatUnitPrice(eff.output, pricingDisplay.currency, pricingDisplay.exchangeRate)}`}
                   </span>
-                  <span className='text-[10.5px] text-[var(--text-3)] whitespace-nowrap'>
+                  <span className='max-w-full truncate text-[10.5px] text-[var(--text-3)]'>
                     {pricingSourceLabel(info?.source ?? null)}
                     {info?.inPeak ? ' · Peak 2×' : info?.activeWindowRate && info.activeWindowRate !== 1 ? ` · ×${info.activeWindowRate}` : info?.priceRate && info.priceRate !== 1 ? ` · ×${info.priceRate}` : ''}
                   </span>
                 </>
               ) : (
-                <span className='text-[11px] underline decoration-dashed underline-offset-2'>{t('未定价')}</span>
+                <span className='max-w-full truncate text-[11px] text-[var(--text-3)] underline decoration-dashed underline-offset-2'>{t('未定价')}</span>
               )}
-            </button>
+            </Button>
           </TableCell>
         )
       }

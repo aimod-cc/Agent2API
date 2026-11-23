@@ -3,7 +3,10 @@ import { mountOnPage } from '../island-lazy'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
+  Avatar,
+  AvatarFallback,
   Badge,
+  BadgeDot,
   Button,
   Collapsible,
   CollapsibleContent,
@@ -11,12 +14,21 @@ import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Field,
+  FieldLabel,
   Input,
   InputGroup,
   InputGroupInput,
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemMedia,
+  ItemTitle,
   Label,
   NavList,
   NavItem,
@@ -27,7 +39,13 @@ import {
   SelectTrigger,
   SelectValue,
   Switch,
-  CardHeader, Card, CardContent } from '@ui'
+  CardHeader,
+  Card,
+  CardContent,
+  CardTitle,
+  cn,
+} from '@ui'
+import { ChevronDownIcon, KeyIcon } from './settings-account-ui'
 import {
   CATEGORIES,
   CAPTCHA_POOL_FIELDS,
@@ -1166,64 +1184,101 @@ function storageBadge(state: StorageState): React.ReactNode {
  */
 function AccountPane({ snap }: { snap: SettingsSnapshot }) {
   const account = snap.account
+  const [resetOpen, setResetOpen] = React.useState(false)
+  const initial = (account.username?.trim().slice(0, 1) || 'A').toUpperCase()
 
   return (
     <>
       <Card render={<section />} className='panel'>
-        <PanelHead
-          title={t('管理员账号')}
-          badge={
-            account.status === 'loading'
-              ? <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>
-              : account.status === 'unavailable'
-                ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
-                : account.registered
-                  ? <StatusBadge tone='ok'>{t('已启用登录')}</StatusBadge>
-                  : <StatusBadge tone='idle'>{t('未注册')}</StatusBadge>
-          }
-          actions={
-            account.registered ? (
-              <Button
-                id='btn-account-change-password'
-                variant='outline'
-                onClick={() => openPasswordDialog()}
-              >
-                {t('修改密码')}
-              </Button>
-            ) : null
-          }
-        />
-        <CardContent className='panel-body'>
-          <div className='settings-state' id='account-username'>
-            {account.status === 'unavailable'
-              ? t('未能读取账户信息，请稍后重试')
-              : account.registered
-                ? t('当前管理员：{name}', { name: account.username || '—' })
-                : t('尚未注册管理员。开启「网关 → 网络访问 → 允许其他设备访问网关」时会引导注册，也可以从登录页注册。')}
+        <CardHeader>
+          <div className='flex flex-wrap items-center gap-2'>
+            <CardTitle>{t('管理员账号')}</CardTitle>
+            {account.status === 'loading' ? (
+              <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>
+            ) : account.status === 'unavailable' ? (
+              <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+            ) : account.registered ? (
+              <Badge variant='success'>
+                <BadgeDot />
+                {t('已启用登录')}
+              </Badge>
+            ) : (
+              <StatusBadge tone='idle'>{t('未注册')}</StatusBadge>
+            )}
           </div>
-          {account.registered ? (
-            <div className='hint'>
-              {t('修改密码需要输入当前密码；修改成功后，其他设备 / 浏览器上的登录会立即失效，当前这条会话保留。')}
-            </div>
-          ) : null}
+        </CardHeader>
+
+        <CardContent className='flex flex-col gap-3'>
+          {account.status === 'loading' ? (
+            <div className='settings-state' id='account-username'>—</div>
+          ) : account.status === 'unavailable' ? (
+            <Alert variant='destructive' id='account-username'>
+              {t('未能读取账户信息，请稍后重试')}
+            </Alert>
+          ) : account.registered ? (
+            <Item variant='outline' size='sm' className='flex-wrap bg-surface-2/60 px-3.5 py-2.5 sm:flex-nowrap'>
+              <ItemMedia>
+                <Avatar className='size-8'>
+                  <AvatarFallback className='border border-primary-bd bg-primary-soft text-[12.5px] font-semibold text-primary-fg'>
+                    {initial}
+                  </AvatarFallback>
+                </Avatar>
+              </ItemMedia>
+              <ItemContent>
+                <ItemTitle className='text-[13.5px] font-semibold' id='account-username'>
+                  {account.username || '—'}
+                </ItemTitle>
+                <ItemDescription>
+                  {t('修改密码后其他设备会话将失效，当前会话保留')}
+                </ItemDescription>
+              </ItemContent>
+              <ItemActions>
+                <Button
+                  id='btn-account-change-password'
+                  variant='outline'
+                  size='sm'
+                  onClick={() => openPasswordDialog()}
+                >
+                  <KeyIcon />
+                  {t('修改密码')}
+                </Button>
+              </ItemActions>
+            </Item>
+          ) : (
+            <Alert id='account-username'>
+              {t('尚未注册管理员。开启「网关 → 网络访问 → 允许其他设备访问网关」时会引导注册，也可以从登录页注册。')}
+            </Alert>
+          )}
+
+          <Collapsible open={resetOpen} onOpenChange={setResetOpen} className='border-t border-hairline pt-2'>
+            <CollapsibleTrigger
+              render={<button type='button' />}
+              className='flex w-full cursor-pointer items-center justify-between gap-3 rounded-md border-0 bg-transparent px-2 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:shadow-focus focus-visible:outline-none'
+            >
+              <span className='text-[12.5px] font-medium text-subtle'>
+                {t('忘记密码？查看重置管理员说明')}
+              </span>
+              <ChevronDownIcon
+                size={14}
+                className={cn('shrink-0 text-muted-foreground transition-transform duration-150', resetOpen && 'rotate-180')}
+              />
+            </CollapsibleTrigger>
+
+            <CollapsibleContent keepMounted className='mt-2 flex flex-col gap-2.5 px-2'>
+              <div className='hint'>
+                {t('忘记密码时无法在界面里找回：需要停掉程序后，从数据库删除管理员记录（kv 表的 panelAdmin 键），重启后按首次使用重新注册。具体命令与各形态的库文件路径见 docs 目录下的「重置管理员」文档。')}
+              </div>
+              <Alert variant='destructive' className='danger-zone'>
+                <strong>{t('重置会清空管理员账号与密码，面板将回到「未注册」状态。')}</strong>
+              </Alert>
+            </CollapsibleContent>
+          </Collapsible>
         </CardContent>
       </Card>
 
       <CaptchaSettingsPanel disabled={snap.busy !== null} />
 
       <OauthSettingsPanel />
-
-      <Card render={<section />} className='panel'>
-        <PanelHead title={t('重置管理员')} />
-        <CardContent className='panel-body'>
-          <div className='hint'>
-            {t('忘记密码时无法在界面里找回：需要停掉程序后，从数据库删除管理员记录（kv 表的 panelAdmin 键），重启后按首次使用重新注册。具体命令与各形态的库文件路径见 docs 目录下的「重置管理员」文档。')}
-          </div>
-          <Alert variant='destructive' className='danger-zone'>
-            <strong>{t('重置会清空管理员账号与密码，面板将回到「未注册」状态。')}</strong>
-          </Alert>
-        </CardContent>
-      </Card>
     </>
   )
 }
@@ -1488,56 +1543,70 @@ function PasswordDialog({ password }: { password: { busy: boolean; error: string
 
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) closePasswordDialog() }}>
-      <DialogContent className='w-[min(440px,calc(100vw-48px))]' initialFocus={cancelRef}>
+      <DialogContent className='w-[min(430px,calc(100vw-48px))]' initialFocus={cancelRef}>
         <DialogHeader>
-          <DialogTitle>{t('修改密码')}</DialogTitle>
+          <div className='min-w-0 flex-1'>
+            <DialogTitle>{t('修改密码')}</DialogTitle>
+            <DialogDescription className='mt-0.5 text-[12px] text-subtle'>
+              {t('修改密码后其他设备会话将失效，当前会话保留')}
+            </DialogDescription>
+          </div>
         </DialogHeader>
-        <DialogBody>
+        <DialogBody className='gap-3.5'>
           {/* form 让浏览器的密码管理器能识别「旧密码 → 新密码」这一组 */}
           <form
+            className='flex flex-col gap-3.5'
             onSubmit={event => { event.preventDefault(); submit() }}
             autoComplete='on'
           >
-            <Label htmlFor='account-old-password' className='mb-[5px] block text-[12.5px]'>
-              {t('当前密码')}
-            </Label>
-            <Input
-              id='account-old-password'
-              type='password'
-              autoComplete='current-password'
-              placeholder={t('输入当前登录用的密码')}
-              value={oldValue}
-              disabled={busy}
-              onChange={event => setOldValue(event.target.value)}
-            />
-            <Label htmlFor='account-new-password' className='mt-3.5 mb-[5px] block text-[12.5px]'>
-              {t('新密码')}
-            </Label>
-            <Input
-              id='account-new-password'
-              type='password'
-              autoComplete='new-password'
-              placeholder={t('至少 8 位')}
-              value={newValue}
-              disabled={busy}
-              onChange={event => setNewValue(event.target.value)}
-            />
-            <Label htmlFor='account-repeat-password' className='mt-3.5 mb-[5px] block text-[12.5px]'>
-              {t('确认新密码')}
-            </Label>
-            <Input
-              id='account-repeat-password'
-              type='password'
-              autoComplete='new-password'
-              placeholder={t('再输入一次新密码')}
-              value={repeat}
-              disabled={busy}
-              onChange={event => setRepeat(event.target.value)}
-            />
+            <Field>
+              <FieldLabel htmlFor='account-old-password' className='text-[12.5px] font-medium text-foreground'>
+                {t('当前密码')}
+              </FieldLabel>
+              <Input
+                id='account-old-password'
+                type='password'
+                autoComplete='current-password'
+                placeholder={t('输入当前登录用的密码')}
+                value={oldValue}
+                disabled={busy}
+                onChange={event => setOldValue(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor='account-new-password' className='text-[12.5px] font-medium text-foreground'>
+                {t('新密码')}
+              </FieldLabel>
+              <Input
+                id='account-new-password'
+                type='password'
+                autoComplete='new-password'
+                placeholder={t('至少 8 位')}
+                value={newValue}
+                disabled={busy}
+                onChange={event => setNewValue(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor='account-repeat-password' className='text-[12.5px] font-medium text-foreground'>
+                {t('确认新密码')}
+              </FieldLabel>
+              <Input
+                id='account-repeat-password'
+                type='password'
+                autoComplete='new-password'
+                placeholder={t('再输入一次新密码')}
+                value={repeat}
+                disabled={busy}
+                onChange={event => setRepeat(event.target.value)}
+              />
+            </Field>
           </form>
-          <div className='mt-3 min-h-5 text-[13px] whitespace-pre-wrap text-destructive'>
-            {mismatch ? t('两次输入的新密码不一致') : (password?.error || '')}
-          </div>
+          {mismatch || password?.error ? (
+            <div className='text-[12.5px] whitespace-pre-wrap text-destructive'>
+              {mismatch ? t('两次输入的新密码不一致') : (password?.error || '')}
+            </div>
+          ) : null}
         </DialogBody>
         <DialogFooter>
           <div className='mr-auto' />

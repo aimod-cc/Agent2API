@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Badge, Button, Card, CardAction, CardContent, CardHeader, Collapsible, CollapsibleContent, CollapsibleTrigger } from '@ui'
-import { ErrorChoice, ErrorIcon } from './routing-errors-controls'
+import { ErrorIcon } from './routing-errors-controls'
+import { SearchableSelect } from './searchable-select'
 import { actionLabels, cooldownSummary, kindLabels, mergeProviderRules, type ErrorRule, type ErrorSettings, type ErrorTranslate, type PluginErrorRule, type ProviderRuleEntry } from './routing-errors-types'
 
 function ruleSummary(rule: ErrorRule, settings: ErrorSettings, t: ErrorTranslate): string {
@@ -77,10 +78,19 @@ export function ErrorProviderExceptions({
       .filter(group => group.entries.length > 0)
   }, [groupIds, effectiveFilter, mergedEntries, providerLabel])
 
-  return <Card>
+  return <Card className='re-exceptions-card'>
     <CardHeader className='re-exceptions-head'>
       {groupIds.length > 0 ? <div className='re-exceptions-filter'>
-        <ErrorChoice label={t('按提供商筛选')} value={effectiveFilter} options={filterOptions} onChange={setFilter} />
+        <SearchableSelect
+          value={effectiveFilter}
+          options={filterOptions}
+          onValueChange={setFilter}
+          displayValue={filterOptions.find(item => item.value === effectiveFilter)?.label || t('全部提供商')}
+          searchPlaceholder={t('搜索提供商…')}
+          emptyHint={t('没有匹配的选项')}
+          className='re-select'
+          aria-label={t('按提供商筛选')}
+        />
       </div> : null}
       <CardAction className='re-exceptions-actions'>
         <Button variant='outline' size='sm' onClick={() => onAdd(effectiveFilter === '__all__' ? (providers[0]?.id || '*') : effectiveFilter)}>

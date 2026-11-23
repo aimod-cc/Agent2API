@@ -69,7 +69,7 @@
 /* 右侧那排按钮（列设置 + 三颗操作）：不压缩、不内部换行 —— 允许压缩或折行的后果
    是它把自己拆开（按钮分两行），面板头就散了。空间不够时由 .panel-head 自己的
    flex-wrap 把整排挪到下一行。靠右由 .head-actions 自带的 margin-left:auto 完成。 */
-.page[data-page="gateway"] .panel-head .head-actions { flex: 0 0 auto; flex-wrap: nowrap; }
+.page[data-page="gateway"] .panel-head .head-actions { flex: 0 1 auto; max-width: 100%; flex-wrap: wrap; }
 /* 搜索框紧跟状态筛选（同为「看这张表」的控件），靠左；240px 是模型 ID / 别名
    能完整显示的宽度，这一页放得下 —— 曾为挤进同一行收到 180，不必了 */
 #models-search { flex: 0 0 auto; width: 240px; }
@@ -89,13 +89,12 @@
 .mm-titlebar {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
   width: 100%;
   padding: 13px 16px 5px;
 }
-/* 窄窗口下标题与动作按钮允许各占一行 */
-@media (max-width: 900px) { .mm-titlebar { flex-wrap: wrap; row-gap: 6px; } }
 .mm-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .mm-title h2 { margin: 0; font-size: 15px; font-weight: 650; line-height: 1.25; white-space: nowrap; }
 /* 统计：三个数加重量、文字用灰档 —— 读的是数字，不是句子 */
@@ -267,17 +266,17 @@
 /* 勾选列的表头 / 单元格都居中：一整列只有复选框，居中才与账号页勾选列同一观感
    （数据行走列设置的 ta-center；th 上的 text-align 是全局 left，这里单独补） */
 .models-table th[data-col="check"] { text-align: center; }
-.models-table .c-model { width: 15.5%; }
-.models-table .c-rate { width: 5%; }
+.models-table .c-model { width: 14.5%; }
+.models-table .c-rate { width: 6%; }
 .models-table .c-pricing { width: 10.5%; }
 /* 可见性列：「可见 / 不展示」两个短词，6% 够放下。 */
-.models-table .c-visibility { width: 5.5%; }
-.models-table .c-source { width: 6%; }
+.models-table .c-visibility { width: 6%; }
+.models-table .c-source { width: 5.5%; }
 /* 能力位两列：数值一格（上下文 / 最大输出）、四枚图标圆点一格。 */
-.models-table .c-budget { width: 9%; }
-.models-table .c-caps { width: 10.5%; }
+.models-table .c-budget { width: 9.5%; }
+.models-table .c-caps { width: 11%; }
 .models-table .c-alias { width: 25%; }
-.models-table .c-act { width: 9.5%; }
+.models-table .c-act { width: 8.5%; }
 .keys-table .k-name { width: 22%; }
 .keys-table .k-key { width: 44%; }
 .keys-table .k-time { width: 16%; }
@@ -375,8 +374,9 @@
 .caps-open {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 6px;
-  max-width: 100%;
+  max-width: calc(100% + 8px);
   margin: -3px -4px;
   padding: 3px 4px;
   border: 0;
@@ -390,6 +390,20 @@
 }
 .caps-open:hover { background: var(--surface-2); }
 .caps-open:focus-visible { outline: 2px solid var(--primary); outline-offset: -1px; }
+/* 计价单元格交互入口：沿用 .caps-open 的无框悬停底，两行价格与来源自适应高度并支持截断 */
+.caps-open.pricing-open {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  height: auto;
+  min-width: 0;
+  max-width: calc(100% + 10px);
+  margin: -3px -5px;
+  padding: 3px 5px;
+  white-space: normal;
+  line-height: 1.3;
+}
 
 /* 数值格：上下文 / 最大输出（等宽、按位数对齐，两行的两个数能上下比） */
 .cap-num {
@@ -449,6 +463,7 @@
   align-items: center;
   gap: 4px;
   width: max-content;
+  height: auto;
   margin: -3px auto;
 }
 .cap-dot {

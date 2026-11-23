@@ -61,7 +61,7 @@ function SheetOverlay({ className, ...props }: DialogPrimitive.Backdrop.Props) {
         'fixed inset-0 isolate z-30 bg-mask backdrop-blur-[3px]',
         'transition-opacity duration-200',
         'data-open:animate-in data-open:fade-in-0',
-        'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards',
+        'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards data-closed:pointer-events-none',
         className
       )}
       {...props}
@@ -109,6 +109,7 @@ function SheetContent({
         className={cn(
           'fixed z-30 flex flex-col overflow-hidden border border-border bg-surface shadow-3 outline-none',
           'transition-[opacity,transform] duration-200 [transition-timing-function:cubic-bezier(.32,.9,.3,1)]',
+          'data-closed:pointer-events-none',
           centered
             ? [
                 'top-1/2 left-1/2 max-h-[calc(100vh-48px)] w-[min(560px,calc(100vw-48px))]',
