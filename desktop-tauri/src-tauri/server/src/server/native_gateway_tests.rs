@@ -516,8 +516,8 @@ fn full_lifecycle_bootstrap_maintenance_and_panel_smoke() {
                     request_json(&router, "GET", "/api/session", smoke_key, None),
                     request_json(&router, "GET", "/api/config", smoke_key, None),
                     request_json(&router, "GET", "/api/accounts", smoke_key, None),
-                    request_json(&router, "GET", "/api/models", smoke_key, None),
-                    request_json(&router, "GET", "/api/models/pricing", smoke_key, None),
+                    request_json(&router, "GET", "/api/models/manage", smoke_key, None),
+                    request_json(&router, "GET", "/api/model-pricing", smoke_key, None),
                     request_json(&router, "GET", "/api/models/metadata", smoke_key, None),
                     request_json(&router, "GET", "/api/logs", smoke_key, None),
                     request_json(&router, "GET", "/api/storage", smoke_key, None),
@@ -527,8 +527,8 @@ fn full_lifecycle_bootstrap_maintenance_and_panel_smoke() {
                 assert_eq!(session_res.0, StatusCode::OK, "GET /api/session 失败: {:?}", session_res.1);
                 assert_eq!(config_res.0, StatusCode::OK, "GET /api/config 失败: {:?}", config_res.1);
                 assert_eq!(accounts_res.0, StatusCode::OK, "GET /api/accounts 失败: {:?}", accounts_res.1);
-                assert_eq!(models_res.0, StatusCode::OK, "GET /api/models 失败: {:?}", models_res.1);
-                assert_eq!(pricing_res.0, StatusCode::OK, "GET /api/models/pricing 失败: {:?}", pricing_res.1);
+                assert_eq!(models_res.0, StatusCode::OK, "GET /api/models/manage 失败: {:?}", models_res.1);
+                assert_eq!(pricing_res.0, StatusCode::OK, "GET /api/model-pricing 失败: {:?}", pricing_res.1);
                 assert_eq!(meta_res.0, StatusCode::OK, "GET /api/models/metadata 失败: {:?}", meta_res.1);
                 assert_eq!(logs_res.0, StatusCode::OK, "GET /api/logs 失败: {:?}", logs_res.1);
                 assert_eq!(storage_res.0, StatusCode::OK, "GET /api/storage 失败: {:?}", storage_res.1);
