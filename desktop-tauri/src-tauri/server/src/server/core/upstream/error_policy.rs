@@ -18,6 +18,8 @@ pub(crate) struct ErrorDecision {
     pub reset_at: Option<i64>,
     pub hard_stop: bool,
     pub exception: bool,
+    /// 上游「会话槽位已满」（容量问题，不是账号坏了）。见 `evidence::capacity_full`。
+    pub capacity: bool,
     pub interval_ms: u64,
     pub floor_ms: u64,
     pub model: String,
@@ -62,6 +64,14 @@ pub(crate) fn decide_with(snapshot: &config::ErrorPolicySnapshot, provider: &str
     if matches!(kind, ErrorKind::RateLimit | ErrorKind::Quota | ErrorKind::Balance | ErrorKind::Unknown) {
         if let Some(actual) = evidence::resource_kind(body.get("message").and_then(Value::as_str).unwrap_or("")) { kind = actual; }
     }
+    // ── 上游「会话槽位已满」按限流处置 ─────────────────────────
+    // 文案证据优先于状态码：CodeArts 这类家按同时进行的对话数限流，超了回
+    // 400「Concurrent chats have reached the upper limit」，插件把它归成 409
+    // 送进来。它既不是「请求有误」也不是「账号没权限」，换一个账号立刻能答，
+    // 所以按限流走：换账号 + 账号级冷却，而不是硬终止（详见
+    // `evidence::capacity_full`）。
+    let capacity_full = evidence::capacity_full(body, &code);
+    if capacity_full { kind = ErrorKind::RateLimit; }
     let mut rule = settings.resolve(kind, status, &code, provider, model).clone();
     let upstream_scope = evidence::scope(body);
     let mut scope = match (rule.scope, upstream_scope) {
@@ -119,8 +129,12 @@ pub(crate) fn decide_with(snapshot: &config::ErrorPolicySnapshot, provider: &str
             reset_at = Some(reset_at.unwrap_or(*at).max(*at));
         }
     }
+    // 槽位满没有「几点恢复」可依（上游只让你自己腾位置）：先给 30 秒，让这个
+    // 账号退出轮转。到期回来再试；仍满就再让位 —— 比默认的 10 分钟限流冷却
+    // 短，比「原地撞下一堵墙」稳。
+    if capacity_full && reset_at.is_none() { reset_at = Some(now + 30_000); }
     let exception = settings.overrides.iter().any(|item| item.id == rule.id);
-    ErrorDecision { rule, kind, action, scope, reset_at, hard_stop, exception, model: model.to_string(),
+    ErrorDecision { rule, kind, action, scope, reset_at, hard_stop, exception, capacity: capacity_full, model: model.to_string(),
         interval_ms: settings.interval_seconds.saturating_mul(1000), floor_ms: if matches!(kind, ErrorKind::RateLimit | ErrorKind::Quota) {
             settings.cooldown_floor_seconds.saturating_mul(1000)
         } else { 0 } }
@@ -239,6 +253,34 @@ mod tests {
         assert_eq!(decision.kind, ErrorKind::RateLimit);
         assert_eq!(decision.action, ErrorAction::SwitchAccount);
         assert!(decision.switches() && decision.cooldown());
+    }
+
+    /// 上游按「同时进行的对话数」限流（CodeArts 的
+    /// `Concurrent chats have reached the upper limit`，插件归成 409）：
+    /// 这属于「换一个账号立刻就能答」，必须换号 + 让该账号先退出轮转，
+    /// 不能当硬终止，也不能按健康失败记熔断。
+    #[test]
+    fn upstream_chat_slot_limit_switches_instead_of_stopping() {
+        let body = serde_json::json!({
+            "code": "TM.00001041",
+            "message": "上游返回 400（TM.00001041）：Concurrent chats have reached the upper limit (3). Close some chats and try again."
+        });
+        let decision = decide(409, body);
+        assert!(!decision.hard_stop, "409 不再整档算硬终止");
+        assert_eq!(decision.kind, ErrorKind::RateLimit);
+        assert_eq!(decision.action, ErrorAction::SwitchAccount);
+        assert!(decision.switches() && decision.cooldown());
+        assert_eq!(decision.scope, CooldownScope::Account, "槽位属于账号，不是某个模型");
+        assert!(decision.capacity, "要能和真正的失败区分开（不记熔断）");
+        assert!(decision.reset_at.is_some(), "给一段短冷却，先让位");
+    }
+
+    /// 没有容量文案的 409 也不该把整条请求掐断：交给默认规则换候选。
+    #[test]
+    fn bare_conflict_no_longer_stops_the_request() {
+        let decision = decide(409, serde_json::json!({ "message": "conflict" }));
+        assert!(!decision.hard_stop);
+        assert!(decision.switches());
     }
 
     /// 上游 403（被封 / 无权）属于账号级结论，必须顺延而不是收尾。

@@ -92,13 +92,17 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             && settings.backoff {
             service.route.backoff_mark_for(account, logging::now_ms(), settings.backoff_seconds, settings.backoff_cap_seconds);
         }
-        // ── 失败计数与熔断：任何一次失败都算，不分错误类型 ──────────────
+        // ── 失败计数与熔断：任何一次失败都算，但「槽位满」不算 ──────────────
         // 以前只在「连接或服务异常」上计数，于是 401 / 400 / 429 的账号永远不会
         // 真正「熔断」——冷却一到期又回到队首，下一次请求继续撞同一堵墙。用户
         // 的口径是「失败的账号就该熔断，然后轮换到其他供应商」：所以这里把每次
         // 失败都记进去，连续失败到阈值就把这个账号从轮转里摘出去一段时间
         // （`plan_route` 的 `open` 集合），别的家才有机会接活。
-        if settings.breaker {
+        //
+        // 例外是 `decision.capacity`（上游会话槽位满了）：账号是健康的，只是
+        // 这一刻对话数到顶。把它记成失败，等于「被并发顶一次就摘出去 10 分钟」，
+        // 账号池会在高峰期自己塌掉 —— 它只需要那 30 秒冷却先让位。
+        if settings.breaker && !decision.capacity {
             // 登录失效一次就熔断：401 是「上游不认这个登录态」，续期又没救回来，
             // 再试一次只会再 401 一次 —— 立刻摘出轮转，别等攒够阈值。
             let threshold = if decision.kind == ErrorKind::Auth { 1 } else { settings.breaker_failures as i64 };

@@ -81,6 +81,29 @@ pub(super) fn resource_kind(message: &str) -> Option<ErrorKind> {
     None
 }
 
+/// 「这个账号的上游会话槽位满了」——按**同时进行的对话数**限流的那一类。
+///
+/// 实测（2026-11-25 02:4x，`requests` 里 1 小时 59 条）：CodeArts 账号回
+/// `400（TM.00001041）：Concurrent chats have reached the upper limit (3).
+/// Close some chats and try again.`，插件把它归成 **409** 交给网关，
+/// 而 409 当时在 [`hard_stop`] 名单里 —— 于是每一条都「判定为硬终止、不再换
+/// 对象」，同一时刻别的账号与别家完全能答。这类结论的真实含义是
+/// 「**换一个账号立刻就能答**」，属于容量问题，不是请求问题。
+pub(super) fn capacity_full(body: &Value, code: &str) -> bool {
+    let mut text = String::new();
+    for value in [body, &body["error"], &body["detail"]] {
+        if let Some(message) = value.get("message").and_then(Value::as_str) {
+            text.push_str(message);
+            text.push('\n');
+        }
+    }
+    text.push_str(code);
+    let text = text.to_lowercase();
+    const MARKERS: [&str; 6] = ["concurrent chats", "close some chats", "00001041",
+        "concurrency_limit", "concurrent_limit", "too many concurrent"];
+    MARKERS.iter().any(|marker| text.contains(marker))
+}
+
 pub(super) fn scope(body: &Value) -> CooldownScope {    match body.get("credentialScope").or_else(|| body.get("credential_scope")).or_else(|| body.get("scope")).and_then(Value::as_str) {
         Some("provider") => CooldownScope::Provider,
         Some("account" | "credential" | "subscription" | "oauth" | "token") => CooldownScope::Account,
@@ -151,8 +174,16 @@ pub(in crate::server::core::upstream) fn gateway_class(error: &GatewayError) -> 
 ///
 /// 现在只保留「再发一次可能造成重复执行 / 重复计费 / 状态错乱」与「用户已取消」
 /// 两类 —— 这是唯一不能靠换候选解决的失败形态。
+///
+/// ── 409 也不再整档算硬终止（2026-11-25）────────────────────
+/// 409（Conflict）的本义是「这次没成」，不是「已经执行了一次」。把它整档当
+/// 硬终止的代价是：任何把容量/冲突类 400 归成 409 的家（CodeArts 的
+/// 「Concurrent chats have reached the upper limit」就是），都会在下游拿到
+/// 409 的同时**一个人都不换**。真正需要防重复执行的形态都有独立证据码，
+/// 下面按 `code` 判（`*unconfirmed*` / `request_replay_blocked` / 响应已开始写 /
+/// 已取消），不依赖状态码。
 pub(super) fn hard_stop(status: u16, code: &str) -> bool {
-    matches!(status, 409 | 428 | 499)
+    matches!(status, 428 | 499)
         || code.ends_with("cleanup_unconfirmed")
         || code.contains("unconfirmed")
         || code.starts_with("claude_session_")

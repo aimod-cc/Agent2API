@@ -1938,7 +1938,10 @@ fn exhausted_error(last: Option<GatewayError>, tried: usize) -> GatewayError {
         .with_code("route_exhausted")
         .with_retry_after_seconds(1);
     };
-    let retryable = matches!(error.status_code, 402 | 408 | 425 | 429 | 500 | 502 | 503 | 504)
+    // 409 也算可重试：上游「会话槽位已满」（CodeArts 的 Concurrent chats…）就是
+    // 以 409 送进来的，候选全忙时给下游一条带 Retry-After 的 503，而不是那条
+    // 看着像「请求冲突」的 409。
+    let retryable = matches!(error.status_code, 402 | 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504)
         || matches!(error.code.as_deref(), Some("account_busy" | "route_empty" | "route_exhausted"));
     if !retryable && tried < 2 {
         return error;
