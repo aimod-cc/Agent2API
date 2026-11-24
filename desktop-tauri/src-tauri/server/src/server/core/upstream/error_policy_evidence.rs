@@ -99,8 +99,9 @@ pub(super) fn capacity_full(body: &Value, code: &str) -> bool {
     }
     text.push_str(code);
     let text = text.to_lowercase();
-    const MARKERS: [&str; 6] = ["concurrent chats", "close some chats", "00001041",
-        "concurrency_limit", "concurrent_limit", "too many concurrent"];
+    const MARKERS: [&str; 9] = ["concurrent chats", "close some chats", "00001041",
+        "concurrency_limit", "concurrent_limit", "concurrent request", "concurrent session",
+        "max concurrent", "maximum concurrent"];
     MARKERS.iter().any(|marker| text.contains(marker))
 }
 

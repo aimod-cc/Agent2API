@@ -1973,14 +1973,16 @@ fn exhausted_error(last: Option<GatewayError>, tried: usize) -> GatewayError {
 /// 队列里还有十几个可用候选一个都不试、`finish_failure` 根本没跑（明细里
 /// `errorPolicy` 是 null，日志里没有「错误结算」）、下游直接收到 400。
 ///
-/// 判据刻意写死成「上游当场拒收」这一档：400 / 401 / 402 / 403 / 404 / 405 /
-/// 406 / 409 / 410 / 413 / 415 / 422 / 429 / 501。这些状态说明请求**没有**进
-/// 上游执行队列，重放不会造成重复执行 / 重复计费；超时、5xx、无响应（0）不在此列
-/// —— 那些可能已经执行了，仍按「禁止重放」原样收尾。
+/// 判据刻意写死成「这一轮肯定没在上游执行」的两档：
+///   1. 当场拒收：400 / 401 / 402 / 403 / 404 / 405 / 406 / 409 / 410 / 413 /
+///      415 / 422 / 429 / 501 —— 请求没有进执行队列，重放不会重复执行；
+///   2. 网关层未成：425 / 502 / 503 / 504 —— 上游网关拒绝或不可用，同样没有
+///      开始执行（含插件家冻结的那一份 guard）。
+/// 超时（408）、500 与无响应（0）仍不在此列：可能已经在执行，保持保守。
 fn reopen_after_rejection(ctx: &ProviderContext<'_>, error: &crate::server::errors::GatewayError) -> bool {
     if !ctx.telemetry.replay_guard().blocked() { return false; }
     if ctx.telemetry.response_started() || ctx.telemetry.is_cancelled() { return false; }
-    if !matches!(error.status_code, 400 | 401 | 402 | 403 | 404 | 405 | 406 | 409 | 410 | 413 | 415 | 422 | 429 | 501) {
+    if !matches!(error.status_code, 400 | 401 | 402 | 403 | 404 | 405 | 406 | 409 | 410 | 413 | 415 | 422 | 425 | 429 | 501 | 502 | 503 | 504) {
         return false;
     }
     ctx.telemetry.replay_guard().confirm_not_sent();
