@@ -1963,31 +1963,30 @@ fn exhausted_error(last: Option<GatewayError>, tried: usize) -> GatewayError {
     .with_retry_after_seconds(error.retry_after_secs.unwrap_or(1))
 }
 
-/// 上游**明确拒收**这一轮之后，解除请求级的「禁止重放」位，让队列继续（2026-11-21 加）。
+/// 上游失败之后解除请求级「禁止重放」，让队列继续 —— 判据是「这一轮确实不在
+/// 执行中」，不再按状态码猜（2026-11-25 放宽）。
 ///
-/// ── 这是 WorkBuddy 那条 400 的真正卡点 ───────────────────────────────
-/// 插件家（`workbuddy` / `raccoon` / `loomy` 这类 WASM 对话）在**提交前**就会
-/// `freeze()` 请求级的 ReplayGuard（`wasm/conversation/workbuddy_http.rs`），把
-/// `blocked` 永久置 true。上游回 400 之后，本函数这些分支一进来就看到
-/// `blocked() == true` → `return Err(error)`，于是：
-/// 队列里还有十几个可用候选一个都不试、`finish_failure` 根本没跑（明细里
-/// `errorPolicy` 是 null，日志里没有「错误结算」）、下游直接收到 400。
+/// ── 为什么不再按状态码名单判 ─────────────────────────────
+/// 名单（4xx 那一档 + 425/502/503/504）之外的状态以前一律直接返回。实测
+/// 2026-11-24 23:59：CodeArts 插件把上游 500「Network busy」包成 **503**，
+/// 那一刻 `route.orderedTotal=40`、`ordered` 前几名全是 `usable`，但请求只
+/// 试了 1 个账号就 503 收尾（`attempt_details[0].errorPolicy` 是 null，连
+/// 统一规则都没跑）——原因就是 `blocked` 一直没解除。
 ///
-/// 判据刻意写死成「这一轮肯定没在上游执行」的两档：
-///   1. 当场拒收：400 / 401 / 402 / 403 / 404 / 405 / 406 / 409 / 410 / 413 /
-///      415 / 422 / 429 / 501 —— 请求没有进执行队列，重放不会重复执行；
-///   2. 网关层未成：425 / 502 / 503 / 504 —— 上游网关拒绝或不可用，同样没有
-///      开始执行（含插件家冻结的那一份 guard）。
-/// 超时（408）、500 与无响应（0）仍不在此列：可能已经在执行，保持保守。
+/// 现在的判据只认 guard 自己的证据：
+///   · `response_started()` / `is_cancelled()` → 不能重放（字节已经在写 /
+///     用户已终止）；
+///   · `confirm_not_sent()` 只在**没有活动调用代次**时才清位；调用还在跑时它
+///     不动 `blocked`，这里复核一次仍然 blocked 就返回。
+/// 换句话说：只有「这一轮确实还在上游执行」会中断，其余一律继续顺延。
 fn reopen_after_rejection(ctx: &ProviderContext<'_>, error: &crate::server::errors::GatewayError) -> bool {
     if !ctx.telemetry.replay_guard().blocked() { return false; }
     if ctx.telemetry.response_started() || ctx.telemetry.is_cancelled() { return false; }
-    if !matches!(error.status_code, 400 | 401 | 402 | 403 | 404 | 405 | 406 | 409 | 410 | 413 | 415 | 422 | 425 | 429 | 501 | 502 | 503 | 504) {
-        return false;
-    }
+    ctx.telemetry.replay_guard().confirm_not_sent();
+    if ctx.telemetry.replay_guard().blocked() { return false; }
     ctx.telemetry.replay_guard().confirm_not_sent();
     logging::log_with_level("[Upstream]", &format!(
-        "上游当场拒收（HTTP {} {}）：这一轮没有执行，已解除「禁止重放」，继续顺延下一家",
+        "上游失败（HTTP {} {}）：这一轮没有活动调用（确认未在执行），已解除「禁止重放」，继续顺延下一家",
         error.status_code, error.message), "warn");
     true
 }
