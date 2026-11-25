@@ -565,29 +565,61 @@ export function closeAddModals(): void {
   shared().wbAddAccountModal?.close?.()
 }
 
-/** 添加成功后统一收尾：关窗、刷新列表、提示；如果是该提供商的首个账号，自动弹出获取模型窗口 */
-export async function afterAdd(name: string, label: string, result?: unknown, providerId?: string): Promise<void> {
+/** 从添加结果里认出提供商：调用方指明的优先，其次看账号 / 会话记录自报的 */
+function addedProviderOf(result?: unknown, providerId?: string): string {
   const resultObj = resultRecord(result)
   const accountObj = resultRecord(resultObj?.account)
   const sessionObj = resultRecord(resultObj?.session)
-  const resolvedProvider = providerId
+  return providerId
     || (typeof accountObj?.provider === 'string' ? accountObj.provider : '')
     || (typeof sessionObj?.provider === 'string' ? sessionObj.provider : '')
+}
+
+/** 给刚添了首个账号的提供商弹出「获取模型」窗口 */
+function openModelsFetch(providerId: string, name: string): void {
+  shared().wbModelsFetchModal?.open?.({
+    providerId,
+    custom: false,
+    name,
+    autoFetch: true,
+    onRefreshed: () => { void shared().wbModelsPanel?.load?.({ force: true }) },
+  })
+}
+
+/** 添加成功后统一收尾：关窗、刷新列表、提示；如果是该提供商的首个账号，自动弹出获取模型窗口 */
+export async function afterAdd(name: string, label: string, result?: unknown, providerId?: string): Promise<void> {
+  const resolvedProvider = addedProviderOf(result, providerId)
   const wasFirstAccount = Boolean(resolvedProvider) && accountCountOf(resolvedProvider) === 0
   closeAddModals()
   await shared().wbApp?.refresh?.()
   const added = t('✅ {label}账号已添加{name}', { label, name: name ? `：${name}` : '' })
   const notice = accountImportNotice(result)
   toast(notice ? `${added}\n${t(notice.text)}` : added, notice?.warning ? 'warn' : 'ok')
-  if (wasFirstAccount && resolvedProvider) {
-    shared().wbModelsFetchModal?.open?.({
-      providerId: resolvedProvider,
-      custom: false,
-      name: label || resolvedProvider,
-      autoFetch: true,
-      onRefreshed: () => { void shared().wbModelsPanel?.load?.({ force: true }) },
-    })
+  if (wasFirstAccount && resolvedProvider) openModelsFetch(resolvedProvider, label || resolvedProvider)
+}
+
+/**
+ * 批量导入的收尾：关窗、刷新、提示各只做一次（逐个提示会刷屏），附加提示按文案去重后并列。
+ * 「首个账号弹获取模型」与单条添加同口径 —— 都是在刷新**之前**数该提供商名下原有的账号数，
+ * 所以调用方须等全部添加请求都返回之后、列表还没刷新时再调。
+ */
+export async function afterAddBatch(addedCount: number, label: string, results: unknown[], providerId?: string): Promise<void> {
+  const resolvedProvider = addedProviderOf(results[0], providerId)
+  const wasFirstAccount = Boolean(resolvedProvider) && accountCountOf(resolvedProvider) === 0
+  closeAddModals()
+  await shared().wbApp?.refresh?.()
+  const lines = [t('✅ {label}账号已添加 {count} 个', { label, count: addedCount })]
+  let warning = false
+  const seen = new Set<string>()
+  for (const result of results) {
+    const notice = accountImportNotice(result)
+    if (!notice || seen.has(notice.text)) continue
+    seen.add(notice.text)
+    lines.push(t(notice.text))
+    warning = warning || notice.warning
   }
+  toast(lines.join('\n'), warning ? 'warn' : 'ok')
+  if (wasFirstAccount && resolvedProvider) openModelsFetch(resolvedProvider, label || resolvedProvider)
 }
 
 /* ─── 表单草稿（非受控输入的「关掉再打开还在」）──────────────

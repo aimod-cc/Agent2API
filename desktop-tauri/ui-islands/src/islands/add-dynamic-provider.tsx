@@ -7,11 +7,12 @@ import { AddFoot } from './add-account-kit'
 import { t } from '../i18n'
 import { MAX_NAME_LENGTH } from './add-account-constants'
 import {
-  accountRequest, addedLabelOf, afterAdd, describeError, desktopImportRequest, isMethodsUnavailable,
+  accountRequest, addedLabelOf, afterAdd, afterAddBatch, describeError, desktopImportRequest, isMethodsUnavailable,
   normalizeLoginResult, postAccount, accountProviderAvailable, saveAccountProxySelection, shared, startLogin, toast,
   type LoginProgress, type LoginResult,
   type WebLoginController, type WebLoginView,
 } from './add-account-bridge'
+import { toastFailures } from './add-provider-common'
 import { readProxyDraft } from './accounts-proxy-form'
 import { useAddAccountProxy, useAddAccountProxyDraft } from './add-account-proxy'
 import { useAddAccountSettings } from './add-account-settings'
@@ -454,6 +455,21 @@ export function DynamicProviderBlock({
     if (combinedWarning) toast(t('账号已添加，但请留意：{warning}', { warning: combinedWarning }), 'warn')
   }
 
+  /** 凭据文件多选、全部发完之后的收尾：表单只清一次，关窗 / 刷新 / 提示合并成一条 */
+  async function finishBatch(results: LoginResult[]): Promise<void> {
+    clearCallback()
+    progressRef.current = {}
+    loginScope.current = null
+    if (!alive.current) { await shared().wbApp?.refresh?.(); return }
+    setProgress({})
+    setValues({})
+    setName('')
+    setUpload(undefined)
+    settings.resetAll()
+    setError('')
+    await afterAddBatch(results.length, label, results, provider)
+  }
+
   async function submit(): Promise<void> {
     if (!method || submitLocked || savingRef.current || requestingRef.current || methodsState.phase === 'loading') return
     try {
@@ -497,6 +513,32 @@ export function DynamicProviderBlock({
       proxy.setBusy(true)
       setError('')
       // API 方法必须进入 account.normalize，不能把 Key/Token 交给 OAuth start。
+      if (method.file && upload?.batch?.length) {
+        // 凭据文件多选：每一份各发一次，代理与其它设置沿用表单里的同一套，只换凭据。
+        // 顺序执行：添加时插件可能要拿凭据去上游换票，一次涌过去既容易撞限流，出错也不好归因。
+        // 备注名只对一个账号有意义，多份时不带。
+        delete payload.name
+        const fileField = method.file.field
+        const results: LoginResult[] = []
+        const failures: string[] = []
+        for (const item of [upload, ...upload.batch]) {
+          // 文本凭据放在它所在的输入字段里；二进制凭据走 authFileB64，不带这个字段
+          const itemFields: Record<string, string> = item.base64
+            ? Object.fromEntries(Object.entries(fields).filter(([key]) => key !== fileField && key !== 'name'))
+            : { ...fields, [fileField]: item.text ?? fields[fileField] ?? '' }
+          delete itemFields.name
+          const itemPayload = { ...payload, inputs: itemFields, ...credentialFilePayload(method, item, itemFields) }
+          try {
+            results.push(await saveAccountProxySelection(normalizeLoginResult(await postAccount(itemPayload)), proxyPayload))
+          } catch (failure) {
+            failures.push(`${item.name}：${describeError(failure)}`)
+          }
+        }
+        // 全部失败时不清表单，留着原样方便改了再试
+        if (results.length) await finishBatch(results)
+        if (failures.length) toastFailures(failures)
+        return
+      }
       const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxyPayload)
       await finish(result)
     } catch (failure) {
