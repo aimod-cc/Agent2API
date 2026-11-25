@@ -143,7 +143,8 @@ export function usePluginBatch({ request, refresh, synchronize, t, disabled, tar
             try { state = await request('GET', '/api/plugins') }
             catch { throw new PluginOperationUnconfirmed(defaultMessage(t)) }
             const installed = item.kind === 'pack' ? state.packs.find(pack => pack.id === item.id)
-              : state.scripts?.packages.find(pack => item.recommendation && isRecommendationInstalled(item.recommendation, [pack]))
+              : state.scripts?.packages.find(pack => (item.id && pack.id === item.id)
+                || (item.recommendation && isRecommendationInstalled(item.recommendation, [pack])))
             if (!installed) throw new PluginOperationUnconfirmed(defaultMessage(t))
             if (!installed.enabled) notice ||= t('插件已安装，原有停用状态已保留')
             else if (installed.startup && installed.startup.phase !== 'ready') notice ||= t('插件已安装，但仍未就绪，请查看加载状态')

@@ -73,11 +73,18 @@ pub(in crate::server::core::plugin_host::wasm) fn from_original(row: &RowSource,
     Ok(Credentials { cookie, pairs, metadata, user_agent: Zeroizing::new(user_agent) })
 }
 
+pub(in crate::server::core::plugin_host::wasm) fn is_numeric_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.bytes().any(|byte| byte != b'0')
+}
+
 impl Credentials {
     /// 只核对实际发送材料是否来自本次原行；该方法不授予对话或发送许可。
     pub(in crate::server::core::plugin_host::wasm) fn matches_turn_request(
         &self, url: &url::Url, headers: &Value,
-    ) -> Result<(), DailyError> {
+    ) -> Result<String, DailyError> {
         let headers = headers.as_object().filter(|fields| fields.len() <= 128)
             .ok_or(DailyError::CredentialsInvalid)?;
         let mut cookie = headers.iter().filter(|(key, _)| key.eq_ignore_ascii_case("cookie"));
@@ -87,27 +94,58 @@ impl Credentials {
         let mut pairs = BTreeMap::new();
         collect(&Value::String(raw.to_string()), crate::server::logging::now_ms(), 0, &mut pairs)?;
         if pairs != self.pairs { return Err(DailyError::SourceChanged); }
-        let device = self.metadata.get("deviceId").map(|value| value.as_str()).unwrap_or("");
-        if device.is_empty() { return Err(DailyError::CredentialsInvalid); }
         let query: Vec<_> = url.query_pairs().collect();
-        for (wire, field) in [("device_id", "deviceId"), ("iid", "iid"), ("web_id", "webId"),
-            ("channel", "channel"), ("chromium_version", "chromiumVersion"),
-            ("tea_uuid", "teaUuid"), ("web_tab_id", "webTabId")] {
+        let saved_device = self.metadata.get("deviceId")
+            .map(|value| value.as_str())
+            .filter(|value| is_numeric_id(value))
+            .unwrap_or("");
+        let mut device_values = query.iter().filter(|(key, _)| key == "device_id");
+        let actual_device = device_values.next().map(|(_, value)| value.as_ref());
+        if device_values.next().is_some() { return Err(DailyError::CredentialsInvalid); }
+        let effective_device = match actual_device {
+            Some(actual) if !saved_device.is_empty() => {
+                if actual != saved_device { return Err(DailyError::SourceChanged); }
+                actual
+            }
+            Some(actual) if is_numeric_id(actual) => actual,
+            _ => return Err(DailyError::CredentialsInvalid),
+        };
+        for (wire, field) in [("iid", "iid"), ("channel", "channel"),
+            ("chromium_version", "chromiumVersion"), ("web_tab_id", "webTabId")] {
             let mut values = query.iter().filter(|(key, _)| key == wire);
             let actual = values.next().map(|(_, value)| value.as_ref());
             if values.next().is_some() { return Err(DailyError::CredentialsInvalid); }
             let expected = self.metadata.get(field).map(|value| value.as_str()).unwrap_or("");
-            if actual.is_some_and(|actual| actual != expected)
-                || (wire == "device_id" || wire == "web_id") && !expected.is_empty() && actual != Some(expected)
-            { return Err(DailyError::SourceChanged); }
+            if actual.is_some_and(|actual| actual != expected) {
+                return Err(DailyError::SourceChanged);
+            }
+        }
+        for (wire, field) in [("web_id", "webId"), ("tea_uuid", "teaUuid")] {
+            let mut values = query.iter().filter(|(key, _)| key == wire);
+            let actual = values.next().map(|(_, value)| value.as_ref());
+            if values.next().is_some() { return Err(DailyError::CredentialsInvalid); }
+            let expected = self.metadata.get(field).map(|value| value.as_str()).unwrap_or("");
+            if !expected.is_empty() {
+                if actual.is_some_and(|actual| actual != expected)
+                    || (wire == "web_id" && actual != Some(expected))
+                {
+                    return Err(DailyError::SourceChanged);
+                }
+            } else if actual.is_some_and(|actual| actual != effective_device) {
+                return Err(DailyError::SourceChanged);
+            }
         }
         let mut fingerprint = query.iter().filter(|(key, _)| key == "fp");
         let fp = fingerprint.next().map(|(_, value)| value.as_ref());
-        let derived = format!("verify_{device}");
-        if fingerprint.next().is_some() || fp != Some(derived.as_str()) {
+        if fingerprint.next().is_some() { return Err(DailyError::CredentialsInvalid); }
+        let saved_fp = self.metadata.get("fingerprint").map(|value| value.as_str()).unwrap_or("");
+        let derived = format!("verify_{effective_device}");
+        let fp_ok = fp == Some(derived.as_str())
+            || (!saved_fp.is_empty() && fp == Some(saved_fp));
+        if !fp_ok {
             return Err(DailyError::SourceChanged);
         }
-        Ok(())
+        Ok(effective_device.to_string())
     }
 
     pub(in crate::server::core::plugin_host::wasm) fn protected(&self, text: &str) -> bool {
@@ -119,6 +157,12 @@ impl Credentials {
     }
 
     pub(in crate::server::core::plugin_host::wasm) fn url(&self, path: &'static str) -> String {
+        self.url_with_device(path, None)
+    }
+
+    pub(in crate::server::core::plugin_host::wasm) fn url_with_device(
+        &self, path: &'static str, fallback_device: Option<&str>,
+    ) -> String {
         let field = |key: &str| self.metadata.get(key).map(|value| value.as_str()).unwrap_or("");
         let version = self.metadata.get("clientVersion").map(|value| value.as_str()).unwrap_or(CONTROL_VERSION);
         let mut query = vec![("aid", "1044603".to_string()), ("real_aid", "1044603".into()),
@@ -127,12 +171,18 @@ impl Credentials {
             ("pkg_type", "release_version".into()), ("runtime", "web".into()), ("runtime_version", "3.45.3".into()),
             ("pc_version", version.into()), ("doubao_pc_version", version.into()), ("use-olympus-account", "1".into()),
             ("language", "zh".into()), ("region", "CN".into()), ("sys_region", "CN".into())];
-        for (wire, key) in [("device_id", "deviceId"), ("iid", "iid"), ("web_id", "webId"), ("channel", "channel"),
+        let device = Some(field("deviceId")).filter(|value| is_numeric_id(value))
+            .or_else(|| fallback_device.filter(|value| is_numeric_id(value)))
+            .unwrap_or("");
+        if !device.is_empty() { query.push(("device_id", device.to_string())); }
+        let web_id = if !field("webId").is_empty() { field("webId") } else { device };
+        if !web_id.is_empty() { query.push(("web_id", web_id.to_string())); }
+        for (wire, key) in [("iid", "iid"), ("channel", "channel"),
             ("chromium_version", "chromiumVersion"), ("tea_uuid", "teaUuid"), ("web_tab_id", "webTabId")] {
             if !field(key).is_empty() { query.push((wire, field(key).to_string())); }
         }
-        if !field("deviceId").is_empty() { query.push(("fp", format!("verify_{}", field("deviceId")))); }
-        else if !field("fingerprint").is_empty() { query.push(("fp", field("fingerprint").to_string())); }
+        if !field("fingerprint").is_empty() { query.push(("fp", field("fingerprint").to_string())); }
+        else if !device.is_empty() { query.push(("fp", format!("verify_{device}"))); }
         let encoded = query.into_iter().map(|(key, value)| format!("{key}={}", encode(&value))).collect::<Vec<_>>().join("&");
         format!("{ORIGIN}{path}?{encoded}")
     }

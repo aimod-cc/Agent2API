@@ -24,7 +24,17 @@ import { PluginDesktopImport } from '../../../ui-shared/plugin-desktop-import'
 import { getPluginStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import { managedLoginSourceGeneration, MANAGEMENT_SESSION_CHANGE, type ManagedLoginScope } from '../../../ui-shared/plugin-login-managed'
 import { PluginLoginBrowser, PluginLoginFields, PluginLoginMethodPicker, PluginLoginSecurity } from '../../../ui-shared/plugin-login-form'
-import { credentialFilePayload, credentialInputMethod, type CredentialUpload } from '../../../ui-shared/plugin-credential-file'
+import { PluginLoginExternalLink } from '../../../ui-shared/plugin-login-external-link'
+import { useLoginNoAutoOpen } from '../../../ui-shared/login-browser-prefs'
+import {
+  credentialFilePayloadForItem, credentialInputMethod, inspectSoftwareExport,
+  type CredentialUploadItem,
+} from '../../../ui-shared/plugin-credential-file'
+import {
+  buildCredentialAccountPayload, finalizeBatchImport, isProviderFirstAccount,
+  resolveBatchImportItems, runCredentialBatchImport,
+  type BatchImportFailure, type BatchImportProgress,
+} from './add-dynamic-batch'
 import { PluginLoginDiagnostic } from '../../../ui-shared/plugin-login-diagnostic-view'
 import { loginDiagnosticOf, type LoginDiagnostic } from '../../../ui-shared/plugin-login-diagnostic'
 import { usePluginPrompts } from './add-account-plugin-prompts'
@@ -38,6 +48,16 @@ const textOf = (value: unknown): string => typeof value === 'string' ? value : '
 const objectOf = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : undefined
+const safeLoginUrl = (value: unknown): string => {
+  if (typeof value !== 'string') return ''
+  const raw = value.trim()
+  if (!raw || raw.length > 16384 || /[\u0000-\u0020\u007f]/.test(raw)) return ''
+  try {
+    const parsed = new URL(raw)
+    if (!['https:', 'http:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) return ''
+    return raw
+  } catch { return '' }
+}
 
 export function DynamicProviderBlock({
   provider, label, active, version, footerHost, preserveOnHide = false, availability = '',
@@ -56,7 +76,9 @@ export function DynamicProviderBlock({
   })
   const [selected, setSelected] = React.useState('')
   const [values, setValues] = React.useState<Record<string, Record<string, string>>>({})
-  const [upload, setUpload] = React.useState<CredentialUpload>()
+  const [uploads, setUploads] = React.useState<CredentialUploadItem[]>([])
+  const [importProgress, setImportProgress] = React.useState<BatchImportProgress | null>(null)
+  const [batchFailures, setBatchFailures] = React.useState<BatchImportFailure[]>([])
   const [name, setName] = React.useState('')
   const proxy = useAddAccountProxy()
   const { draft: proxyDraft, change: setProxyDraft } = useAddAccountProxyDraft()
@@ -65,7 +87,11 @@ export function DynamicProviderBlock({
   settingsRef.current = settings
   const supportsUsage = providerFeatures(provider).usage
   const uaEditable = userAgentEditable(provider)
-  const [mode, setMode] = React.useState<'external' | 'embedded'>(shared().workbuddyDesktop?.platform === 'web' ? 'external' : 'embedded')
+  const isDesktop = shared().workbuddyDesktop?.platform !== 'web'
+  const defaultBrowserMode: 'external' | 'embedded' = isDesktop ? 'embedded' : 'external'
+  const [mode, setMode] = React.useState<'external' | 'embedded'>(defaultBrowserMode)
+  const [noAutoOpen, setNoAutoOpen] = useLoginNoAutoOpen()
+  const previousActiveRef = React.useRef(active)
   const [saving, setSaving] = React.useState(false)
   const [error, updateError] = React.useState('')
   const [diagnostic, setDiagnostic] = React.useState<LoginDiagnostic>()
@@ -114,8 +140,13 @@ export function DynamicProviderBlock({
   const submitLocked = locked || readingFile || resolvedPrompts.pending || Boolean(resolvedPrompts.error)
   const remarkRef = React.useRef(name)
   remarkRef.current = name
-  const snapshot = React.useRef({ method, inputs, mode, proxyDraft })
-  snapshot.current = { method, inputs, mode, proxyDraft }
+  const usesExternalBrowser = Boolean(
+    method && method.type === 'oauth' && !method.embeddedOnly
+    && method.browserMode !== 'none' && method.browserMode !== 'plugin'
+    && !method.localOnly && (!isDesktop || method.browserMode === 'external' || mode === 'external'),
+  )
+  const snapshot = React.useRef({ method, inputs, mode, proxyDraft, noAutoOpen, usesExternalBrowser })
+  snapshot.current = { method, inputs, mode, proxyDraft, noAutoOpen, usesExternalBrowser }
   const callbackType = progress.callbackInput ?? method?.callbackInput ?? 'url'
   // 网页端的粘贴框归 web shim；本岛仅补原生桌面等待态，避免重复回调输入。
   const manualWaiting = (active || preserveOnHide) && shared().workbuddyDesktop?.platform !== 'web'
@@ -196,7 +227,9 @@ export function DynamicProviderBlock({
       setProgress({})
       setValues({})
       setName('')
-      setUpload(undefined)
+      setUploads([])
+      setImportProgress(null)
+      setBatchFailures([])
       setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
     }
   }, [active, preserveOnHide, callbackIdentity])
@@ -215,7 +248,9 @@ export function DynamicProviderBlock({
         .filter(prompt => !prompt.secret && Object.hasOwn(previousInputs, prompt.key))
         .map(prompt => [prompt.key, previousInputs[prompt.key]])) : {}
       setValues(retained ? { [retained.id]: nonSecret } : {})
-      setUpload(undefined)
+      setUploads([])
+      setImportProgress(null)
+      setBatchFailures([])
       setSelected(retained?.id || (previousSelection?.startsWith('local:') ? previousSelection : ''))
       setMethodsState(next)
       loadedRef.current = next.phase !== 'error'
@@ -248,13 +283,26 @@ export function DynamicProviderBlock({
   }, [provider, active, version, availability])
 
   React.useEffect(() => {
+    const becameActive = !previousActiveRef.current && active
+    previousActiveRef.current = active
+    if (becameActive && !loginView.waiting) setMode(defaultBrowserMode)
+  }, [active, defaultBrowserMode, loginView.waiting])
+
+  React.useEffect(() => {
+    controllerRef.current?.syncTexts()
+  }, [usesExternalBrowser, noAutoOpen])
+
+  React.useEffect(() => {
     alive.current = true
     const engine = shared().wbWebLogin
     if (engine) {
       controllerRef.current = engine.create({
         provider, buttonId: `${prefix}-start`, cancelId: `${prefix}-cancel`, hintId: `${prefix}-hint`,
         busyText: t('等待账号登录完成…'), onStateChange: setLoginView,
-        texts: () => ({ button: t('登录并添加'), hint: '' }),
+        texts: () => ({
+          button: snapshot.current.usesExternalBrowser && snapshot.current.noAutoOpen ? t('获取授权链接') : t('登录并添加'),
+          hint: '',
+        }),
         start: async () => {
           const current = snapshot.current
           if (!current.method || !['oauth', 'sms'].includes(current.method.type)) throw new Error(t('请先选择有效的登录方式'))
@@ -275,6 +323,7 @@ export function DynamicProviderBlock({
             const result = await startLogin(provider, undefined, mode, undefined, {
               methodIndex: current.method.methodIndex, inputs, locale: window.wbI18n?.locale() || 'zh-CN',
               proxy: readProxyDraft(current.proxyDraft), requestId,
+              autoOpenBrowser: mode === 'external' ? !current.noAutoOpen : true,
             })
             if (owner.managed && result.managedLogin !== true) throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。'))
             if (result.managedLogin === true && (result.provider !== provider || result.methodIndex !== owner.methodIndex
@@ -329,7 +378,9 @@ export function DynamicProviderBlock({
         setProgress({})
         clearCallback()
         setValues({})
-        setUpload(undefined)
+        setUploads([])
+        setImportProgress(null)
+        setBatchFailures([])
         setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
         return
       }
@@ -377,11 +428,18 @@ export function DynamicProviderBlock({
         setCallbackError(t('网关未返回有效的手动回调输入契约；请更新网关后重新发起。'))
         return
       }
-      // 只摘公开进度字段，不保存整个 payload 或凭证；flow 必须属于当前 provider。
+      // 只摘公开进度字段及已校验的外部授权链接，不保存整个 payload 或凭证；flow 必须属于当前 provider。
+      const sameFlow = progressRef.current.state === state && progressRef.current.provider === provider
+      const incomingUrl = !scope.managed ? safeLoginUrl(next.authUrl) : ''
+      const authUrl = incomingUrl || (sameFlow && !scope.managed ? progressRef.current.authUrl : undefined)
+      const browserOpened = incomingUrl
+        ? (typeof next.browserOpened === 'boolean' ? next.browserOpened : undefined)
+        : (sameFlow && !scope.managed ? progressRef.current.browserOpened : undefined)
       const safe: LoginProgress = {
         active: true, provider, state, managedLogin: scope.managed, methodIndex: scope.methodIndex,
         manualCallback: !scope.managed && next.manualCallback === true, callbackInput,
         instructions: loginText(next.instructions), hint: loginText(next.hint), userCode: textOf(next.userCode),
+        ...(authUrl ? { authUrl, ...(browserOpened !== undefined ? { browserOpened } : {}) } : {}),
         ...(scope.managed ? { phase: next.phase, saved: next.saved, remainingMs: next.remainingMs } : {}),
       }
       if (savingUnconfirmed(safe)) { clearCallback(); setValues({}) }
@@ -399,7 +457,7 @@ export function DynamicProviderBlock({
         loginScope.current = null
         progressRef.current = {}; setProgress({}); clearCallback()
         snapshot.current = { ...snapshot.current, inputs: {}, proxyDraft: { ...snapshot.current.proxyDraft, password: '' } }
-        setValues({}); setUpload(undefined); setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
+        setValues({}); setUploads([]); setImportProgress(null); setBatchFailures([]); setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
       }
     }
     const unsubscribeBoot = subscribePluginStartup(guard)
@@ -444,7 +502,9 @@ export function DynamicProviderBlock({
     setProgress({})
     setValues({})
     setName('')
-    setUpload(undefined)
+    setUploads([])
+    setImportProgress(null)
+    setBatchFailures([])
     settings.resetAll()
     setError('')
     const nickname = textOf(result.session?.nickname)
@@ -459,7 +519,7 @@ export function DynamicProviderBlock({
     try {
       if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       if (method.reason) throw new Error(method.reason)
-      const fields = readInputs(credentialInputMethod(method, upload), inputs)
+      const fields = readInputs(credentialInputMethod(method, uploads), inputs)
       let proxyPayload
       try {
         proxyPayload = readProxyDraft(proxyDraft)
@@ -476,19 +536,88 @@ export function DynamicProviderBlock({
         settings.setPane(settingsResult.pane)
         throw new Error(settingsResult.error)
       }
-      const remark = method.prompts.some(prompt => prompt.key === 'name') ? fields.name : name.trim()
-      const payload: Record<string, unknown> = {
-        provider,
-        proxy: proxyPayload,
-        ...(remark ? { name: remark } : {}),
-        ...settingsResult.payload,
+      const fileField = method.file?.field
+      const { items: batchItems, pastedExport } = resolveBatchImportItems(method, uploads, fields)
+      const isBatch = batchItems.length > 1 || batchItems.some(item => item.exportKind === 'multi')
+      if (isBatch) {
+        const otherFields = Object.fromEntries(Object.entries(fields).filter(([key]) => key !== fileField))
+        const wasFirstAccount = isProviderFirstAccount(provider)
+        savingRef.current = true
+        setSaving(true)
+        proxy.setBusy(true)
+        setError('')
+        setBatchFailures([])
+        setImportProgress(null)
+        const outcome = await runCredentialBatchImport({
+          provider, method, items: batchItems, otherFields,
+          baseSettingsPayload: settingsResult.payload, proxyPayload,
+          exportProxyFields: proxy.importFields(),
+          isCancelled: () => !alive.current,
+          onProgress: next => { if (alive.current) setImportProgress(next) },
+        })
+        if (!alive.current) {
+          if (outcome.added + outcome.updated > 0) await shared().wbApp?.refresh?.()
+          return
+        }
+        await finalizeBatchImport({
+          provider, label, wasFirstAccount, itemsCount: batchItems.length, uploads, outcome,
+          onClearAll: () => {
+            setValues({}); setUploads([]); setName(''); setBatchFailures([]); setImportProgress(null)
+            settings.resetAll(); setError('')
+          },
+          onPartialFailure: (remaining, failures) => {
+            setUploads(remaining)
+            if (fileField) {
+              setValues(previous => ({
+                ...previous,
+                [method.id]: { ...previous[method.id], [fileField]: remaining.length === 1 && remaining[0].text !== undefined ? remaining[0].text : '' },
+              }))
+            }
+            setBatchFailures(failures)
+          },
+          onAllFailed: (errorText, failures) => {
+            if (errorText) setError(errorText)
+            setBatchFailures(failures)
+          },
+        })
+        return
       }
+      const remark = method.prompts.some(prompt => prompt.key === 'name') ? fields.name : name.trim()
+      const singleUpload = uploads[0]
+      const isSingleExport = Boolean(singleUpload?.exportKind === 'single' || pastedExport?.kind === 'single')
+      let payload: Record<string, unknown>
       if (method.type === 'api') {
-        payload.methodIndex = method.methodIndex
-        payload.inputs = fields
-        Object.assign(payload, credentialFilePayload(method, upload, fields))
+        if (singleUpload) {
+          const otherFields = Object.fromEntries(Object.entries(fields).filter(([key]) => key !== fileField))
+          payload = buildCredentialAccountPayload({
+            provider,
+            method,
+            item: singleUpload,
+            otherFields,
+            baseSettingsPayload: settingsResult.payload,
+            proxyPayload,
+            exportProxyFields: proxy.importFields(),
+            remark: remark || undefined,
+          })
+        } else {
+          payload = {
+            provider,
+            ...(isSingleExport ? proxy.importFields() : { proxy: proxyPayload }),
+            ...(remark ? { name: remark } : {}),
+            ...settingsResult.payload,
+            methodIndex: method.methodIndex,
+            inputs: fields,
+            ...credentialFilePayloadForItem(method, undefined, fields),
+          }
+        }
       } else if (method.type === 'desktop') {
-        payload.importDesktop = true
+        payload = {
+          provider,
+          proxy: proxyPayload,
+          ...(remark ? { name: remark } : {}),
+          ...settingsResult.payload,
+          importDesktop: true,
+        }
       } else {
         throw new Error(t('此登录方式需要由共享登录桥发起'))
       }
@@ -496,15 +625,21 @@ export function DynamicProviderBlock({
       setSaving(true)
       proxy.setBusy(true)
       setError('')
+      setBatchFailures([])
       // API 方法必须进入 account.normalize，不能把 Key/Token 交给 OAuth start。
-      const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxyPayload)
+      const rawResult = await postAccount(payload)
+      const normalized = normalizeLoginResult(rawResult)
+      const result = isSingleExport ? normalized : await saveAccountProxySelection(normalized, proxyPayload)
       await finish(result)
     } catch (failure) {
       if (alive.current) setError(describeError(failure), failure)
     } finally {
       savingRef.current = false
       proxy.setBusy(false)
-      if (alive.current) setSaving(false)
+      if (alive.current) {
+        setSaving(false)
+        setImportProgress(null)
+      }
     }
   }
 
@@ -512,10 +647,29 @@ export function DynamicProviderBlock({
     clearCallback()
     progressRef.current = {}
     setValues({})
-    setUpload(undefined)
+    setUploads([])
+    setImportProgress(null)
+    setBatchFailures([])
     setSelected(value)
+    setMode(defaultBrowserMode)
     setError('')
     setProgress({})
+  }
+
+  async function openExternalAuthUrl(url: string): Promise<void> {
+    const valid = safeLoginUrl(url)
+    if (!valid) return
+    if (!isDesktop) {
+      const popup = window.open('about:blank', '_blank')
+      if (!popup) {
+        toast(t('浏览器拦截了新标签页，请复制上方链接手动打开'), 'warn')
+        return
+      }
+      popup.opener = null
+      popup.location.replace(valid)
+      return
+    }
+    await openExternal(valid)
   }
 
   function startFlow(): void {
@@ -569,7 +723,9 @@ export function DynamicProviderBlock({
   function cancelFlow(): void {
     clearCallback()
     setValues({})
-    setUpload(undefined)
+    setUploads([])
+    setImportProgress(null)
+    setBatchFailures([])
     setProxyDraft({ ...snapshot.current.proxyDraft, password: '' })
     controllerRef.current?.cancel()
   }
@@ -629,6 +785,15 @@ export function DynamicProviderBlock({
   const optionalName = method?.prompts.find(prompt => prompt.key === 'name' && prompt.type === 'text' && !prompt.secret && prompt.optional && !prompt.when)
   const formPrompts = method?.prompts.filter(prompt => prompt !== optionalName) || []
   const accountName = optionalName ? inputs[optionalName.key] ?? optionalName.default ?? '' : name
+  const pastedExport = !uploads.length && method?.file ? inspectSoftwareExport(inputs[method.file.field] || '') : undefined
+  const isMultiImport = uploads.length > 1 || uploads.some(item => item.exportKind === 'multi') || pastedExport?.kind === 'multi'
+  const submitLabel = saving
+    ? (importProgress && importProgress.total > 1
+      ? t('导入中 ({current}/{total})…', { current: importProgress.current, total: importProgress.total })
+      : t('添加中…'))
+    : uploads.length > 1
+      ? t('导入 {count} 个文件', { count: uploads.length })
+      : t('添加账号')
   const instructions = mergeLoginInstructions(methodsState.instructions, progress.managedLogin ? '' : method?.instructions,
     method?.browserMode === 'plugin' && !method.embeddedOnly ? pluginBrowserInstructions(provider) : '',
     loginText(progress.instructions), loginText(progress.hint), loginText(loginView.hint))
@@ -702,11 +867,27 @@ export function DynamicProviderBlock({
         : t('此方式需要完整回调地址；请原样粘贴，不拆分参数或重建地址。提交后仍需等待网关确认。')}</p> : null}
       {resolvedPrompts.error ? <Alert variant='destructive'><AlertDescription>{resolvedPrompts.error}</AlertDescription></Alert> : null}
       {method.reason ? <Alert variant='warning'><AlertDescription>{method.reason}</AlertDescription></Alert> : null}
-      <PluginLoginBrowser method={method} provider={provider} desktop={shared().workbuddyDesktop?.platform !== 'web'}
+      <PluginLoginBrowser method={method} provider={provider} desktop={isDesktop}
         value={mode} onChange={setMode} disabled={locked || loginView.waiting} />
+      {(usesExternalBrowser || Boolean(loginView.waiting && progress.active && progress.provider === provider && progress.authUrl)) && !progress.managedLogin ? (
+        <PluginLoginExternalLink
+          id={`${prefix}-auth-url`}
+          url={loginView.waiting && progress.active && progress.provider === provider ? (progress.authUrl || '') : ''}
+          browserOpened={loginView.waiting && progress.active && progress.provider === provider && progress.authUrl ? progress.browserOpened : undefined}
+          disabled={locked || loginView.waiting}
+          noAutoOpen={noAutoOpen}
+          onNoAutoOpenChange={setNoAutoOpen}
+          onOpenExternal={openExternalAuthUrl}
+          onCopied={ok => toast(ok ? t('授权链接已复制') : t('请手动复制选中的链接'), ok ? 'ok' : 'warn')}
+          t={t}
+        />
+      ) : null}
       <PluginLoginFields method={method} prompts={formPrompts} values={inputs} prefix={prefix} disabled={locked || loginView.waiting}
-        upload={upload} onUpload={setUpload} onReading={setReadingFile}
-        onChange={(key, value) => setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [key]: value } }))} />
+        uploads={uploads} onUploads={next => { setUploads(next); setBatchFailures([]); setError('') }} onReading={setReadingFile}
+        onChange={(key, value) => {
+          setBatchFailures([])
+          setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [key]: value } }))
+        }} />
       {method.type === 'oauth' || method.type === 'sms' ? <AddFoot host={footerHost} active={active}>
         <Button id={`${prefix}-start`} disabled={submitLocked || Boolean(method.reason)} onClick={startFlow}
           hidden={method.type === 'sms'}>
@@ -716,7 +897,7 @@ export function DynamicProviderBlock({
           onClick={cancelFlow}>{t('取消等待')}</Button>
       </AddFoot> : <AddFoot host={footerHost} active={active}>
         <Button disabled={submitLocked || Boolean(method.reason)}
-          onClick={() => void submit()}>{saving ? <Spinner /> : null}{saving ? t('添加中…') : t('添加账号')}</Button>
+          onClick={() => void submit()}>{saving ? <Spinner /> : null}{submitLabel}</Button>
       </AddFoot>}
       {manualWaiting ? <div className='flex flex-col gap-2'>
         {nextAuthUrl ? <Button variant='outline' className='self-start' disabled={callbackBusy}
@@ -744,11 +925,22 @@ export function DynamicProviderBlock({
         <AlertDescription className='whitespace-pre-wrap break-words'>{error}</AlertDescription>
         <PluginLoginDiagnostic diagnostic={diagnostic} />
       </Alert> : null}
+      {batchFailures.length ? <Alert variant='destructive'>
+        <AlertTitle>{t('部分项目导入失败（{count}）', { count: batchFailures.length })}</AlertTitle>
+        <AlertDescription>
+          <ul className='plugin-credential-failures'>
+            {batchFailures.slice(0, 6).map((item, idx) => (
+              <li key={`${item.label}:${idx}`}>{item.label}：{item.reason}</li>
+            ))}
+          </ul>
+          {batchFailures.length > 6 ? <p className='mt-1 text-xs'>{t('其余 {n} 项失败未展开', { n: batchFailures.length - 6 })}</p> : null}
+        </AlertDescription>
+      </Alert> : null}
     </section> : null}
     {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription>
       <PluginLoginDiagnostic diagnostic={diagnostic} />
     </Alert> : null}
-    {methodAvailable && (optionalName || !method.prompts.some(prompt => prompt.key === 'name')) ? (
+    {methodAvailable && !isMultiImport && (optionalName || !method.prompts.some(prompt => prompt.key === 'name')) ? (
       <SettingGroup title={t('账号备注')}>
         <div className='acct-dlg-block plugin-login-field'>
           <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>

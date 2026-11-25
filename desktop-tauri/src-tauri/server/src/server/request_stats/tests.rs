@@ -177,6 +177,7 @@ fn all_filters_compose_without_losing_the_new_fields() {
         status: Some("ok".into()),
         start: Some(now),
         end: Some(now + 5),
+        origin: None,
         list_only: false,
     };
     let page = stats.query_requests(&query);
@@ -315,7 +316,7 @@ fn finishing_a_running_request_reuses_the_row_and_is_idempotent() {
     assert_eq!(page["total"], 1);
     assert_eq!(page["running"], 0);
     assert_eq!(page["entries"][0]["totalTokens"], 10);
-    let summary = stats.usage_summary("all", None, None);
+    let summary = stats.usage_summary("all", None, None, None, None);
     assert_eq!(summary["overview"]["requests"], 1);
     assert_eq!(summary["overview"]["tokens"], 10);
 }
@@ -323,10 +324,30 @@ fn finishing_a_running_request_reuses_the_row_and_is_idempotent() {
 #[test]
 fn model_tests_and_running_requests_do_not_inflate_usage_reports() {
     let (_dir, stats, _) = seed();
-    let summary = stats.usage_summary("all", None, None);
+    let summary = stats.usage_summary("all", None, None, None, None);
     assert_eq!(summary["overview"]["requests"], 3);
     assert_eq!(summary["overview"]["successful"], 2);
     assert_eq!(summary["overview"]["tokens"], 20);
+}
+
+#[test]
+fn client_detail_returns_api_keys_and_models() {
+    let (_dir, stats, _) = seed();
+    let zcode = stats.usage_summary("all", None, None, Some("zcode"), None);
+    let detail = &zcode["clientDetail"];
+    assert_eq!(detail["id"], "zcode");
+    assert_eq!(detail["requests"], 1);
+    assert_eq!(detail["totalTokens"], 10);
+    assert_eq!(detail["apiKeysComplete"], true);
+    assert_eq!(detail["modelsComplete"], true);
+    assert_eq!(detail["apiKeys"][0]["filterValue"], "key:a");
+    assert_eq!(detail["models"][0]["model"], "wire-model");
+
+    let unknown = stats.usage_summary("all", None, None, Some(""), None);
+    assert_eq!(unknown["clientDetail"]["id"], "");
+    assert_eq!(unknown["clientDetail"]["requests"], 1);
+    assert_eq!(unknown["clientDetail"]["apiKeys"][0]["filterValue"], "unknown");
+    assert_eq!(unknown["clientDetail"]["models"][0]["model"], "wire-model");
 }
 
 #[test]

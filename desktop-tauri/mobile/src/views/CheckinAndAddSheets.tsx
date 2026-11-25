@@ -16,6 +16,7 @@ import {
 import { formatRelativeTime, providerDisplayName } from '../core/format'
 import { t } from '../core/i18n'
 import { openExternalUrl } from '../core/servers'
+import { useLoginNoAutoOpen } from '../../../ui-shared/login-browser-prefs'
 import { MobileInteractionPanel } from './MobileInteractionPanel'
 import { MobileSmsLogin } from './MobileSmsLogin'
 import { store, useStore } from '../core/store'
@@ -235,6 +236,7 @@ export function AddAccountSheet({
   const [statusMsg, setStatusMsg] = useState('')
   const [providerPickerOpen, setProviderPickerOpen] = useState(false)
   const [selectFieldOpen, setSelectFieldOpen] = useState('')
+  const [noAutoOpen, setNoAutoOpen] = useLoginNoAutoOpen()
   const activeFlowRef = useRef('')
 
   const oauthFlowToken = loginFlow?.state || loginFlow?.flow || ''
@@ -340,7 +342,7 @@ export function AddAccountSheet({
       })
       setLoginFlow(flow)
       const authUrl = flow.authUrl || flow.url
-      if (authUrl) {
+      if (authUrl && !noAutoOpen) {
         void openExternalUrl(authUrl)
       }
     } catch (err) {
@@ -546,15 +548,41 @@ export function AddAccountSheet({
                 })}
 
                 {isOAuthMethod ? (
-                  <button
-                    type='button'
-                    className='fc-btn is-primary'
-                    disabled={busy || Boolean(methodUnavailableReason)}
-                    onClick={handleStartOAuth}
-                  >
-                    <GlyphIcon name='link' size={16} />
-                    <span>{busy ? t('正在发起登录…') : (currentMethod?.label || t('获取授权链接并登录'))}</span>
-                  </button>
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 10,
+                        padding: '4px 2px',
+                      }}
+                    >
+                      <span style={{ fontSize: 13, color: 'var(--fc-text-secondary)' }}>
+                        {t('不自动打开浏览器')}
+                      </span>
+                      <CommonSwitch
+                        checked={noAutoOpen}
+                        disabled={busy}
+                        onChange={setNoAutoOpen}
+                      />
+                    </div>
+                    <button
+                      type='button'
+                      className='fc-btn is-primary'
+                      disabled={busy || Boolean(methodUnavailableReason)}
+                      onClick={handleStartOAuth}
+                    >
+                      <GlyphIcon name='link' size={16} />
+                      <span>
+                        {busy
+                          ? t('正在发起登录…')
+                          : noAutoOpen
+                            ? t('获取授权链接')
+                            : (currentMethod?.label || t('获取授权链接并登录'))}
+                      </span>
+                    </button>
+                  </>
                 ) : (
                   <button
                     type='button'

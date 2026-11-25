@@ -144,25 +144,17 @@
       /** 行宽下限的变量名（见 rowSpanOf）：行与表头靠它撑到内容宽，溢出那截才有背景 */
       spanVar: '--req-row-min',
       columns: [
-        { key: 'time', sel: '.req-time', track: '92px' },
-        { key: 'target', sel: '.req-target', track: 'minmax(0, 1.1fr)' },
-        { key: 'retry', sel: '.req-retry', track: '52px' },
+        { key: 'time', sel: '.req-time', track: '74px' },
         { key: 'status', sel: '.req-status', track: '96px' },
-        { key: 'model', sel: '.req-model', track: 'minmax(0, 1.3fr)' },
-        // 客户端（来源 UA 的归类，见后端 core::client）：同列的 track 与
-        // page-requests.css 的 grid-template-columns 默认值必须同步
-        { key: 'client', sel: '.req-client', track: '110px' },
-        { key: 'apiKey', sel: '.req-api-key', track: '140px' },
-        { key: 'dur', sel: '.req-dur', track: '96px' },
-        { key: 'speed', sel: '.req-speed', track: '96px' },
-        // 积分消耗（WorkBuddy 的 usage.credit）：与 page-requests.css 的默认
-        // grid-template-columns 同步；宽度只够放「0.06」这类读数。
-        { key: 'credit', sel: '.req-credit', track: '72px' },
-        // 预估费用：与 page-requests.css 的默认 grid-template-columns 同步
-        { key: 'cost', sel: '.req-cost', track: '82px' },
-        { key: 'usage', sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
-        { key: 'error', sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
-        { key: 'detail', sel: '.req-detail', track: '60px' },
+        { key: 'source', sel: '.req-source', track: 'minmax(116px, 0.95fr)' },
+        { key: 'target', sel: '.req-target', track: 'minmax(144px, 1.15fr)' },
+        { key: 'model', sel: '.req-model', track: 'minmax(156px, 1.4fr)' },
+        { key: 'dur', sel: '.req-dur', track: '88px' },
+        { key: 'speed', sel: '.req-speed', track: '88px' },
+        { key: 'usage', sel: '.req-usage', track: '148px' },
+        { key: 'billing', sel: '.req-billing', track: '82px' },
+        { key: 'error', sel: '.req-error-cell', track: 'minmax(160px, 1.2fr)' },
+        { key: 'detail', sel: '.req-detail', track: '58px' },
       ],
       /**
        * 当前该渲染哪些列、按什么顺序（见上面 visibleColumnsOf 的说明）。
@@ -198,6 +190,20 @@
       mode: 'table',
       root: '#fm-table-custom',
       columns: ['pick', 'model', 'state'].map(key => ({ key })),
+    },
+    // 自动维护「执行明细」弹窗的表（ui-shared/maintenance-details.tsx 动态创建，关闭即移除）。
+    {
+      id: 'maintenance-detail',
+      mode: 'table',
+      root: '#maintenance-detail-table',
+      columns: [
+        { key: 'target', minWidth: 130 },
+        { key: 'scope', minWidth: 150 },
+        { key: 'status', minWidth: 76 },
+        { key: 'change', minWidth: 112 },
+        { key: 'reason', minWidth: 200 },
+        { key: 'action', minWidth: 96 },
+      ],
     },
   ];
 
@@ -356,9 +362,12 @@
 
   // ─── 拖动 ────────────────────────────────────
 
-  /** 默认轨道里的像素值（弹性轨道没有，返回 0） */
+  /** 默认轨道里的最小像素值（含固定像素轨道及 minmax(Npx, …) 的下限） */
+  const MINMAX_TRACK = /^minmax\(\s*(\d+(?:\.\d+)?)px\s*,/;
   function fixedPxOf(table, column) {
-    const fixed = FIXED_TRACK.exec(table.mode === 'grid' ? column.track || '' : '');
+    if (table.mode !== 'grid') return 0;
+    const track = column.track || '';
+    const fixed = FIXED_TRACK.exec(track) || MINMAX_TRACK.exec(track);
     return fixed ? Math.round(parseFloat(fixed[1])) : 0;
   }
 

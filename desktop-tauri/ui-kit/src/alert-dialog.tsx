@@ -59,17 +59,20 @@ function AlertDialogOverlay({ className, ...props }: AlertDialogPrimitive.Backdr
 type AlertDialogContentProps = AlertDialogPrimitive.Popup.Props & {
   /** 是否自带右上角关闭按钮，默认 false —— 强制选择类弹窗不留「✕」这条模糊出口 */
   showCloseButton?: boolean
+  /** 嵌在另一层弹窗里时强制渲染遮罩，默认 false */
+  overlayForceRender?: boolean
 }
 
 function AlertDialogContent({
   className,
   children,
   showCloseButton = false,
+  overlayForceRender = false,
   ...props
 }: AlertDialogContentProps) {
   return (
     <AlertDialogPortal>
-      <AlertDialogOverlay />
+      <AlertDialogOverlay forceRender={overlayForceRender} />
       <AlertDialogPrimitive.Popup
         data-slot='alert-dialog-content'
         className={cn(

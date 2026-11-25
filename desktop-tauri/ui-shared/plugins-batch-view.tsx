@@ -17,6 +17,7 @@ export function PluginBatchToolbar({ items, visibleKeys, selected, disabled, onS
   onSelection(keys: string[], checked: boolean): void; onAction(action: PluginBatchAction): void; onExit(): void; t: PluginTranslate
 }) {
   const [open, setOpen] = React.useState(false)
+  const visibleSet = React.useMemo(() => new Set(visibleKeys), [visibleKeys])
   const picked = items.filter(item => selected.has(item.key))
   const count = visibleKeys.filter(key => selected.has(key)).length
   const installed = picked.filter(item => item.installed).length
@@ -46,8 +47,8 @@ export function PluginBatchToolbar({ items, visibleKeys, selected, disabled, onS
             disabled={!applicablePluginItems(picked, action).length} onClick={() => { setOpen(false); onAction(action) }}>
             {action === 'enable' ? t('批量启用') : t('批量停用')}
           </Button>)}
-          <Button variant='ghost' size='sm' className='w-full justify-start' disabled={!updates && !items.some(item => visibleKeys.includes(item.key) && item.updatable)}
-            onClick={() => { setOpen(false); onSelection([...selected], false); onSelection(items.filter(item => visibleKeys.includes(item.key) && item.updatable && !item.active).map(item => item.key), true) }}>{t('仅选可更新')}</Button>
+          <Button variant='ghost' size='sm' className='w-full justify-start' disabled={!updates && !items.some(item => visibleSet.has(item.key) && item.updatable)}
+            onClick={() => { setOpen(false); onSelection([...selected], false); onSelection(items.filter(item => visibleSet.has(item.key) && item.updatable && !item.active).map(item => item.key), true) }}>{t('仅选可更新')}</Button>
           <Button variant='ghost' size='sm' className='w-full justify-start' onClick={() => { setOpen(false); onSelection([...selected], false) }}>{t('取消选择')}</Button>
         </PopoverContent>
       </Popover>

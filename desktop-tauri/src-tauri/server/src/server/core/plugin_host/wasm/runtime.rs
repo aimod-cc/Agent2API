@@ -158,40 +158,51 @@ impl Runtime {
     pub(super) fn module_digest(&self) -> &str { &self.module_digest }
 
     pub async fn invoke(&self, method: &str, params: Value, timeout: Duration, sink: Option<Sink>) -> Result<Value, proto::WireError> {
-        self.invoke_inner(method, params, timeout, sink, InvocationContext::Ordinary).await
+        self.invoke_inner(method, params, timeout, sink, None, InvocationContext::Ordinary).await
+    }
+
+    pub async fn invoke_with_cancel(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        sink: Option<Sink>,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Value, proto::WireError> {
+        self.invoke_inner(method, params, timeout, sink, cancel, InvocationContext::Ordinary).await
     }
 
     pub(super) async fn invoke_doubao_image(&self, call: super::conversation::ConversationCall,
         mut ended: super::conversation::ExecutionGuard, params: Value, timeout: Duration,
     ) -> Result<Value, proto::WireError> {
-        let result = self.invoke_inner("images.generate", params, timeout, None, InvocationContext::DoubaoImage(call)).await;
+        let result = self.invoke_inner("images.generate", params, timeout, None, None, InvocationContext::DoubaoImage(call)).await;
         ended.finish(result.is_ok());
         result
     }
 
-    pub(super) async fn invoke_claim(&self, method: &str, params: Value, timeout: Duration,
-        owner: super::verification::lease::Owner) -> Result<Value, proto::WireError> {
-        self.invoke_inner(method, params, timeout, None, InvocationContext::Claim(ClaimContext::Ordinary(owner))).await
+    pub(super) async fn invoke_claim_with_cancel(&self, method: &str, params: Value, timeout: Duration,
+        owner: super::verification::lease::Owner, cancel: Option<tokio_util::sync::CancellationToken>) -> Result<Value, proto::WireError> {
+        self.invoke_inner(method, params, timeout, None, cancel, InvocationContext::Claim(ClaimContext::Ordinary(owner))).await
     }
 
     pub(super) async fn invoke_checkin(&self, call: super::checkin_call::CheckinCallRef,
         params: Value, timeout: Duration, owner: Option<super::verification::lease::Owner>,
         persistence: super::checkin_call::persistence::PersistenceSlot,
     ) -> Result<Value, proto::WireError> {
-        self.invoke_inner(proto::methods::gateway::CHECKIN_CLAIM, params, timeout, None,
+        self.invoke_inner(proto::methods::gateway::CHECKIN_CLAIM, params, timeout, None, None,
             InvocationContext::Claim(ClaimContext::Checkin { owner, call, persistence })).await
     }
 
     pub(super) async fn invoke_verification(&self, call: super::verification::VerificationCall) -> Result<Value, proto::WireError> {
         let params = call.params();
         let timeout = call.remaining();
-        self.invoke_inner("admin.action", params, timeout, None, InvocationContext::Verification(call)).await
+        self.invoke_inner("admin.action", params, timeout, None, None, InvocationContext::Verification(call)).await
     }
 
     pub(super) async fn invoke_managed(&self, call: crate::server::core::login::managed::Call,
         params: Value, timeout: Duration, kiro: Option<Arc<super::managed::kiro_execution::KiroExecution>>,
     ) -> Result<Value, proto::WireError> {
-        self.invoke_inner(call.method(), params, timeout, None, InvocationContext::Managed { call, kiro }).await
+        self.invoke_inner(call.method(), params, timeout, None, None, InvocationContext::Managed { call, kiro }).await
     }
 
     pub(super) async fn invoke_doubao_rewards(&self, call: Arc<super::doubao_rewards::Call>,
@@ -200,17 +211,17 @@ impl Runtime {
         let method = if params["claim"].as_str().is_some_and(|claim| !claim.is_empty()) {
             proto::methods::gateway::CLAIM
         } else { proto::methods::gateway::CLAIM_STATUS };
-        self.invoke_inner(method, params, timeout, None, InvocationContext::DoubaoRewards(call)).await
+        self.invoke_inner(method, params, timeout, None, None, InvocationContext::DoubaoRewards(call)).await
     }
 
     pub(super) async fn invoke_desktop_launch(&self, call: super::desktop_launch::binding::Call,
         method: &str, params: Value, timeout: Duration) -> Result<Value, proto::WireError> {
-        self.invoke_inner(method, params, timeout, None, InvocationContext::DesktopLaunch(call)).await
+        self.invoke_inner(method, params, timeout, None, None, InvocationContext::DesktopLaunch(call)).await
     }
 
     pub(super) async fn invoke_desktop_import(&self, call: super::native::chatglm::DesktopCall,
         params: Value, timeout: Duration) -> Result<Value, proto::WireError> {
-        self.invoke_inner(proto::methods::gateway::ACCOUNT_NORMALIZE, params, timeout, None,
+        self.invoke_inner(proto::methods::gateway::ACCOUNT_NORMALIZE, params, timeout, None, None,
             InvocationContext::DesktopImport(call)).await
     }
 
@@ -220,7 +231,7 @@ impl Runtime {
         if !input.matches(&ended) {
             return Err(proto::WireError::with_code("Wasm 对话结束守卫不属于本次调用", "forbidden"));
         }
-        let result = self.invoke_inner(proto::methods::gateway::CONVERSATION, Value::Null, timeout, Some(sink),
+        let result = self.invoke_inner(proto::methods::gateway::CONVERSATION, Value::Null, timeout, Some(sink), None,
             InvocationContext::Conversation(input)).await;
         // 只记录执行返回/中断，不把插件 JSON 的业务状态当成任务成功。
         ended.finish(result.is_ok());
@@ -228,8 +239,11 @@ impl Runtime {
     }
 
     async fn invoke_inner(&self, method: &str, params: Value, timeout: Duration, sink: Option<Sink>,
+        external_cancel: Option<tokio_util::sync::CancellationToken>,
         entry: InvocationContext) -> Result<Value, proto::WireError> {
-        let cancel = sink.as_ref().map(|sink| sink.cancel.clone()).unwrap_or_else(|| self.shared.cancel.child_token());
+        let cancel = sink.as_ref().map(|sink| sink.cancel.clone())
+            .or(external_cancel)
+            .unwrap_or_else(|| self.shared.cancel.child_token());
         use crate::server::core::runtime_capacity::{self as capacity, Class};
         let interactive = matches!(&entry, InvocationContext::Verification(_));
         let (account, caller, input_bytes) = match &entry {
@@ -246,10 +260,12 @@ impl Runtime {
             else if capacity::background() || matches!(method, "tasks.run" | "usage.query" | "checkin.claim" | "claim" | "claim.status" | "models.refresh") {
                 Class::Background
             } else { Class::Interactive };
+        let usage_query = method == proto::methods::gateway::USAGE_QUERY
+            || crate::server::core::usage_query::is_account_query(&self.shared.options.provider, &account);
         let call_deadline = crate::server::core::usage_query::account_query_deadline(&self.shared.options.provider, &account)
             .map_or(tokio::time::Instant::now() + timeout, |deadline| deadline.min(tokio::time::Instant::now() + timeout));
         let query_reserved = !interactive && super::query_queue::reserved(&self.shared, &account, method)?;
-        let diagnostics = super::diagnostics::Invocation::new(&self.shared.options.provider, method, &self.module_digest);
+        let diagnostics = super::diagnostics::Invocation::new(&self.shared.options.provider, method, &self.module_digest, usage_query);
         let work = async {
             let wait_started = tokio::time::Instant::now();
             let queue_deadline = (tokio::time::Instant::now() + Duration::from_secs(capacity::limits().queue_wait_seconds)).min(call_deadline);
@@ -563,7 +579,10 @@ impl Runtime {
         let result = tokio::select! {
             biased;
             _ = self.shared.cancel.cancelled() => Err(proto::WireError::with_code("Wasm 插件已关闭", "plugin_unavailable")),
-            _ = cancel.cancelled() => Err(proto::WireError::with_code("Wasm 调用已取消", proto::WireError::ABORTED)),
+            _ = cancel.cancelled() => Err(proto::WireError::with_code(
+                if method.starts_with("login.") { "登录已取消" } else { "Wasm 调用已取消" },
+                proto::WireError::ABORTED,
+            )),
             result = tokio::time::timeout_at(call_deadline, work) => result
                 .unwrap_or_else(|_| Err(proto::WireError::with_code("Wasm 插件调用超时", "timeout"))),
         };

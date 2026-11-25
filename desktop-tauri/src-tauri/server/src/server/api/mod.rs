@@ -164,6 +164,7 @@ pub mod plugin_ui;
 // 原样出给 iframe 里的插件页，让迁移过来的页面与宿主同一套色板 / 圆角 / 阴影
 pub mod plugin_theme;
 pub mod prompt;
+pub mod privacy;
 pub mod prompt_rules;
 pub mod protocol;
 pub mod proxies;
@@ -194,6 +195,8 @@ pub mod routing_trace;
 pub mod routing_workspace;
 pub mod sanitize;
 pub mod scheduled_tasks;
+pub mod task_jobs;
+pub mod task_plugins;
 pub mod session;
 // 侧边栏布局（GET/PUT /api/sidebar-layout）：桌面壳与网页端两个 origin
 // 共享同一份菜单布局，见该文件模块头

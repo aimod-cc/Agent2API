@@ -1281,6 +1281,7 @@ pub async fn start_with_options(
         let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
         return Ok(json!({ "ok": false, "canceled": true }));
     }
+    let auto_open_browser = options.get("autoOpenBrowser").and_then(Value::as_bool).unwrap_or(true);
     let mut instructions = started.get("instructions").and_then(Value::as_str).unwrap_or("").to_string();
     if only_external && mode == "embedded" && !auth_url.trim().is_empty() {
         if !instructions.is_empty() { instructions.push('\n'); }
@@ -1290,7 +1291,7 @@ pub async fn start_with_options(
     let result = if managed {
         managed_wait::wait(app, provider, flow, &started, &instructions, request_generation).await
     } else {
-        run_dynamic_login(app, provider, flow, auth_url, mode_id, &started, &instructions).await
+        run_dynamic_login(app, provider, flow, auth_url, mode_id, auto_open_browser, &started, &instructions).await
     };
     if !managed && result.as_ref().map(|value| value.get("ok").and_then(Value::as_bool)) != Ok(Some(true)) {
         let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
@@ -1299,15 +1300,27 @@ pub async fn start_with_options(
     result
 }
 
-/// 只推送公开进度，不把授权 URL、options.inputs 或回调正文放进事件/日志。
+/// 推送当前登录进度；`login:state` 只含公开状态，已通过白名单校验的系统浏览器授权链接仅通过 `login:progress` 推给界面展示与复制。
 fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instructions: &str, hint: Option<&str>) {
+    emit_login_progress_detail(app, flow, started, instructions, hint, None, None);
+}
+
+fn emit_login_progress_detail(
+    app: &AppHandle,
+    flow: &str,
+    started: &Value,
+    instructions: &str,
+    hint: Option<&str>,
+    auth_url: Option<&str>,
+    browser_opened: Option<bool>,
+) {
     let Some(active) = current_login(app).filter(|active| active.state == flow) else { return; };
     let manual_callback = started.get("manualCallback").and_then(Value::as_bool) == Some(true);
     let callback_input = if manual_callback && started.get("callbackInput").and_then(Value::as_str) == Some("code") {
         "code"
     } else { "url" };
     let managed = started["managedLogin"] == true;
-    let mut progress = json!({
+    let mut state_payload = json!({
         "active": true, "provider": active.provider, "edition": active.edition, "mode": active.mode,
         "state": flow, "manualCallback": manual_callback, "callbackInput": callback_input,
         "managedLogin": managed, "methodIndex": started["methodIndex"],
@@ -1315,12 +1328,19 @@ fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instruction
         "instructions": instructions, "hint": hint,
     });
     if managed {
-        progress["phase"] = started["phase"].clone();
-        progress["saved"] = started["saved"].clone();
+        state_payload["phase"] = started["phase"].clone();
+        state_payload["saved"] = started["saved"].clone();
+    }
+    let mut progress = state_payload.clone();
+    if let Some(url) = auth_url.filter(|value| !value.trim().is_empty()) {
+        progress["authUrl"] = json!(url);
+        if let Some(opened) = browser_opened {
+            progress["browserOpened"] = json!(opened);
+        }
     }
     let _ = app.emit("login:progress", &progress);
-    // 兼容仅订阅 onLoginState 的共享 UI 桥，新增字段不会改变旧状态结构。
-    let _ = app.emit("login:state", &progress);
+    // 兼容仅订阅 onLoginState 的共享 UI 桥，保持原有公开字段且不附带授权链接。
+    let _ = app.emit("login:state", &state_payload);
 }
 
 #[derive(Clone)]
@@ -1495,7 +1515,7 @@ fn dumate_cookie_payload(cookies: &[tauri::webview::Cookie<'static>]) -> Option<
 
 /// 动态流程独立于旧 Cookie/自定义协议支路；空 URL 也有流程，只跳过开页。
 async fn run_dynamic_login(
-    app: &AppHandle, provider: &str, flow: &str, auth_url: &str, mode: &str,
+    app: &AppHandle, provider: &str, flow: &str, auth_url: &str, mode: &str, auto_open_browser: bool,
     started: &Value, instructions: &str,
 ) -> Result<Value, String> {
     let mut profile = None;
@@ -1527,9 +1547,20 @@ async fn run_dynamic_login(
         let policy = DynamicNavigation::new(provider, &auth, started)?;
         if !policy.allows(&auth) { return Err("登录链接不是允许的 HTTPS 站点或合法本机回调地址".into()); }
         if mode == "external" {
-            if std::env::var("WORKBUDDY_SKIP_OPEN_BROWSER").as_deref() != Ok("1") {
+            let mut browser_opened = false;
+            if auto_open_browser && std::env::var("WORKBUDDY_SKIP_OPEN_BROWSER").as_deref() != Ok("1") {
                 open_in_browser(auth_url)?;
+                browser_opened = true;
             }
+            emit_login_progress_detail(
+                app,
+                flow,
+                started,
+                instructions,
+                None,
+                Some(auth_url),
+                Some(browser_opened),
+            );
         } else {
             profile = Some(LoginProfile::new()?);
             let nav_policy = policy.clone();

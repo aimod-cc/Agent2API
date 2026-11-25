@@ -9,6 +9,7 @@ import {
 } from '../core/api'
 import { copyText } from '../core/format'
 import { t } from '../core/i18n'
+import { openExternalUrl } from '../core/servers'
 import { store } from '../core/store'
 import { CommonCard } from '../ui/components'
 import { PickerSheet, PickerTrigger } from '../ui/pickers'
@@ -256,26 +257,35 @@ export function MobileInteractionPanel({ flow, statusMsg, onBusyChange, onCancel
           ) : null}
 
           {authLink ? (
-            <div
-              className='fc-inner-block'
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
-            >
-              <div
-                className='fc-mono'
-                style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              >
-                {authLink}
+            <div className='fc-inner-block' style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <input
+                type='text'
+                readOnly
+                value={authLink}
+                className='fc-input fc-mono'
+                aria-label={t('授权链接')}
+                style={{ fontSize: 12, whiteSpace: 'nowrap', overflowX: 'auto' }}
+                onFocus={event => event.currentTarget.select()}
+              />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+                <button
+                  type='button'
+                  className='fc-btn is-tonal is-sm is-pill'
+                  onClick={() => void openExternalUrl(authLink)}
+                >
+                  {t('打开浏览器')}
+                </button>
+                <button
+                  type='button'
+                  className='fc-btn is-primary is-sm is-pill'
+                  onClick={async () => {
+                    await copyText(authLink)
+                    store.toast(t('已复制授权链接'), 'success')
+                  }}
+                >
+                  {t('复制链接')}
+                </button>
               </div>
-              <button
-                type='button'
-                className='fc-btn is-tonal is-sm is-pill'
-                onClick={async () => {
-                  await copyText(authLink)
-                  store.toast(t('已复制授权链接'), 'success')
-                }}
-              >
-                {t('复制链接')}
-              </button>
             </div>
           ) : null}
 

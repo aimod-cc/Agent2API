@@ -14,6 +14,10 @@ export function RouteIcon({ name, size = 16 }: { name: string; size?: number }) 
     more: 'M4 12h.01M12 12h.01M20 12h.01',
     search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
     check: 'M5 12l4 4L19 6',
+    x: 'M18 6 6 18M6 6l12 12',
+    layers: 'm12 3 9 4.5-9 4.5-9-4.5L12 3ZM3 12l9 4.5 9-4.5M3 16.5l9 4.5 9-4.5',
+    filter: 'M4 6h16M7 12h10M10 18h4',
+    chevronUp: 'm18 15-6-6-6 6',
     chevronLeft: 'm15 5-7 7 7 7',
     chevronRight: 'm9 5 7 7-7 7',
   }
@@ -59,12 +63,12 @@ export function formatDuration(ms?: number | null): string {
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
   return `${Math.floor(ms / 60_000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`
 }
-export function timeText(ts: number): string { return new Date(ts).toLocaleString() }
+export function timeText(ts: number): string { return new Date(ts).toLocaleString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined) }
 export function strategyLabel(strategy?: string): string {
   return strategy === 'rotate' || strategy === 'usage' ? t('负载均衡')
     : strategy === 'provider' ? t('家内轮询') : t('顺序优先')
 }
 export function stickyLabel(sticky?: string): string {
-  return sticky === 'session' ? t('会话内') : sticky === 'off' ? t('关闭')
+  return sticky === 'session' ? t('会话内') : sticky === 'off' ? t('已停用')
     : sticky === 'turn' ? t('每轮') : t('自动')
 }

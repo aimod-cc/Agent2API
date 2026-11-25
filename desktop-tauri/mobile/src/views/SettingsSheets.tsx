@@ -696,16 +696,31 @@ export function ForwardingConfigSheet({ onClose }: { onClose: () => void }) {
           }
         />
         <ListItem
-          icon='shield'
-          title='敏感客户端指纹清洗'
-          subtitle='剥离下游请求中易触发上游风控的特征词'
+          icon='sliders'
+          title='关键词替换'
+          subtitle='按词表替换或删除出站请求中的指定文本与表头'
           trailing={
             <CommonSwitch
               checked={Boolean(bundle?.sanitize)}
               onChange={async next => {
                 setBundle(prev => (prev ? { ...prev, sanitize: next } : prev))
                 await saveCompatSwitch('sanitize', next).catch(() => {})
-                store.toast('已更新指纹清洗', 'success')
+                store.toast('已更新关键词替换', 'success')
+              }}
+            />
+          }
+        />
+        <ListItem
+          icon='shield'
+          title='隐私脱敏'
+          subtitle='转发前遮罩密钥、个人隐私与自定义保密词，并在响应时还原'
+          trailing={
+            <CommonSwitch
+              checked={Boolean(bundle?.privacyEnabled)}
+              onChange={async next => {
+                setBundle(prev => (prev ? { ...prev, privacyEnabled: next } : prev))
+                await saveCompatSwitch('privacy', next).catch(() => {})
+                store.toast('已更新隐私脱敏', 'success')
               }}
             />
           }

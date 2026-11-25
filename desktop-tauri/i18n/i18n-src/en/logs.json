@@ -143,5 +143,6 @@
   "错误 {n}": "Errors {n}",
   "阅读模式": "Reading mode",
   "阅读模式，列表保持不动": "Reading mode: list stays in place",
-  "附加数据": "Additional data"
+  "附加数据": "Additional data",
+  "{n} 条#one": "{n} entry"
 }

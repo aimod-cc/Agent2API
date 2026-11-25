@@ -24,6 +24,23 @@
 .plugin-login-browser-choice [data-slot='segmented-thumb'] { border-radius: 6px; }
 .plugin-login-browser-choice [data-slot='segmented-item'][data-disabled] { opacity: .55; }
 .plugin-login-browser-fixed { display: flex; align-items: center; width: fit-content; min-height: 36px; padding: 8px 12px; border: 1px solid var(--ui-hairline); border-radius: 8px; background: var(--ui-surface-2); color: var(--ui-text-2); font-size: 13px; }
+.plugin-login-external-box { display: flex; min-width: 0; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--ui-hairline); border-radius: var(--radius-md, 10px); background: var(--ui-surface-2); }
+.plugin-login-link-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.plugin-login-link-head > [data-slot='label'] { color: var(--ui-text-2); font-size: 12px; font-weight: 500; }
+.plugin-login-link-group { background: var(--ui-surface); height: 34px; min-height: 34px; }
+.acct-add-form-dialog [data-slot='input-group'].plugin-login-link-group { height: 34px; min-height: 34px; }
+.plugin-login-link-input,
+.acct-add-form-dialog [data-slot='input-group'].plugin-login-link-group > input[data-slot='input-group-control'] { height: 32px; min-height: 32px; font-family: var(--ui-font-mono); font-size: 12px; color: var(--ui-foreground); white-space: nowrap; overflow-x: auto; overflow-y: hidden; text-overflow: clip; cursor: text; user-select: text; }
+.plugin-login-link-input::placeholder { font-family: var(--ui-font-sans); color: var(--ui-muted-foreground); }
+.plugin-login-link-actions { gap: 2px; padding-right: 4px; }
+.plugin-login-link-sep { width: 1px; height: 14px; background: var(--ui-hairline); margin: 0 2px; flex: none; }
+.plugin-login-link-btn { height: 26px; min-height: 26px; font-size: 12px; padding: 0 8px; color: var(--ui-text-2); }
+.plugin-login-link-btn.is-primary-action { color: var(--ui-primary-fg); }
+.plugin-login-link-btn.is-primary-action:hover:not(:disabled) { background: var(--ui-primary-soft); color: var(--ui-primary-fg); }
+.plugin-login-link-btn.is-copied { color: var(--ui-success); }
+.plugin-login-auto-open-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 2px; }
+.plugin-login-checkbox-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 400; color: var(--ui-foreground); cursor: pointer; user-select: none; }
+.plugin-login-checkbox-label[data-disabled='true'] { opacity: .55; cursor: not-allowed; }
 .plugin-login-options { border-top: 1px solid var(--ui-hairline); border-bottom: 1px solid var(--ui-hairline); }
 .plugin-login-options-trigger { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; min-height: 44px; padding: 12px 0; border-radius: 0; font-size: 12px; font-weight: 400; }
 .plugin-login-options-label, .plugin-login-options-summary { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -74,6 +91,16 @@
 .plugin-login-sms-status.is-sent { color: var(--ui-success); }
 .plugin-login-sms-status.is-expired { color: var(--ui-warning); }
 .plugin-login-submit { min-height: 34px; font-size: 13px; font-weight: 600; }
+.plugin-credential-file-list { display: flex; flex-direction: column; border: 1px solid var(--ui-hairline); border-radius: 8px; background: var(--ui-surface-2); overflow: hidden; }
+.plugin-credential-file-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--ui-hairline); color: var(--ui-muted-foreground); font-size: 11px; }
+.plugin-credential-file-rows { display: flex; flex-direction: column; max-height: 184px; overflow-y: auto; }
+.plugin-credential-file-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-bottom: 1px solid var(--ui-hairline); font-size: 12px; }
+.plugin-credential-file-row:last-child { border-bottom: 0; }
+.plugin-credential-file-meta { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; flex-wrap: wrap; }
+.plugin-credential-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ui-foreground); }
+.plugin-credential-file-size { flex: none; color: var(--ui-muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+.plugin-credential-failures { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; font-size: 12px; line-height: 1.5; }
+.plugin-credential-failures li { overflow-wrap: anywhere; }
 @media (max-width: 720px) {
   .plugin-account-form { gap: 20px; }
   .plugin-login-methods [data-slot='segmented-item'] { flex: 1 1 calc(33% - 4px); padding: 8px; font-size: 12px; }

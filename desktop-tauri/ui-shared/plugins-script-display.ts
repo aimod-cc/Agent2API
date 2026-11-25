@@ -114,16 +114,24 @@ export function scriptPluginDescription(pack: ScriptPackage, recommended: Script
   return t('作者尚未提供插件介绍。')
 }
 
+function allSummaryTexts(summary?: Record<string, string> | null): string[] {
+  if (!summary || typeof summary !== 'object') return []
+  return Object.values(summary).filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+}
+
 export function matchesScriptPlugin(pack: ScriptPackage, recommended: ScriptRecommendation[], query: string, t: PluginTranslate): boolean {
   const keyword = query.trim().toLocaleLowerCase()
+  const matched = recommended.find(item => isRecommendationInstalled(item, [pack]))
   return !keyword || [pack.id, pack.name, pack.repository, pack.source?.kind === 'github' ? pack.source.repository : '', scriptPluginName(pack, recommended, t),
-    scriptPluginDescription(pack, recommended, t), scriptSourceLabel(pack, t), ...pack.providers.map(provider => `${provider.id} ${t(provider.label)}`)]
+    scriptPluginDescription(pack, recommended, t), ...allSummaryTexts(pack.summary), ...allSummaryTexts(matched?.summary),
+    scriptSourceLabel(pack, t), ...pack.providers.map(provider => `${provider.id} ${provider.label} ${t(provider.label)}`)]
     .join(' ').toLocaleLowerCase().includes(keyword)
 }
 
 export function matchesRecommendedPlugin(item: ScriptRecommendation, query: string, t: PluginTranslate): boolean {
   const keyword = query.trim().toLocaleLowerCase()
-  return !keyword || [item.name, item.source, item.repository, item.label, t(item.label), scriptSourceLabel(item, t), ...item.providers, recommendedDescription(item, t)]
+  return !keyword || [item.name, item.source, item.repository, item.label, t(item.label), scriptSourceLabel(item, t),
+    ...item.providers, recommendedDescription(item, t), ...allSummaryTexts(item.summary)]
     .join(' ').toLocaleLowerCase().includes(keyword)
 }
 

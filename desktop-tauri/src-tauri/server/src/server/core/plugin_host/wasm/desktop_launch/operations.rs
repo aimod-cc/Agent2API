@@ -57,6 +57,7 @@ pub(super) struct Operation {
     pub executable: PathBuf,
     pub targets: Arc<BTreeMap<String, storage::Target>>,
     pub setting: settings::Setting,
+    pub launch_args: Vec<String>,
     pub restart: bool,
     pub hot_switch: bool,
     pub initial_running: bool,
@@ -76,8 +77,8 @@ impl Operation {
         if self.cancel.is_cancelled() { return Err("本次启动已取消".into()); }
         if Instant::now() >= self.deadline { return Err("本次启动确认已过期".into()); }
         self.binding.current()?;
-        if settings::read(&self.db, &self.binding.provider, &self.binding.client.id)?.path != self.setting.path {
-            return Err("本机客户端路径设置已变化，请重新确认".into());
+        if settings::read(&self.db, &self.binding.provider, &self.binding.client.id)? != self.setting {
+            return Err("本机客户端设置已变化，请重新确认".into());
         }
         paths::identity(&self.binding.client, &self.executable)
     }
@@ -156,6 +157,8 @@ pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Pr
     let raw_proxy = origin.initial_proxy().clone();
     let requested_use_proxy = selection.use_proxy;
     let setting = settings::read(&db, &binding.provider, &binding.client.id)?;
+    let launch_args = settings::parse_args(&setting.args)?;
+    let launch_args_for_probe = launch_args.clone();
     let client = binding.client.clone();
     let override_path = setting.path.clone();
     let (executable, targets, running, hot_switch, proxy_state, pending) = crate::server::core::blocking::run(move || {
@@ -166,6 +169,7 @@ pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Pr
         let running = windows::running(&executable)?;
         let hot_switch = if running && proxy_state.resolved.is_none() {
             windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
+                && windows::running_has_args(&executable, &launch_args_for_probe)?
         } else {
             false
         };
@@ -175,7 +179,7 @@ pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Pr
     binding.current()?;
     if !manager.is_current() { return Err("本机管理会话已变化".into()); }
     let id = random_id()?;
-    let operation = Arc::new(Operation { id: id.clone(), manager, binding, db, executable, targets: Arc::new(targets), setting,
+    let operation = Arc::new(Operation { id: id.clone(), manager, binding, db, executable, targets: Arc::new(targets), setting, launch_args,
         restart: running && !hot_switch, hot_switch, initial_running: running, proxy: proxy_state, pending_backup: pending, cancel: CancellationToken::new(), deadline: Instant::now() + Duration::from_secs(180),
         state: Mutex::new(State { phase: "awaiting_confirmation", message: String::new(), confirmed: false, worker: false,
             committed: false, started: false, restored: false, client_running: running, backup: None, error: false }), changed: Notify::new(),
@@ -221,11 +225,13 @@ pub fn confirm(manager: Source, intent: &str, restart_confirmed: bool) -> Result
     let executable = operation.executable.clone();
     let targets = operation.targets.clone();
     let use_proxy = operation.proxy.resolved.is_some();
+    let launch_args = operation.launch_args.clone();
     let (running, hot_switch, pending) = crate::server::core::blocking::in_place(move || {
         paths::identity(&client, &executable)?;
         let running = windows::running(&executable)?;
         let hot_switch = if running && !use_proxy {
             windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
+                && windows::running_has_args(&executable, &launch_args)?
         } else {
             false
         };
@@ -269,23 +275,29 @@ pub async fn settings(manager: Source, store: AccountStore, db: Db, selection: S
     binding.current()?;
     if !manager.is_current() { return Err("本机管理会话已变化".into()); }
     Ok(json!({ "provider": selection.provider, "client": binding.client.id, "path": setting.path,
+        "args": setting.args,
         "detected": detected.as_ref().ok().and_then(|path| path.as_ref()).map(|path| path.display().to_string()),
-        "error": detected.err(), "revision": settings::revision(&binding.package, &setting.path),
+        "error": detected.err(), "revision": settings::revision(&binding.package, &setting),
         "permission": "per_operation_confirmation" }))
 }
 
-pub async fn configure(manager: Source, store: AccountStore, db: Db, selection: Selection, path: String, revision: &str) -> Result<Value, String> {
+pub async fn configure(manager: Source, store: AccountStore, db: Db, selection: Selection, path: Option<String>, args: Option<String>, revision: &str) -> Result<Value, String> {
     valid(&selection)?;
     let binding = Binding::capture(&store, &selection.provider, &selection.account, &selection.client)?;
     let previous = settings::read(&db, &selection.provider, &selection.client)?;
-    if settings::revision(&binding.package, &previous.path) != revision || path.len() > 2048 { return Err("插件或程序路径设置已变化，请重新读取".into()); }
-    if !path.is_empty() {
-        let client = binding.client.clone(); let candidate = path.clone();
+    if settings::revision(&binding.package, &previous) != revision { return Err("插件或客户端设置已变化，请重新读取".into()); }
+    let path_supplied = path.is_some();
+    let next_path = path.unwrap_or_else(|| previous.path.clone());
+    let next_args = args.map(|value| value.trim().to_string()).unwrap_or_else(|| previous.args.clone());
+    if next_path.len() > 2048 { return Err("本机客户端路径无效".into()); }
+    settings::parse_args(&next_args)?;
+    if !next_path.is_empty() && (path_supplied || next_path != previous.path) {
+        let client = binding.client.clone(); let candidate = next_path.clone();
         crate::server::core::blocking::run(move || paths::identity(&client, &PathBuf::from(candidate))).await.map_err(|_| "程序路径检查中断")??;
     }
     if !manager.is_current() { return Err("本机管理会话已变化，未保存程序路径".into()); }
     binding.current()?;
-    settings::save(&db, &selection.provider, &selection.client, settings::Setting { path }, &previous.path)?;
+    settings::save(&db, &selection.provider, &selection.client, settings::Setting { path: next_path, args: next_args }, &previous)?;
     settings(manager, store, db, selection).await
 }
 

@@ -19,7 +19,7 @@ export function errorPolicyDescription(record: ErrorPolicyRecord | null | undefi
       ? t('优先级已调至最低')
       : record.timeSource === 'upstream' ? t('冷却来自上游时间') : t('冷却来自本机估算'))
     if (record.scope) parts.push(scopeLabels(t)[record.scope])
-    parts.push(t('{time} 恢复', { time: new Date(record.resetAt).toLocaleString() }))
+    parts.push(t('{time} 恢复', { time: new Date(record.resetAt).toLocaleString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined) }))
   }
   return parts.filter(Boolean).join(' · ')
 }

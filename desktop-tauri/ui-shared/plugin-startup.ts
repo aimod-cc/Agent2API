@@ -84,10 +84,17 @@ export function pluginPhaseDetail(status: PluginLoadStatus | null | undefined, t
 
 type View = { value: PluginStartupSnapshot | null; error: string; receivedAt: number; unavailable: boolean }
 let view: View = { value: null, error: '', receivedAt: 0, unavailable: false }
+let packStatusMap = new Map<string, PluginLoadStatus>()
 const listeners = new Set<() => void>()
 export const subscribePluginStartup = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } }
 export const getPluginStartup = () => view
-function publish(patch: Partial<View>) { view = { ...view, ...patch }; listeners.forEach(listener => listener()) }
+function publish(patch: Partial<View>) {
+  view = { ...view, ...patch }
+  if ('value' in patch) {
+    packStatusMap = new Map((view.value?.packs || []).map(pack => [pack.id, pack.startup]))
+  }
+  listeners.forEach(listener => listener())
+}
 let wake: ((reusePending?: boolean) => void) | undefined
 export function refreshPluginStartup() { wake?.() }
 export function refreshPluginStartupIfIdle() { wake?.(true) }
@@ -129,9 +136,23 @@ export function startPluginStartupPolling(options: {
       if (!next || typeof next.bootId !== 'string' || typeof next.revision !== 'string'
         || !next.providers || !Array.isArray(next.packs)) throw new Error('Invalid plugin startup status')
       failures = 0
-      const changed = view.value?.bootId !== next.bootId || view.value?.revision !== next.revision
-      publish({ value: next, error: next.error || '', receivedAt: Date.now(), unavailable: false })
-      if (changed) options.onChange?.()
+      const prev = view.value
+      const changed = !prev || prev.bootId !== next.bootId || prev.revision !== next.revision
+      const metaChanged = !prev
+        || prev.availabilityRevision !== next.availabilityRevision
+        || Boolean(prev.pending) !== Boolean(next.pending)
+        || Boolean(prev.booting) !== Boolean(next.booting)
+        || (prev.error || '') !== (next.error || '')
+        || view.error !== (next.error || '')
+        || view.unavailable
+        || prev.scriptOperation?.active !== next.scriptOperation?.active
+        || prev.scriptOperation?.target?.id !== next.scriptOperation?.target?.id
+        || (prev.scriptOperation?.error || '') !== (next.scriptOperation?.error || '')
+        || prev.scriptOperation?.updatedAt !== next.scriptOperation?.updatedAt
+      if (changed || metaChanged || next.pending) {
+        publish({ value: next, error: next.error || '', receivedAt: Date.now(), unavailable: false })
+      }
+      if (prev && (prev.bootId !== next.bootId || prev.revision !== next.revision)) options.onChange?.()
       const availability = `${next.bootId}:${next.availabilityRevision}:${Boolean(next.booting)}`
       const session = options.session()
       if ((lastAvailable && lastAvailable !== availability || !session
@@ -175,7 +196,7 @@ export function startPluginStartupPolling(options: {
 }
 
 export function startupForPack(id: string, fallback?: PluginLoadStatus | null): PluginLoadStatus | null | undefined {
-  const live = view.value?.packs.find(pack => pack.id === id)?.startup
+  const live = packStatusMap.get(id)
   return fallback && (!live || fallback.updatedAt > live.updatedAt) ? fallback : live || fallback
 }
 export function hiddenWithStartup(hidden: HiddenAccountsSummary): HiddenAccountsSummary {

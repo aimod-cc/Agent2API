@@ -1,49 +1,27 @@
 /* ─────────────────────────────────────────────
-   请求日志页：转发明细表（列形态参考 OmniProxy 的请求日志）
-   列表容器与筛选行（.log-list / .log-empty / .log-filters）沿用 page-logs.css
-   的同一套声明，本文件只写表格本身、两个维度筛选的宽度上限与窄窗口重排。
-   页脚分页栏是通用件（islands/table-shell.tsx），样式在 layout.css。
-   颜色一律取 tokens.css 的语义变量，浅色深色共用同一组声明。
+   请求日志页：两行高密度克制表（9 默认列 + 2 可选列）
+   列表容器与筛选行（.log-list / .log-empty / .log-filters）沿用 page-logs.css；
+   颜色取自 tokens.css / aliases.css 语义变量，浅色与深色共用同一套声明。
    ───────────────────────────────────────────── */
-.log-filters #req-provider { max-width: 168px; }
-.log-filters #req-model { max-width: 200px; }
 
-/* 十四列：时间 / 提供商·账号 / 重试 / 状态 / 模型 / 客户端 / API Key / 用时 / 速度 / 积分 / 费用 / 用量 / 错误 / 详情。
-   时间、用时与速度定宽（等宽数字 + tabular-nums，竖着比对才齐），
-   其余占弹性宽度（都是不定长内容，给固定宽度会互相挤）：
-   模型 1.3fr（claude-sonnet-4-5 这类名字要放得下），
-   用量 1.6fr（两行读数里 in/out/all 最长），超出由省略号收住、完整值进 title。
-   状态 96px：进行中的行有两行（阶段徽章 + 阶段计时），而徽章最长是
-   「等待响应」四个字（约 76px）—— 68px 那一版会把它压成省略号。
-   客户端 110px：最长的一档是「GitHub Copilot」（约 90px），再留一点余量。
-   积分 72px：只放「0.06」这类两位小数读数（WorkBuddy 的 usage.credit）。
-   费用 82px：按模型计价表与汇率估算的请求费用（$0.0008 / ¥0.0058 这类读数）。
-   详情列定宽（只有一个「详情」按钮或一个「-」）。
-
-   --req-cols 是用户拖过的列宽（table-columns.js 写在 #req-list 上，靠继承
-   作用到每一行 —— 表格是整体重绘的，变量不需要在渲染后再写一遍）：
-   拖过哪一列，那一条轨道就从 minmax(…fr) 换成固定像素，没拖过的仍是弹性权重。
-   拖动只改被拖的那一列，其余列保持各自宽度；总宽超出容器就由下面的横向滚动
-   接手（列宽是绝对量，不做「按比例分完容器」那套）。变量没设时走下面的默认值，
-   改默认列宽时与 table-columns.js 里对应列的 track 字段要同步。 */
+/* 默认 9 列：时间 / 状态 / 来源 / 提供商·账号 / 模型 / 用时 / 速度 / 用量·缓存 / 花费。
+   列宽变量 --req-cols 由 table-columns.js 写在 #req-list 上，靠继承作用到表头与数据行。
+   改默认列宽时需同步 table-columns.js 与 requests-page.tsx 的 track 定义。 */
 .req-row,
 .req-head {
   display: grid;
   grid-template-columns: var(--req-cols,
-    92px minmax(0, 1.1fr) 52px 96px minmax(0, 1.3fr) 110px 140px 96px 96px 72px 82px minmax(0, 1.6fr) minmax(0, 1.2fr) 60px);
-  gap: 12px;
+    74px 96px minmax(116px, 0.95fr) minmax(144px, 1.15fr) minmax(156px, 1.4fr) 88px 88px 148px 82px);
+  gap: 14px;
   align-items: center;
-  padding: 10px 14px;
-  /* 列表是 flex 列容器：条目不许被压缩，超出的一律交给列表滚动 */
+  padding: 9px 16px;
   flex: none;
 }
 
-/* 表头：粘在列表顶部。列表自身滚动，滚动条是它自己的（不是页面），
-   sticky 的参照物就是 .log-list，因此顶部偏移写 0。 */
 .req-head {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
   padding-top: 8px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
@@ -54,146 +32,302 @@
   letter-spacing: .02em;
 }
 
-/* 表头格子是列宽把手的定位锚（.col-grip 绝对定位挂在它内側右缘，见 components.css） */
-.req-head > span { position: relative; }
-.req-head .req-target-label { display: inline-flex; align-items: center; gap: 4px; }
+/* 表头格子是列宽把手的定位锚（.col-grip 挂在右侧外缘，不能加 overflow: hidden）；所有列头统一居中 */
+.req-head > span { position: relative; text-align: center; }
+.req-head .req-target-label { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
 
-/* ── 横向滚动 ──────────────────────────────────────────────
-   拖动把列拖宽、或窗口窄到装不下所有列时，让列表横向滚动，而不是把列压没：
-   不会伸缩的列（时间 / 重试 / 详情，以及被拖过的那些）压不动时只能滚。
-
-   行宽下限由 table-columns.js 按「不会伸缩的列之和 + 列间距 + 左右内边距」算好，
-   写在 #req-list 的 --req-row-min 上：固定列把容器占满时，行与表头跟着撑到内容
-   宽，溢出那截才有背景与下边框（否则横向滚到右边，表头会缺一块、行底色只铺
-   半截）；不溢出时它正好等于容器宽，与 min-width: 100% 等效。
-
-   **不要改成 CSS 的 max-content**：那是按内容的固有宽度算的，同一列在表头
-   （「用量」两个字）和数据行（两行读数）里会算出两个宽度，表头与数据直接错位，
-   而且列被内容撑开就不再触发省略号。 */
+/* 横向滚动：行宽下限由 table-columns.js 写入 --req-row-min，溢出时保证行底色与下边框铺满 */
 #req-list { overflow-x: auto; }
-#req-list > .req-row,
+#req-list > .req-row-wrap,
 #req-list > .req-head {
   min-width: var(--req-row-min, 100%);
 }
 
-.req-row { border-bottom: 1px solid var(--hairline); transition: background .12s ease; }
-.req-row:last-child { border-bottom: none; }
-.req-row:hover { background: var(--row-hover); }
-
-/* 表头里用时一格跟数值同侧对齐（用时是右对齐的数值列；速度与积分默认居中，
-   见下面 .req-speed / .req-credit 的说明） */
-.req-head .req-dur { text-align: right; }
-.req-head .req-speed { text-align: center; }
-.req-head .req-credit { text-align: center; }
-.req-head .req-cost { text-align: right; }
-
-/* 失败行轻微着色，与事件日志 error 行同一手法（不干扰阅读的淡底） */
-.req-row.failed { background: color-mix(in srgb, var(--danger-soft) 45%, transparent); }
-.req-row.failed:hover { background: var(--danger-soft); }
-
-/* 无值占位（重试 / 错误列的「-」）：比正文淡一档，空着会被当成渲染缺失 */
-.req-none { color: var(--text-3); }
-
-/* ─── 进行中的行（status=0，转发还没收尾）─────────────────────
-   后端契约：转发一开始就插一条 status=0 的行，收尾后由终态记账覆盖
-   （见 stats_api::stats_requests）。行本身不加底色 —— 它还没落定，
-   红底（.failed）是终态的颜色，进行中的信号交给状态徽章那一格。 */
-
-/* 进行中行**分阶段**显示（连接中 / 等待响应 / 响应中 / 重试中，本次改造）：
-   文案与类名由 request-phase.js 给（那边是唯一的文案来源），这里只管配色。
-   色相对标 OmniProxy 的 Tag color（cyan / green / orange / processing），
-   落到本项目的语义令牌上：连接中 = info 蓝（与改造前那枚「进行中」同色，
-   语义也是同一档）、等待响应 = 青（就地定色，理由见下）、响应中 = ok 绿、
-   重试中 = warn 琥珀。四个色相在浅深两套主题下都取自 tokens.css 的
-   --x / --x-soft / --x-bd 三件套，所以这里不需要再写主题分支。
-
-   为什么「等待响应」要就地定一个青色而不是复用现有四组之一：它与另外三个
-   语义都不同（不是失败、不是完成、也不是「刚开始」），而等待时长恰恰是用户
-   最常盯着看的一格 —— 借 --ok 会让「等模型出字」（可能很慢）看着像已经成功，
-   借 --info 又与「连接中」分不开。OmniProxy 那边同样是就地给了个 cyan。 */
-
-/* 没有阶段可读的在途行（旧数据、更早版本写入的行，见 request-phase.js 的
-   FALLBACK_CLS）回落成改造前那枚「进行中」：info 蓝，与下面「连接中」同色
-   —— 它们本来就是同一档语义，只是这枚说不出「卡在哪一步」。 */
-
-/* 排队中：既不是失败（不取 warn）也不是正常推进（不取 ok），
-   用「信息」档的紫蓝，与「等待响应」的青蓝区分开 */
-
-@media (prefers-color-scheme: dark) {
+/* 行包裹层：统一承载数据行 + 可选内联报错条，共享悬浮底色、左侧状态细线与下分割线 */
+.req-row-wrap {
+  position: relative;
+  flex: none;
+  border-bottom: 1px solid var(--hairline);
+  transition: background .12s ease;
 }
+.req-row-wrap:last-child { border-bottom: none; }
+.req-row-wrap.is-clickable { cursor: pointer; }
+.req-row-wrap:hover { background: var(--row-hover); }
 
-/* 状态列两行（徽章 + 阶段计时）——只在进行中的行上出现。
-   与用时列的两行结构同一手法：主读数是徽章，次读数是「这个阶段已经持续了
-   多久」（淡一档、小半号）。这一列原先定宽 68px，而徽章最长是「等待响应」
-   四个字放不下，所以本次加宽到 96px（见下方 grid-template-columns 与
-   table-columns.js 的登记，两处必须同改）。 */
-.req-row .req-status {
+.req-row-wrap::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  pointer-events: none;
+}
+.req-row-wrap.failed { background: color-mix(in srgb, var(--danger-soft) 36%, transparent); }
+.req-row-wrap.failed:hover { background: color-mix(in srgb, var(--danger-soft) 68%, transparent); }
+.req-row-wrap.failed::before { background: var(--danger); }
+.req-row-wrap.running::before { background: var(--info); }
+.req-row-wrap.is-selected { background: color-mix(in srgb, var(--primary-soft) 52%, transparent); }
+.req-row-wrap.is-selected:hover { background: color-mix(in srgb, var(--primary-soft) 68%, transparent); }
+.req-row-wrap.is-selected::before { background: var(--primary); }
+
+/* 失败行底部内联单行报错条（「错误」列关闭时自动展示，不占横向列宽） */
+.req-inline-error {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 0;
-}
-
-.req-row .req-status-badge {
-  display: flex;
-  min-width: 0;
-}
-
-/* 阶段计时：等宽 + tabular-nums，相邻行的秒数竖着能直接比大小 */
-.req-row .req-status-line {
-  overflow: hidden;
-  /* 与 .req-usage-line 同一条道理：flex 子项不限宽就会被内容顶开、压到隔壁列 */
-  max-width: 100%;
-  color: var(--text-3);
-  font-family: var(--font-mono);
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 16px 8px;
+  padding: 4px 10px;
+  border-radius: var(--r-xs);
+  border: 1px solid color-mix(in srgb, var(--danger-bd) 55%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 60%, transparent);
   font-size: 11px;
-  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+  min-width: 0;
+}
+.req-inline-error-label {
+  flex: none;
+  color: var(--danger);
+  font-weight: 600;
+}
+.req-inline-error-msg {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--danger);
+  font-family: var(--font-mono);
 }
 
-/* ─── 导航徽标的「进行中」态 ──────────────────────────────────
-   #nav-count-requests 两种数字共用一颗：进行中走 info 蓝（.is-running），
-   未读失败维持 layout.css 的既有红。用 ID 选择器是为了稳定压过
-   .nav-item .count:not(.muted) 的红色（与 update-notes.css 同一手法）。
+.req-none { color: var(--text-3); }
 
-   类名**刻意不叫 live**：layout.css 的 .live 是侧栏状态灯（7px 圆点、
-   绿底、光晕），同一个类名会把角标压成小圆点（数字挤在 7px 高度里）。
-   两颗组件都表达「活着」，但一个是灯、一个是数字，样式不能共用。 */
+/* ─── 导航徽标的「进行中」态 ─── */
 #nav-count-requests.is-running {
   border-color: var(--info-bd);
   background: var(--info-soft);
   color: var(--info);
 }
-
-/* 选中态导航项底色更深，保持同样的分离度（对齐 layout.css 的 active 覆盖） */
 .nav-item.active #nav-count-requests.is-running { background: var(--surface); }
 
-/* ─── 清理请求日志弹窗 ───────────────────────────────
-   已迁到组件库（见 ui-islands/src/islands/request-clear-modal.tsx）：两种清理方式
-   的单选卡片改走 ui-kit 的 RadioGroup + Tailwind 类，下面那套 .clear-mode 一族
-   随之移除。保留这条说明是为了让「原先为什么是卡片而不是 seg」的口径可追 ——
-   两种方式的差别（删不删统计行、动不动日报）必须写在选择的当下，
-   seg 只放得下名字，放不下后果说明。 */
+/* ─── 已选筛选条件的胶囊条 ─── */
+.req-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.req-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--primary-bd);
+  background: var(--primary-soft);
+  color: var(--primary-fg);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.req-filter-chip > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  opacity: .72;
+  transition: opacity .12s ease, background .12s ease;
+}
+.req-filter-chip > button:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+}
 
-/* 时间列：日期 + 时刻两行，等宽避免每一行的冒号错位。
-   数据格与表头格共用同一个类名（窄窗口要按列重排，见文件末尾的媒体查询），
-   所以每一条排版声明都带 .req-row 前缀限定在数据行上 —— 否则表头会被一并
-   套上等宽字体，一行小标题看着像数据。 */
+/* ─── ① 时间列（时刻 + 短日期）─── */
 .req-row .req-time {
   display: flex;
   flex-direction: column;
-  color: var(--text-3);
+  gap: 2px;
+  min-width: 0;
   font-family: var(--font-mono);
-  font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.req-time-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.req-time-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
 
-/* 提供商 / 账号：同格两行，提供商在上（主读数）、账号在下（次）。
-   两者都是短名词，省略号收住长名字（账号名可能是「ZCode 国际版 · 一长串 uuid」），
-   完整值在各自的 title 里。 */
+/* ─── ② 状态列（克制圆点 / 柔红错误码 / 阶段徽章 + 第二行微标）─── */
+.req-row .req-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+}
+.req-status-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+}
+.req-ok-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #16a34a;
+  flex: none;
+}
+.req-tag-err {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--danger-bd) 75%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.req-tag-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--info-bd);
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.req-live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+  animation: req-live-pulse 1.2s ease-in-out infinite;
+}
+@keyframes req-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .req-live-dot { animation: none; }
+}
+.req-row .req-status-badge {
+  display: flex;
+  min-width: 0;
+}
+.req-row .req-status-line {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态列第二行微标（重试 / 敏感词 / 测试或保活来源） */
+.req-micro-tags {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+}
+.req-micro-tag {
+  display: inline-flex;
+  align-items: center;
+  height: auto;
+  min-height: 16px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.req-micro-tag.is-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn-bd) 70%, transparent);
+}
+.req-micro-tag.is-sens {
+  color: var(--ui-sensitive);
+  background: var(--ui-sensitive-soft);
+  border-color: var(--ui-sensitive-bd);
+}
+.req-micro-tag.is-privacy {
+  color: var(--intl);
+  background: var(--intl-soft);
+  border-color: var(--intl-bd);
+}
+.req-micro-tag.is-privacy-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn-bd) 70%, transparent);
+}
+.req-micro-tag.is-privacy-block {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-bd);
+}
+.req-micro-tag.is-neutral {
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-color: var(--hairline);
+}
+.req-micro-tag.is-local {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: var(--info-bd);
+}
+.req-hover-tag {
+  height: auto;
+  cursor: help;
+}
+.req-hover-tag:focus-visible { box-shadow: var(--ring); }
+
+/* ─── ③ 来源列 & ④ 提供商 / 账号列（带真实 Logo + 22px 文本对齐缩进）─── */
+.req-row .req-source,
 .req-row .req-target {
   display: flex;
   flex-direction: column;
@@ -201,240 +335,274 @@
   min-width: 0;
 }
 
-.req-row .req-provider,
-.req-row .req-acct {
-  /* 必须限住宽度：列设置会给格子带上 ta-left，而 table-col-settings.css 的
-     `.req-row > .req-target.ta-left { align-items: flex-start }` 一并取消了
-     flex 子项默认的拉伸 —— 这两行的宽度随即变成「按内容算」（nowrap 一行两百
-     多像素），顶出格子压到右边列上，列再窄也不会出现省略号。
-     这里跟 .req-usage-line / .req-model-line / .req-dur-line 用同一个写法
-     （max-width: 100%）；单写 min-width: 0 实测压不住。 */
+.req-brand-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
   max-width: 100%;
+  line-height: 1.35;
+}
+.req-brand-logo {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  object-fit: contain;
+  display: block;
+}
+.req-brand-logo.is-rounded { border-radius: 3.5px; }
+.req-brand-glyph {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+}
+.req-brand-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.req-row .req-target .req-brand-text {
+  color: var(--text-2);
+  font-weight: 400;
 }
 
-.req-row .req-provider { color: var(--text-2); font-size: 12px; }
-.req-row .req-acct { color: var(--text-3); font-size: 11.5px; }
-
-/* 无提供商 / 无账号（旧数据或请求在任何账号接手前就失败）：给破折号 */
+.req-sub-indent {
+  min-width: 0;
+  max-width: 100%;
+  padding-left: 22px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
 .req-provider.is-empty,
 .req-acct.is-empty { color: var(--text-3); }
 
-/* 模型名：标识符用等宽，超长从尾部省略（完整值在 title 里） */
-.req-row .req-model {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 客户端：产品名（Codex / Claude Code …），普通文本 + 尾部省略。
-   与提供商 / 账号同档字号，不用等宽（它不是标识符）。 */
-.req-row .req-client,
-.req-row .req-api-key {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-2);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 无客户端记录（旧行 / 模型测试 / 请求未带 UA）：破折号，与 target 列的占位同一手法 */
-.req-row .req-client.is-empty { color: var(--text-3); }
-
-/* 上下名分行的形态（转发名 ≠ 请求名时，如映射 / 备援改写）：
-   ⬆️ 上游实际收到的名字（主读数）在上，⬇️ 下游请求的名字（淡一档）在下 ——
-   与用时列的两行结构同一手法；单行请求不受影响（类不出现）。 */
-.req-row .req-model-split {
+/* ─── ⑤ 模型列（上游实际模型 + ↳ 下游映射来源）─── */
+.req-row .req-model-stack {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  font-family: var(--font-mono);
 }
-
-.req-row .req-model-line {
-  overflow: hidden;
+.req-row .req-model-main-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   max-width: 100%;
-  text-overflow: ellipsis;
 }
-
+.req-row .req-model-line {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
 .req-row .req-model-line.sub {
   color: var(--text-3);
   font-size: 11px;
 }
 
-/* 用时：等宽 + 右对齐，相邻行的数字能直接竖着比大小。
-   两行：总用时（主读数）+ 首响（次读数，淡一档，与用量列的 sub 同一手法）。
-   只有数据行是多行，表头仍是单行文本
-   （所有排版声明都带 .req-row 前缀限定在数据行上，见上方 .req-time 的说明）。 */
+/* ─── ⑥ 用时列（右对齐等宽两行：总耗时 + 首字响应）─── */
 .req-row .req-dur {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 2px;
-  color: var(--text);
+  min-width: 0;
   font-family: var(--font-mono);
-  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
 }
-
 .req-row .req-dur-line {
   overflow: hidden;
   max-width: 100%;
   text-overflow: ellipsis;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
 }
-
-/* 首响是次读数：淡一档、小半号，不抢总用时 */
 .req-row .req-dur-line.sub {
   color: var(--text-3);
   font-size: 11px;
 }
 
-/* 速度：等宽 + tabular-nums，默认居中（与用时不同 —— 这一格只有一读数，
-   居中后与上下行的数字在同一中轴上，比贴右边留一大块空白更好读）。
-   用户仍可在列设置里改回靠右 / 靠左，那时由 ta-* 类覆盖这里。 */
+/* ─── ⑦ 速度列（默认表头表体均居中，等宽单行读数）─── */
 .req-row .req-speed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
   min-width: 0;
-  overflow: hidden;
-  color: var(--text);
   font-family: var(--font-mono);
-  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   text-align: center;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.req-row .req-speed.req-none { color: var(--text-3); }
-
-/* 积分：上游按请求上报的消耗（WorkBuddy 的 usage.credit），可带小数。
-   等宽 + tabular-nums，默认居中（与速度列同一取向：单个读数居中后与上下行同轴，
-   比贴边留一大块空白好读；这一列只有 72px，贴右时数字会贴着速度列）。
-   用户仍可在列设置里改回靠右 / 靠左，那时由 ta-* 类覆盖这里。
-   缺失显示「—」（.is-empty），与「上报了 0」区分。 */
-.req-row .req-credit {
-  min-width: 0;
+.req-row .req-speed-line {
   overflow: hidden;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
+  max-width: 100%;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.req-row .req-credit.is-empty { color: var(--text-3); }
-
-/* 费用：按模型计价表与汇率估算的请求费用，等宽 + tabular-nums + 默认右对齐，
-   窄拖后超出以省略号收住（完整明细在 title 里）；缺失/失败显示「—」（.is-empty）。 */
-.req-row .req-cost {
-  min-width: 0;
-  overflow: hidden;
   color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.35;
 }
-.req-row .req-cost.is-empty { color: var(--text-3); }
+.req-row .req-speed-line.is-dim { color: var(--text-3); }
 
-/* 用量两行：in / out / all 与 缓存读取 / 命中率。
-   等宽 + tabular-nums，超出省略（完整读数在 title 里）。 */
+/* ─── ⑦ 用量 / 缓存列（右对齐：↑in · ↓out + 缓存命中或合计）─── */
 .req-row .req-usage {
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 2px;
   min-width: 0;
+  text-align: right;
 }
-
 .req-usage-line {
   overflow: hidden;
-  /* 必须限住宽度：它是 .req-usage（flex 列）的子项，只写 overflow: hidden 时
-     宽度仍按内容算（读数一行 nowrap，两百多像素），顶出格子压到右边列上 ——
-     列再窄也不会出现省略号。这里跟 .req-model-line / .req-dur-line 用同一个
-     写法（max-width: 100%）；单写 min-width: 0 实测压不住。 */
   max-width: 100%;
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.req-usage-line.sub {
+  color: var(--text-3);
+  font-size: 11px;
+}
+.req-usage-line.is-dim { color: var(--text-3); }
+.req-usage-line.is-cache { color: var(--ok); }
+.req-tok-arrow { color: var(--text-3); margin-right: 1px; font-size: 10.5px; }
+.req-sep-dot { color: var(--text-3); opacity: .65; margin: 0 3px; }
 
-/* 第二行（缓存读取 / 命中率）是附加说明：淡一档，不抢主读数 */
-.req-usage-line.sub { color: var(--text-3); }
-/* 窄窗口：拆成多行，免得八列都缩成省略号。
-   断点取 1200px：默认窗口 1060px 时内容区约 772px，八列必然挤，
-   以下面的四列重排为准；拉宽到 1200 以上才换八列横排。
+/* 指标语义字色（用时 / 首字 / 速度 / 缓存共用主题语义令牌，浅色与深色自动适配） */
+.req-row .req-dur-line.is-tone-good,
+.req-row .req-speed-line.is-tone-good,
+.req-usage-line.is-tone-good { color: var(--ok); }
+.req-row .req-dur-line.is-tone-info,
+.req-row .req-speed-line.is-tone-info,
+.req-usage-line.is-tone-info { color: var(--info); }
+.req-row .req-dur-line.is-tone-warn,
+.req-row .req-speed-line.is-tone-warn,
+.req-usage-line.is-tone-warn { color: var(--warn); }
+.req-row .req-dur-line.is-tone-bad,
+.req-row .req-speed-line.is-tone-bad,
+.req-usage-line.is-tone-bad { color: var(--danger); }
 
-   ── 为什么每个格子都显式写 grid-row / grid-column ──
-   只给部分格子写列位置时，剩余格子由自动放置算法补空，落点取决于「哪个格子
-   已被占」这个隐式状态：以后往行里插一个新字段，落点会整体错一格且不报错。
-   写死行列值后，增删字段只影响它自己那一格。 */
-@media (max-width: 1200px) {
-  .req-row,
-  .req-head {
-    /* 第三格（状态）与宽窗口同一口径取 96px：窄窗口下它同样要放得下
-       「等待响应」四个字（比默认窗口更需要 —— 这里的弹性列只剩模型那一格） */
-    grid-template-columns: 92px minmax(0, 1fr) 96px 52px;
-    row-gap: 4px;
-  }
-  /* 重排成四行之后轨道已经不是那八条了：上面这条声明直接覆盖 --req-cols，
-     拖动没有意义，把手一并收起，免得点了没反应 */
-  .req-head .col-grip { display: none; }
+.req-row .req-dur-line.is-tone-good:not(.sub),
+.req-row .req-dur-line.is-tone-info:not(.sub),
+.req-row .req-dur-line.is-tone-warn:not(.sub),
+.req-row .req-dur-line.is-tone-bad:not(.sub),
+.req-row .req-speed-line.is-tone-good,
+.req-row .req-speed-line.is-tone-info,
+.req-row .req-speed-line.is-tone-warn,
+.req-row .req-speed-line.is-tone-bad { font-weight: 500; }
 
-  /* 表头只保留第一行的四格，其余列头隐藏（列位置已重排，留着会冲突） */
-  .req-head .req-time { grid-row: 1; grid-column: 1 / 2; }
-  .req-head .req-model { grid-row: 1; grid-column: 2 / 3; }
-  .req-head .req-status { grid-row: 1; grid-column: 3 / 4; }
-  .req-head .req-retry { grid-row: 1; grid-column: 4 / 5; }
-  .req-head .req-target,
-  .req-head .req-client,
-  .req-head .req-api-key,
-  .req-head .req-dur,
-  .req-head .req-speed,
-  .req-head .req-credit,
-  .req-head .req-cost,
-  .req-head .req-usage,
-  .req-head .req-error-cell { display: none; }
+/* ─── ⑧ 花费列（右对齐：预估费用 + 积分消耗）─── */
+.req-row .req-billing {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.req-billing-line {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.req-billing-line.is-strong { color: var(--text); font-weight: 500; }
+.req-billing-line.sub { color: var(--text-3); font-size: 11px; }
+.req-billing-line.is-dim { color: var(--text-3); }
 
-  /* 第一行：时间 + 模型 + 状态 + 重试 */
-  .req-row .req-time { grid-row: 1; grid-column: 1 / 2; }
-  .req-row .req-model { grid-row: 1; grid-column: 2 / 3; }
-  .req-row .req-status { grid-row: 1; grid-column: 3 / 4; }
-  .req-row .req-retry { grid-row: 1; grid-column: 4 / 5; }
-  /* 第二行：提供商 / 账号 + 用时（用时贴右） */
-  .req-row .req-target { grid-row: 2; grid-column: 1 / 3; }
-  .req-row .req-dur { grid-row: 2; grid-column: 3 / 5; }
-  /* 第三行：用量 + 积分（积分贴右，占最后一格；用量不再整行铺开，
-     但两行读数只需要约 250px，3/4 宽在默认窗口下仍然放得下） */
-  .req-row .req-usage { grid-row: 3; grid-column: 1 / 4; }
-  .req-row .req-credit { grid-row: 3; grid-column: 4 / 5; }
-  /* 第四行：客户端（左，跨到详情按钮之前）+ 详情（贴右）。
-     客户端不挤进第二行 —— 那一行右侧已经给了用时，96px 装不下「GitHub Copilot」 */
-  .req-row .req-client { grid-row: 4; grid-column: 1 / 4; }
-  .req-row .req-api-key { grid-row: 5; grid-column: 1 / 3; }
-  .req-row .req-speed { grid-row: 5; grid-column: 3 / 4; }
-  .req-row .req-cost { grid-row: 5; grid-column: 4 / 5; text-align: right; }
-  .req-row .req-detail { grid-row: 4; grid-column: 4 / 5; justify-self: end; }
-  /* 「-」占位不再独占一行：窄窗口下空行比省略号更难解释 */
-  .req-row .req-error-cell { display: none; }
-  /* 详情列头在窄窗口下没有稳定的列位（位置随有没有错误而变），一并隐藏 */
-  .req-head .req-detail { display: none; }
+/* ─── ⑨ 错误列 & ⑩ 详情列（默认隐藏，用户可在列设置开启）─── */
+.req-row .req-error-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.req-row .req-error-cell.req-none {
+  color: var(--text-3);
+  font-family: var(--font-sans);
+}
+.req-row .req-detail { justify-self: end; }
+.req-detail-btn { padding: 2px 8px; font-size: 11.5px; }
+
+/* 深色与跟随系统深色：点缀色提亮保持克制对比度 */
+:root[data-theme="dark"] .req-ok-dot { background: #22c55e; }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .req-ok-dot { background: #22c55e; }
 }
 
-/* 窄窗口：页头的自动刷新开关整行铺开，与日志页、报表页的时间范围同款处理。
-   不折的话开关会压在标题文案上换行，标题与 intro 各自占一行，读起来像断了半句。 */
+/* ─── 窄窗口重排（≤1080px，桌面中等窗口折成紧凑 3 行，避免水平挤压）─── */
+@media (max-width: 1080px) {
+  #req-list > .req-row-wrap,
+  #req-list > .req-head {
+    min-width: 0 !important;
+  }
+  .req-row,
+  .req-head {
+    grid-template-columns: 74px minmax(0, 1fr) 128px 92px;
+    row-gap: 6px;
+    column-gap: 12px;
+  }
+  .req-head .col-grip { display: none; }
+
+  .req-head .req-time { grid-row: 1; grid-column: 1 / 2; }
+  .req-head .req-model { grid-row: 1; grid-column: 2 / 3; }
+  .req-head .req-dur { grid-row: 1; grid-column: 3 / 4; }
+  .req-head .req-status { grid-row: 1; grid-column: 4 / 5; }
+  .req-head .req-source,
+  .req-head .req-target,
+  .req-head .req-speed,
+  .req-head .req-usage,
+  .req-head .req-billing,
+  .req-head .req-error-cell,
+  .req-head .req-detail { display: none; }
+
+  .req-row .req-time { grid-row: 1; grid-column: 1 / 2; }
+  .req-row .req-model { grid-row: 1; grid-column: 2 / 3; }
+  .req-row .req-dur { grid-row: 1; grid-column: 3 / 4; }
+  .req-row .req-status { grid-row: 1; grid-column: 4 / 5; align-items: flex-end; }
+  .req-row .req-source { grid-row: 2; grid-column: 1 / 3; }
+  .req-row .req-target { grid-row: 2; grid-column: 3 / 5; }
+  .req-row .req-usage { grid-row: 3; grid-column: 1 / 3; align-items: flex-start; text-align: left; }
+  .req-row .req-speed { grid-row: 3; grid-column: 3 / 4; align-items: center; text-align: center; }
+  .req-row .req-billing { grid-row: 3; grid-column: 4 / 5; }
+  .req-row .req-detail { grid-row: 4; grid-column: 4 / 5; justify-self: end; }
+  .req-row .req-error-cell { display: none; }
+}
+
 @media (max-width: 900px) {
   .page[data-page="requests"] .panel-head .head-actions {
     flex-basis: 100%;
@@ -443,35 +611,88 @@
   }
 }
 
-/* ─── 详情列与详情弹窗（调试模式的上游原始报文）───────────────
-   报文里是上游原文（SSE 文本、JSON 体），一律等宽字体 + 保留换行；
-   弹窗比常规确认框宽（原文行很长），高度吃满可用空间后内部滚动。 */
-
-.req-row .req-detail { justify-self: end; }
-
-/* ─── 请求详情弹窗的样式已随迁移移除 ───────────────────
-   弹窗迁到组件库后（ui-islands/src/islands/request-detail.tsx），下面这些老类名
-   失去了消费者，一并删除：.modal-wide（宽度）、#req-detail-terminate[hidden]、
-   .req-detail-meta、.req-detail-segs、.seg-dot、.req-detail-pane 一族、
-   .req-detail-empty、.req-detail-grid 一族、.req-detail-sub / -error / -model-split。
-   宽度改由 DialogContent 的 className 表达；三标签改走组件库的 SegmentedControl；
-   详情网格改走 Tailwind 类。保留的只有下面两条 —— 它们服务的是**别的地方**：
-   · .req-detail-btn  列表行的「详情」按钮（requests-panel.js）
-   · .req-detail-pre  「预览对话」的原文折叠块（conversation-preview.js） */
-
-/* 详情按钮：小号、无边框感（一列里最轻的控件，不与状态徽章抢注意力） */
-.req-detail-btn {
-  padding: 2px 8px;
-  font-size: 11.5px;
+/* ─── 右侧详情抽屉：克制外框分组卡片（无内部横线，仅合计前留一条细线）─── */
+.req-detail-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
+.req-detail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.req-detail-group-title {
+  padding-left: 2px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+.req-detail-dl {
+  display: flex;
+  flex-direction: column;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.req-detail-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 5px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.req-detail-row.is-total {
+  margin-top: 3px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+.req-detail-k {
+  flex: none;
+  color: var(--text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.req-detail-v {
+  min-width: 0;
+  text-align: right;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.req-detail-v.is-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.req-detail-v.is-strong { font-weight: 600; }
+.req-detail-v.is-muted { color: var(--text-3); }
+.req-detail-v.is-left { flex: 1; text-align: left; }
 
-/* 「终止请求」按钮与详情网格的样式已随迁移移除（见上）。
-   原先这里有一条 #req-detail-terminate[hidden] 的规则，是为了压过
-   components.css 给 button 设的 display: inline-flex —— 新实现里「终止请求」
-   由 React 条件渲染（不渲染即不存在），不再需要 hidden 这条通路。 */
-
-/* 空段标记与面板切换的样式已随迁移移除（.seg-dot / .req-detail-pane 一族）：
-   新实现的三个 pane 常驻、用 hidden 切显示，标签由组件库的 SegmentedControl 渲染。 */
+.req-detail-err-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--danger-bd) 75%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 52%, transparent);
+}
+.req-detail-err-text {
+  flex: 1;
+  min-width: 0;
+  max-height: 160px;
+  overflow: auto;
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 .req-detail-pre {
   max-height: 320px;
@@ -489,79 +710,15 @@
   overflow: auto;
 }
 
-/* 重试列的标签与悬停面板（request-hover.js）───────────────
-   这一列现在承载两件事：重试链（橙标签）与敏感词命中（紫标签），
-   悬停弹出富文本面板。形态照 OmniProxy 的 FailoverTip / SensitiveMaskedTag，
-   配色换算到本项目自己的变量（那边用 antd 的 Tag 色板）。
-   面板本体是 fixed 定位挂在 body 上 —— 与 .tip-bubble 同因同法
-   （.panel 是 overflow:hidden，absolute 会被卡片裁掉）。 */
-
-/* 标签排布：一列里可能有两枚（重试 + 敏感词）。横向排列、装不下才换行 ——
-   默认 52px 轨道装不下「重试 N」+「敏」（约 70px），两枚仍落成两行，
-   与改造前的竖排观感一致；用户把这一列拖宽之后两枚自动并排，
-   不再白占一行高度。
-   左右贴边由列设置的 ta-* 走 justify-content：主轴变成水平之后，
-   align-items 管的是竖向，够不到「靠哪边」（见 table-col-settings.css）。 */
-.req-row .req-retry {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: 3px 4px;
-  align-items: flex-start;
-  min-width: 0;
-}
-
-/* 标签自身：沿用 .badge / .tag 的既有形制（尺寸与状态列那两枚一致），
-   只补一个「可以悬停看详情」的指针语义与交互反馈 ——
-   它是一颗真按钮（见 requests-panel.js 的 retryCell），所以要清掉按钮的
-   默认底色与内边距，让它看起来仍是徽章而不是一颗小按钮。
-
-   `height: auto` 不是可有可无的一行：components.css 里那条无分层的
-   `button { height: 30px }` 会**漏进组件库的徽章**——组件库的 tag 档只声明
-   `min-h-[19px]`（最小值压不住一个写死的 height），于是这两枚标签一直是 30px，
-   比状态列的「200」、模型表的「来源」都高一截，同列再放一枚 19px 的标签（如
-   「测试」）就变成两种高度并排。类选择器（0,1,0）胜过 `button`（0,0,1），
-   清掉高度把裁定权交回 min-height，三处标签才是同一个尺寸。 */
-.req-hover-tag {
-  height: auto;
-  padding: 0 6px;
-  border: 0;
-  cursor: help;
-}
-
-.req-hover-tag:focus-visible { box-shadow: var(--ring); }
-
-/* 敏感词命中：紫色（OmniProxy 的 Tag color="purple"）。
-   tokens.css 没有紫色语义变量，这里就地取一个色相的固定值而不是新加一个
-   token —— 全站只有这一处需要紫色，进 tokens.css 会让人以为它是通用语义色。
-   浅深两套各写一份：同一组紫在浅底与深底上需要的明度不同。
-   .badge.tag.sensitive 是详情弹窗「请求详情」网格里的展开形态（词 × 次数），
-   与列表的悬停标签共用同一套紫（见 islands/request-detail.tsx 的 sensitiveHtml）。 */
-.req-hover-tag.sensitive {
-  background: oklch(0.55 0.18 305 / 14%);
-  border: 1px solid oklch(0.55 0.18 305 / 32%);
-  color: oklch(0.45 0.18 305);
-}
-
-@media (prefers-color-scheme: dark) {
-  .req-hover-tag.sensitive {
-    background: oklch(0.7 0.16 305 / 16%);
-    border-color: oklch(0.7 0.16 305 / 34%);
-    color: oklch(0.82 0.12 305);
-  }
-}
-/* 切换路径行：面板顶部一条，与下面的尝试列表用分隔线隔开（OmniProxy 同法） */
+/* ─── 重试链 / 敏感词悬停面板（request-hover.tsx）─── */
 .rh-chain {
   padding-bottom: 6px;
   margin-bottom: 6px;
   border-bottom: 1px solid var(--border);
   word-break: break-word;
 }
-
 .rh-chain-k { color: var(--text-3); font-weight: 600; }
 .rh-chain-v { color: var(--text); font-weight: 600; }
-
-/* 面板小标题（敏感词面板用） */
 .rh-title {
   margin-bottom: 4px;
   color: var(--text-3);
@@ -569,85 +726,54 @@
   font-weight: 600;
   letter-spacing: .02em;
 }
-
-/* 一次尝试的一行：头部各段（尝试 N · 提供商 账号 →）与结局（错误摘要 / 成功 /
-   进行中）**按文本流连排**。这里刻意不用 flex：flex-wrap 的换行决策发生在
-   收缩之前，面板宽度只要比「头部 + 错误摘要」的自然宽度小一点点，错误就整块
-   跳到第二行（箭头孤零零结尾）；文本流则让换行发生在句子内部，怎么都不会
-   整块跳行。段间间距由下面各段的 margin-right 给（原来是 flex 的 gap）。 */
 .rh-row {
   min-width: 0;
   word-break: break-word;
 }
-
-/* 头部各段的右间距：紧接下一段文字，不能没有间隔 */
 .rh-no,
 .rh-who,
 .rh-account,
 .rh-arrow { margin-right: 4px; }
-
-/* 尝试序号 / 箭头 / 说明是次要标记：淡一档 */
 .rh-no,
 .rh-arrow,
 .rh-dim { color: var(--text-3); }
-
 .rh-who { color: var(--text); font-weight: 600; }
-
-/* 账号名：挂在提供商名后面，淡一档与家名分开。
-   账号名可能是很长的邮箱：允许在任意位置断行，否则会把面板顶宽。 */
 .rh-account {
   color: var(--text-3);
   overflow-wrap: anywhere;
 }
-
-/* 失败结局（红色）：行内文本流的一部分，紧接着箭头排。超长无空格英文靠
-   anywhere 在必要处断行，避免把面板顶宽（OmniProxy 的 overflowWrap: anywhere 同法） */
 .rh-bad {
   overflow-wrap: anywhere;
   color: var(--danger);
   font-weight: 500;
 }
-
 .rh-ok { color: var(--ok); font-weight: 500; }
 
-/* ── 一轮内部的重试链（本次改造）─────────────────────────────
-   缩进一格并加左侧竖线：它是**所属那一轮的下级事件**（同账号重发），
-   不是并列的尝试 —— 视觉上必须能看出这个层级，否则会被读成又换了一家。 */
 .rh-retry {
   margin: 2px 0 4px 10px;
   padding-left: 8px;
   border-left: 2px solid var(--border-strong);
 }
-
 .rh-retry-head {
   color: var(--warn);
   font-size: 11.5px;
   font-weight: 600;
 }
-
-/* 重试子行同 .rh-row：文本流连排（原因 + HTTP 码 + 延迟），
-   折行发生在原因句子内部而不是把状态码整块挤下去 */
 .rh-retry-row {
   min-width: 0;
   word-break: break-word;
 }
-
 .rh-retry-why,
 .rh-retry-status { margin-right: 4px; }
-
-/* 重试原因可能是一句带「（11128）」的中文提示：允许断行，别顶宽面板 */
 .rh-retry-why {
   overflow-wrap: anywhere;
   color: var(--text-2);
 }
-
 .rh-retry-status {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-
-/* 提示行（代理回退直连等）：非失败、但值得记一笔 —— 用警示色而不用红 */
 .rh-notice {
   margin: 2px 0 4px 10px;
   padding-left: 8px;
@@ -655,57 +781,42 @@
   color: var(--warn);
   overflow-wrap: anywhere;
 }
-
-/* 敏感词列表：词与次数分列，次数贴右竖着能比大小。
-   这一行仍用 flex（不是 .rh-row 的默认文本流了，display 要自己声明）。 */
 .rh-hit {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
 }
-
 .rh-hit-w { color: var(--text); word-break: break-word; }
 .rh-hit-c {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-/* ② 预览对话：气泡流（形态照 OmniProxy 的 ConversationPreview，
-   配色换算到本项目的 tokens）。滚动收在 .cv 内，弹窗自身不被长对话撑破。 */
+
+/* ─── 预览对话：气泡流（conversation-preview）─── */
 .cv {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 480px;
+  max-height: 540px;
   padding: 2px;
   overflow-y: auto;
 }
-
-/* 一行的落位：user 靠右、assistant 靠左、system 居中 */
 .cv-row { display: flex; justify-content: flex-start; }
 .cv-row.user { justify-content: flex-end; }
 .cv-row.sys { justify-content: center; }
-
-/* 气泡本体：最大宽度 75%（system 90%），长单词强制断行 */
 .cv-msg {
-  max-width: 75%;
+  max-width: 78%;
   padding: 8px 12px;
   border-radius: 10px;
   font-size: 12.5px;
   line-height: 1.65;
   overflow-wrap: break-word;
 }
-
-/* user 气泡：主色底白字，输入是纯文本（不做 markdown，见 conversation-preview
-   的 userInner 说明），保留原有换行与空白 */
 .cv-msg.user { background: var(--primary); color: #fff; }
 .cv-plain { white-space: pre-wrap; }
-
-/* assistant 气泡：抬升表面色 + 细描边 */
 .cv-msg.assistant { background: var(--surface-2); border: 1px solid var(--hairline); }
-
-/* system（提示词）/ 错误条：全宽灰条，淡一档 */
 .cv-msg.sys {
   max-width: 90%;
   background: var(--surface-inset);
@@ -713,17 +824,11 @@
   font-size: 12px;
   border-radius: 8px;
 }
-
 .cv-msg.cv-error { background: var(--danger-soft); color: var(--danger); }
-
-/* markdown 正文（.md-body 排版来自 update-notes.css）：收紧首尾与段间距，
-   不让弹窗里留出面板级的大边距 */
 .cv-msg.md-body > :first-child { margin-top: 0; }
 .cv-msg.md-body > :last-child { margin-bottom: 0; }
 .cv-msg.md-body p { margin: 6px 0; }
 .cv-msg.md-body .md-pre { max-height: 240px; overflow: auto; }
-
-/* 气泡内的图片（请求里的多模态段 / 工具结果） */
 .cv-img {
   display: block;
   max-width: min(280px, 100%);
@@ -732,8 +837,6 @@
   border: 1px solid var(--border);
   border-radius: 8px;
 }
-
-/* 折叠块：思考过程 / 工具结果 / 解析降级的原文 */
 .cv-details { margin-top: 6px; min-width: 0; }
 .cv-details > [data-slot="collapsible-trigger"] {
   color: var(--text-3);
@@ -742,8 +845,6 @@
 }
 .cv-details > [data-slot="collapsible-trigger"][data-panel-open] { margin-bottom: 4px; }
 .cv-reasoning { color: var(--text-2); font-size: 12px; }
-
-/* 工具结果：全宽虚线框，与对话气泡在视觉上区分开 */
 .cv-tool {
   max-width: 88%;
   padding: 6px 10px;
@@ -753,13 +854,8 @@
   color: var(--text-2);
   font-size: 12px;
 }
-
 .cv-tool > [data-slot="collapsible-trigger"] { color: var(--text-3); }
-
-/* 工具调用块（助手气泡内）：标题 + 参数原文 */
 .cv-toolcall { margin-top: 8px; }
 .cv-toolcall-name { margin-bottom: 3px; color: var(--text-3); font-size: 11.5px; }
 .cv-pre { max-height: 220px; font-size: 11px; }
-
-/* 解析失败的说明行（原文折叠跟在它后面）/ 读取侧的截断提示 */
 .cv-parse-empty { color: var(--text-3); font-size: 12px; }

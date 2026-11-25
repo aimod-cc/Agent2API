@@ -9,7 +9,7 @@ import { t } from '../ui-kit/src/i18n'
 import {
   promptEnabled, promptValue, type Method, type Prompt,
 } from '../ui-islands/src/islands/add-account-dynamic-fields'
-import { PluginCredentialFile, type CredentialUpload } from './plugin-credential-file'
+import { PluginCredentialFile, type CredentialUploadItem } from './plugin-credential-file'
 import { SecretTextarea } from './plugin-secret-textarea'
 import './plugin-login-form.css'
 
@@ -45,15 +45,15 @@ export function multilineLoginPrompt(prompt: Pick<Prompt, 'key' | 'type' | 'labe
     || /JSON|Cookie|PEM/i.test(prompt.label))
 }
 
-export function PluginLoginFields({ method, values, onChange, prefix, disabled, prompts = method.prompts, upload, onUpload, onReading }: {
+export function PluginLoginFields({ method, values, onChange, prefix, disabled, prompts = method.prompts, uploads, onUploads, onReading }: {
   method: Method
   values: Record<string, string>
   onChange(key: string, value: string): void
   prefix: string
   disabled?: boolean
   prompts?: Prompt[]
-  upload?: CredentialUpload
-  onUpload?(value?: CredentialUpload): void
+  uploads?: CredentialUploadItem[]
+  onUploads?(value: CredentialUploadItem[]): void
   onReading?(value: boolean): void
 }): React.ReactElement {
   return <div className='plugin-login-fields'>{prompts.map((prompt, index) => {
@@ -62,8 +62,8 @@ export function PluginLoginFields({ method, values, onChange, prefix, disabled, 
     const value = promptValue(prompt, values)
     const label = <>{prompt.label}{prompt.optional ? <span className='plugin-login-optional'>{t('可选')}</span> : null}</>
     if (method.file?.field === prompt.key) return <PluginCredentialFile key={`${method.id}:${prompt.key}`}
-      spec={method.file} value={value} upload={upload} disabled={disabled} onChange={value => onChange(prompt.key, value)}
-      onUpload={value => onUpload?.(value)} onReading={value => onReading?.(value)} />
+      spec={method.file} value={value} uploads={uploads} disabled={disabled} onChange={value => onChange(prompt.key, value)}
+      onUploads={value => onUploads?.(value)} onReading={value => onReading?.(value)} />
     if (multilineLoginPrompt(prompt)) return <SecretTextarea key={`${method.id}:${prompt.key}`} id={id} label={label}
       secret={prompt.secret} resetKey={method.id} rows={5} maxLength={262144} value={value} disabled={disabled}
       autoComplete='off' autoCapitalize='none' spellCheck={false} placeholder={prompt.placeholder}

@@ -72,7 +72,7 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
   return (
     <Card render={<section />} className='panel'>
       <CardHeader className='panel-head'>
-        <h2>{t('指纹脱敏')}</h2>
+        <h2>{t('关键词替换')}</h2>
         <span className='tip-q' data-tip={TIPS.sanitize}></span>
         <Badge variant={!ready ? (state.status === 'loading' ? 'outline' : 'destructive') : state.on ? 'success' : 'outline'}>
           {!ready ? (state.status === 'loading' ? t('检测中…') : t('不可用')) : state.on ? t('已开启') : t('已关闭')}
@@ -86,7 +86,7 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
         <div className='settings-switches'>
           <Label htmlFor='settings-sanitize' className='flex items-center gap-2'>
             <Switch id='settings-sanitize' checked={on} disabled={!ready || busy} onCheckedChange={setOn} />
-            {t('剥离上游审核黑名单指纹（改写请求体里的模板句与表头）')}
+            {t('按词表替换或删除出站请求中的指定文本与表头')}
           </Label>
         </div>
         <div className='settings-state'>
@@ -100,7 +100,7 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
                 })}
         </div>
         {!state.saved ? <Alert variant='destructive' role='alert' className='text-xs text-destructive'>
-          {t('指纹脱敏设置仅本次运行生效，写入数据库失败，请检查配置目录')}
+          {t('关键词替换设置仅本次运行生效，写入数据库失败，请检查配置目录')}
         </Alert> : null}
         {editable ? <>
           <div className='retention-list'>
@@ -125,14 +125,14 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
                 }} className='w-full'
                 placeholder={t('请至少选择一个提供商')} />
             </div> : null}
-            <div className='hint'>{t('默认应用全部提供商（包含之后新增的插件与自定义提供商）。指定范围后，未选中的提供商不做指纹脱敏；清空选择自动回到全部提供商。')}</div>
+            <div className='hint'>{t('默认应用全部提供商（包含之后新增的插件与自定义提供商）。指定范围后，未选中的提供商不做关键词替换；清空选择自动回到全部提供商。')}</div>
           </div>
           <Dialog open={rulesOpen} onOpenChange={open => {
             setRulesOpen(open)
             if (!open) setEditor(null)
           }}>
             <div className='flex flex-wrap items-center gap-2'>
-              <h3 className='text-[12.5px] font-semibold'>{t('脱敏词表')}</h3>
+              <h3 className='text-[12.5px] font-semibold'>{t('替换词表')}</h3>
               <Badge variant='outline'>{defaultLabel ? t('内置默认') : t('自定义')}</Badge>
               <span className='hint'>{t('{count} 条规则，按列表顺序执行', { count: rules.length })}</span>
               <DialogTrigger id='btn-sanitize-rules-open' disabled={disabled}
@@ -142,7 +142,7 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
             </div>
             <DialogContent className='w-[min(1120px,calc(100vw-48px))]'>
               <DialogHeader>
-                <DialogTitle>{t('脱敏词表')}</DialogTitle>
+                <DialogTitle>{t('替换词表')}</DialogTitle>
                 <Badge variant='outline'>{defaultLabel ? t('内置默认') : t('自定义')}</Badge>
               </DialogHeader>
               <DialogBody>
@@ -159,7 +159,7 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
                   onEdit={rule => setEditor({ rule, isNew: false })} />
                 <div className='hint'>{t('规则可以增删改、启停和调整顺序；替换内容留空表示删除匹配内容。恢复默认只重置词表，不改开关和提供商范围。')}</div>
                 {!state.saved ? <Alert variant='destructive' role='alert' className='text-xs text-destructive'>
-                  {t('指纹脱敏设置仅本次运行生效，写入数据库失败，请检查配置目录')}
+                  {t('关键词替换设置仅本次运行生效，写入数据库失败，请检查配置目录')}
                 </Alert> : null}
               </DialogBody>
               <DialogFooter className='flex-wrap justify-end'>

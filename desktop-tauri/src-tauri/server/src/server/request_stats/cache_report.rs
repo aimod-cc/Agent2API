@@ -25,22 +25,31 @@ pub(super) fn select_summary_rows(
     conn: &Connection,
     from_ms: i64,
     to_ms: i64,
+    origin_filter: Option<&str>,
 ) -> rusqlite::Result<Vec<SummaryRow>> {
-    let mut stmt = conn.prepare(
+    let origin_clause = if origin_filter.is_some() { " AND origin = ?3" } else { "" };
+    let sql = format!(
         "SELECT ts, model, upstream_model, total_tokens, cache_read_tokens, prompt_tokens, \
          completion_tokens, (status >= 200 AND status < 300 AND error IS NULL) \
-         FROM requests WHERE ts >= ?1 AND ts <= ?2 AND is_test = 0 AND status <> 0",
-    )?;
-    let rows = stmt.query_map(params![from_ms, to_ms], |row| Ok(SummaryRow {
-        ts: row.get(0)?,
-        model: row.get(1)?,
-        upstream_model: row.get(2)?,
-        total_tokens: row.get(3)?,
-        cache_read_tokens: row.get(4)?,
-        prompt_tokens: row.get(5)?,
-        completion_tokens: row.get(6)?,
-        successful: row.get(7)?,
-    }))?;
+         FROM requests WHERE ts >= ?1 AND ts <= ?2 AND is_test = 0 AND status <> 0{origin_clause}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok(SummaryRow {
+            ts: row.get(0)?,
+            model: row.get(1)?,
+            upstream_model: row.get(2)?,
+            total_tokens: row.get(3)?,
+            cache_read_tokens: row.get(4)?,
+            prompt_tokens: row.get(5)?,
+            completion_tokens: row.get(6)?,
+            successful: row.get(7)?,
+        })
+    };
+    let rows = match origin_filter {
+        Some(origin) => stmt.query_map(params![from_ms, to_ms, origin], map_row)?,
+        None => stmt.query_map(params![from_ms, to_ms], map_row)?,
+    };
     rows.collect()
 }
 
@@ -102,6 +111,7 @@ pub(super) fn sum_cache_windows(
     conn: &Connection,
     now_ms: i64,
     windows_ms: &[i64],
+    origin_filter: Option<&str>,
 ) -> rusqlite::Result<Vec<(i64, i64)>> {
     let Some(longest) = windows_ms.iter().copied().max() else { return Ok(Vec::new()); };
     let mut sql = String::from("SELECT ");
@@ -115,10 +125,15 @@ pub(super) fn sum_cache_windows(
     }
     let last = windows_ms.len() + 2;
     sql.push_str(&format!(" FROM requests WHERE ts >= ?1 AND ts <= ?{last} AND is_test = 0"));
-    let mut binds = Vec::with_capacity(windows_ms.len() + 2);
-    binds.push(now_ms - longest);
-    binds.extend(windows_ms.iter().map(|window| now_ms - window));
-    binds.push(now_ms);
+    let mut binds: Vec<rusqlite::types::Value> = Vec::with_capacity(windows_ms.len() + 3);
+    binds.push(rusqlite::types::Value::Integer(now_ms - longest));
+    binds.extend(windows_ms.iter().map(|window| rusqlite::types::Value::Integer(now_ms - window)));
+    binds.push(rusqlite::types::Value::Integer(now_ms));
+    if let Some(origin) = origin_filter {
+        let origin_slot = last + 1;
+        sql.push_str(&format!(" AND origin = ?{origin_slot}"));
+        binds.push(rusqlite::types::Value::Text(origin.to_string()));
+    }
     conn.query_row(&sql, params_from_iter(binds.iter()), |row| {
         (0..windows_ms.len()).map(|index| Ok((row.get(index * 2)?, row.get(index * 2 + 1)?))).collect()
     })

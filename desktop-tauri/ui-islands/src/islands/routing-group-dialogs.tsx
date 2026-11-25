@@ -6,7 +6,7 @@ import type { AccountRecord } from './accounts-shared'
 import { RouteIcon } from './routing-ui'
 import type { RouteGroup, RouteMember, RouteModelChoice } from './routing-types'
 import { createRouteMembers, routeGroupFieldsError, routeModelKey, RoutingGroupForm, ROUTING_MEMBER_LIMIT, type RoutingGroupFields } from './routing-group-form'
-import { RoutingModelPicker } from './routing-model-picker'
+import { RoutingModelPicker, RoutingModelSummaryBar } from './routing-model-picker'
 
 export function RoutingGroupDialog({ group, reserved, onSave, onClose }: {
   group: RouteGroup; reserved: string[]; onSave(group: RouteGroup): void; onClose(): void
@@ -43,11 +43,18 @@ export function RoutingMemberDialog({ choices, members, accounts, lastUsed, onAd
     onClose()
   }
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className='routing-create-dialog'>
-    <DialogHeader><DialogTitle>{t('添加参与模型')}</DialogTitle></DialogHeader><DialogBody>
-      <p className='routing-config-note'>{t('可以跨提供商、跨模型多选。同一提供商也可以加入不同模型。')}</p>
+    <DialogHeader>
+      <span className='routing-create-badge'><RouteIcon name='route' size={15} /></span>
+      <DialogTitle>{t('添加参与模型')}</DialogTitle>
+    </DialogHeader><DialogBody>
       <RoutingModelPicker choices={options} accounts={accounts} lastUsed={lastUsed} selected={selected} onChange={setSelected} limit={limit} />
-      <p className='routing-config-note'>{t('仅列出真实目录中的对话模型，不自动更改模型映射。')}</p>
-    </DialogBody><DialogFooter><Button variant='outline' onClick={onClose}>{t('取消')}</Button><Button disabled={!picked.length || picked.length > limit} onClick={add}>{t('添加')} · {picked.length}</Button></DialogFooter>
+    </DialogBody><DialogFooter>
+      <RoutingModelSummaryBar picked={picked} limit={limit}
+        onRemove={key => setSelected(prev => prev.filter(item => item !== key))}
+        onClear={() => setSelected([])} />
+      <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
+      <Button disabled={!picked.length || picked.length > limit} onClick={add}>{picked.length ? `${t('添加')} · ${picked.length}` : t('添加')}</Button>
+    </DialogFooter>
   </DialogContent></Dialog>
 }
 

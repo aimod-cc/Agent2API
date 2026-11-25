@@ -23,6 +23,41 @@ function unsupported(message = "Plugin does not provide this capability") {
   return Object.assign(new Error(message), { code: "unsupported" })
 }
 
+function normalizePluginResponse(value) {
+  if (value instanceof Response) return value
+  if (!value || typeof value !== "object") return null
+  const status = Number(value.status)
+  if (!Number.isInteger(status) || status < 100 || status > 599) return null
+  let headers
+  try {
+    headers = value.headers instanceof Headers ? new Headers(value.headers) : new Headers(value.headers ?? {})
+  } catch {
+    return null
+  }
+  if ([101, 204, 205, 304].includes(status)) return new Response(null, { status, headers })
+  const body = value.body
+  if (body instanceof ReadableStream || typeof body === "string" || body instanceof Uint8Array || body instanceof ArrayBuffer || body == null) {
+    return new Response(body ?? null, { status, headers })
+  }
+  if (typeof value.arrayBuffer === "function" || typeof value.text === "function") {
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const data = typeof value.arrayBuffer === "function"
+            ? new Uint8Array(await value.arrayBuffer())
+            : new TextEncoder().encode(String(await value.text()))
+          if (data.byteLength > 0) controller.enqueue(data)
+          controller.close()
+        } catch (error) {
+          controller.error(error)
+        }
+      },
+    })
+    return new Response(stream, { status, headers })
+  }
+  return null
+}
+
 async function conversation(provider, params, call) {
   await refresh(provider)
   const auth = await getAuth()
@@ -79,8 +114,8 @@ async function conversation(provider, params, call) {
   void Promise.resolve(fetching).then(response => {
     if (call.signal.aborted) void response?.body?.cancel().catch(() => {})
   }, () => {})
-  let response = await untilCancelled(fetching, call.signal)
-  if (!(response instanceof Response)) throw new Error("Plugin did not return an HTTP response")
+  let response = normalizePluginResponse(await untilCancelled(fetching, call.signal))
+  if (!response) throw new Error("Plugin did not return an HTTP response")
   response = await preserveRefreshableSignIn(response, provider, auth)
   if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new Error("Upstream redirected without a compatible plugin redirect handler") }
   if (response.ok && !response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {

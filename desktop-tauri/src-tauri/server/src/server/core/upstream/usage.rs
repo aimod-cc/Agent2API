@@ -332,6 +332,8 @@ pub struct TelemetrySnapshot {
     /// 见 `payload::send_body` 的说明：跨家降级时每个在范围内的家各处理一次，
     /// 合并计数才是「这次请求命中了什么」的正确读数。
     pub sensitive_hits: Vec<SensitiveHit>,
+    pub privacy_hits: Vec<PrivacyHit>,
+    pub privacy_reversible: bool,
     /// **每一次上游尝试的明细**（按发生顺序，与账号轮换链一一对应）。
     ///
     /// ── 为什么需要它（Agent2API 请求日志改造）───────────────────
@@ -372,6 +374,15 @@ pub struct SensitiveHit {
     pub word: String,
     /// 本次请求里命中的次数
     pub count: i64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PrivacyHit {
+    pub kind: String,
+    pub count: i64,
+    pub action: String,
+    #[serde(default)]
+    pub restored: i64,
 }
 
 /// 按字符截断（超出部分用 `…` 收尾）。
@@ -447,6 +458,7 @@ struct LiveStamp {
     last_finished_at: Option<i64>,
     route_revision: u64,
     sensitive: usize,
+    privacy: usize,
 }
 
 impl LiveStamp {
@@ -470,6 +482,7 @@ impl LiveStamp {
             last_finished_at: last.and_then(|item| item.finished_at),
             route_revision: snapshot.route_revision,
             sensitive: snapshot.sensitive_hits.len(),
+            privacy: snapshot.privacy_hits.len(),
         }
     }
 }
@@ -1035,7 +1048,67 @@ impl RequestTelemetry {
             }
         }
         // 在途回写：脱敏命中在发送体处理那一刻就有值，不必等收尾
-        // （「敏」那枚标签因此能在转发期间就出现）
+        // （「替换」那枚标签因此能在转发期间就出现）
+        self.flush_live(&guard);
+    }
+
+    pub fn note_privacy_hits(&self, records: &[crate::server::core::privacy::PrivacyHitRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let mut guard = self.lock();
+        for rec in records {
+            let action = rec.action.as_str();
+            let count = rec.count as i64;
+            match guard
+                .privacy_hits
+                .iter_mut()
+                .find(|hit| hit.kind == rec.kind && hit.action == action)
+            {
+                Some(hit) => hit.count += count,
+                None => guard.privacy_hits.push(PrivacyHit {
+                    kind: rec.kind.clone(),
+                    count,
+                    action: action.to_string(),
+                    restored: 0,
+                }),
+            }
+        }
+        self.flush_live(&guard);
+    }
+
+    pub fn mark_privacy_reversible(&self) {
+        let mut guard = self.lock();
+        guard.privacy_reversible = true;
+    }
+
+    pub fn needs_privacy_restore(&self) -> bool {
+        self.lock().privacy_reversible
+    }
+
+    pub fn note_privacy_restored(&self, restored: &[(String, usize)]) {
+        if restored.is_empty() {
+            return;
+        }
+        let mut guard = self.lock();
+        for (kind, count) in restored {
+            let add = *count as i64;
+            let idx = guard
+                .privacy_hits
+                .iter()
+                .position(|hit| hit.kind == *kind && hit.action == "mask")
+                .or_else(|| guard.privacy_hits.iter().position(|hit| hit.kind == *kind));
+            if let Some(idx) = idx {
+                guard.privacy_hits[idx].restored += add;
+            } else {
+                guard.privacy_hits.push(PrivacyHit {
+                    kind: kind.clone(),
+                    count: 0,
+                    action: "mask".to_string(),
+                    restored: add,
+                });
+            }
+        }
         self.flush_live(&guard);
     }
 

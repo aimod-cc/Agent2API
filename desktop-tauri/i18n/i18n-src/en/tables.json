@@ -15,6 +15,7 @@
   "按住拖动调整列顺序": "Press and drag to reorder columns",
   "显示「{label}」列": "Show the \"{label}\" column",
   "条": "rows",
+  "此列始终显示": "Always visible",
   "每页": "Per page",
   "每页条数": "Rows per page",
   "调整「{name}」的列：显示 / 隐藏、顺序、对齐": "Adjust \"{name}\" columns: show / hide, order, alignment",

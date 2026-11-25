@@ -99,6 +99,7 @@ export type TabMeta = {
 export const TAB_CATALOG: ReadonlyArray<TabMeta> = [
   { id: 'dashboard', label: '总览', subtitle: '运行状态、今日用量与排行', icon: 'dashboard', required: true },
   { id: 'checkin', label: '签到', subtitle: '每日签到、福利与定时计划', icon: 'calendar' },
+  { id: 'scheduled', label: '定时任务', subtitle: '自动化脚本插件、参数配置与运行日志', icon: 'clock' },
   { id: 'accounts', label: '账号', subtitle: '号池健康、限流与额度查询', icon: 'accounts' },
   { id: 'chat', label: '对话', subtitle: '内置助手对话与工具调用', icon: 'chat' },
   { id: 'models', label: '模型', subtitle: '模型启停、在线测试与别名映射', icon: 'cube' },

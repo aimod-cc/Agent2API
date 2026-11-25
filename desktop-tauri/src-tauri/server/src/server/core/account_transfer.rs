@@ -46,6 +46,7 @@ mod identity;
 mod normalize;
 
 pub use export::{export_account_files, ExportSelection, ACCOUNT_FILE_FORMAT};
+pub(crate) use identity::resolve_provider;
 
 use serde_json::{json, Map, Value};
 
@@ -57,7 +58,7 @@ use crate::server::core::providers::ProviderKind;
 
 use identity::{
     allocate_priority, allocate_unique_id, identity_of_item,
-    is_desktop_item, is_reserved_desktop_id, resolve_provider, CREDENTIAL_KEYS,
+    is_desktop_item, is_reserved_desktop_id, CREDENTIAL_KEYS,
 };
 use normalize::normalize_imported;
 
@@ -149,16 +150,31 @@ fn to_export_record(record: &StoredAccount) -> Value {
 /// 两把锁绝不嵌套（与导入端「先并定义、后进账号锁」同一纪律）。
 /// 定义不含任何凭证 —— apiKey 是账号的属性，已随账号记录导出。
 pub fn export_accounts(store: &AccountStore) -> Value {
-    let accounts = store.with_lock(|guard| {
+    let (accounts, providers) = store.with_lock(|guard| {
         let state = store.load_locked(guard);
-        state.accounts.iter().map(to_export_record).collect::<Vec<_>>()
+        let mut providers = std::collections::HashSet::new();
+        let accounts = state
+            .accounts
+            .iter()
+            .map(|record| {
+                providers.insert(record.provider());
+                to_export_record(record)
+            })
+            .collect::<Vec<_>>();
+        (accounts, providers)
     });
-    json!({
+    let mut payload = json!({
         "version": EXPORT_VERSION,
         "exportedAt": crate::server::logging::now_ms(),
         "customProviders": crate::server::core::custom_providers::list(),
         "accounts": accounts,
-    })
+    });
+    if let Some(identities) =
+        crate::server::core::plugin_host::script::identities::export_for_providers(&providers)
+    {
+        payload["scriptPluginIdentities"] = identities;
+    }
+    payload
 }
 
 /// 导入账号（导出文件的回流），merge 语义见文件头。
@@ -202,6 +218,26 @@ pub fn import_accounts(store: &AccountStore, payload: &Value) -> Result<Value, A
         None => (0, 0),
     };
 
+    // 脚本插件跨机身份映射同样在账号锁外预处理：同包已装则重映射到本机当前 ID，
+    // 未装则无冲突预登记，确保导入后可直接通过「补全缺失的插件」一键恢复。
+    let script_provider_remap = match root.get("scriptPluginIdentities") {
+        Some(identities) => {
+            let imported_providers: std::collections::HashSet<String> = items
+                .iter()
+                .filter_map(|item| item.get("provider").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .map(str::to_string)
+                .collect();
+            crate::server::core::plugin_host::script::identities::prepare_import(
+                identities,
+                &imported_providers,
+            )
+            .map_err(|message| AccountStoreError::new(message, 400))?
+        }
+        None => std::collections::HashMap::new(),
+    };
+
     let (result, catpaw_invalidations) = store.with_lock(|guard| {
         let mut state = store.load_locked(guard);
         let mut stats = ImportStats::default();
@@ -214,9 +250,29 @@ pub fn import_accounts(store: &AccountStore, payload: &Value) -> Result<Value, A
         let mut catpaw_invalidations: Vec<String> = Vec::new();
 
         for item in items {
+            let remapped;
+            let item_ref = if !script_provider_remap.is_empty() {
+                if let Some(target) = item
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .and_then(|provider| script_provider_remap.get(provider))
+                {
+                    let mut cloned = item.clone();
+                    if let Some(object) = cloned.as_object_mut() {
+                        object.insert("provider".to_string(), Value::String(target.clone()));
+                    }
+                    remapped = cloned;
+                    &remapped
+                } else {
+                    item
+                }
+            } else {
+                item
+            };
             let outcome = import_one_item(
                 &mut state,
-                item,
+                item_ref,
                 &mut taken_ids,
                 &mut catpaw_invalidations,
             );

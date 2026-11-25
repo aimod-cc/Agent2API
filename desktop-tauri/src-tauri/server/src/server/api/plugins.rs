@@ -18,28 +18,78 @@ pub async fn startup() -> Response {
     ok_json(plugin_host::startup::snapshot())
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct ListQuery {
+    #[serde(default)]
+    rev: Option<String>,
+}
+
+struct Sha256Writer(sha2::Sha256);
+
+impl std::io::Write for Sha256Writer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 pub async fn list(
     axum::extract::State(state): axum::extract::State<crate::server::ServerState>,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
 ) -> Response {
-    let packs = plugin_host::list_packs();
-    let states = crate::server::core::task_state::read_all().unwrap_or_default();
-    let catalog = plugin_host::catalog::snapshot_with_states(&states);
-    let mut result = plugin_host::management_snapshot_with_packs(&packs);
-    result["target"] = json!(plugin_host::host_target());
-    result["protocol"] = json!(agent2api_provider_protocol::PROTOCOL_VERSION);
-    result["maxPackBytes"] = json!(MAX_PACK_BYTES);
-    result["supportsPackPreview"] = json!(true);
-    result["pluginsDir"] = json!(plugin_host::plugins_dir_display());
-    result["updates"] = plugin_host::catalog::updates_with_packs(&packs, &catalog)["updates"].clone();
-    result["catalog"] = catalog;
-    result["operations"] = plugin_host::operations::snapshot_with_states(&states)["operations"].clone();
-    result["scripts"] = plugin_host::script::snapshot();
-    result["startup"] = plugin_host::startup::snapshot();
-    result["capacity"] = crate::server::core::runtime_capacity::snapshot();
-    let accounts = crate::server::core::blocking::in_place(|| state.store().plugin_account_summary());
-    result["accountCounts"] = accounts["counts"].clone();
-    result["hiddenAccounts"] = accounts["hidden"].clone();
-    ok_json(result)
+    let store = state.store().clone();
+    let expected_rev = query.rev;
+    let built = tokio::task::spawn_blocking(move || -> Value {
+        let packs = plugin_host::list_packs();
+        let states = crate::server::core::task_state::read_all().unwrap_or_default();
+        let catalog = plugin_host::catalog::snapshot_with_states(&states);
+        let mut result = plugin_host::management_snapshot_with_packs(&packs);
+        result["target"] = json!(plugin_host::host_target());
+        result["protocol"] = json!(agent2api_provider_protocol::PROTOCOL_VERSION);
+        result["maxPackBytes"] = json!(MAX_PACK_BYTES);
+        result["supportsPackPreview"] = json!(true);
+        result["pluginsDir"] = json!(plugin_host::plugins_dir_display());
+        result["updates"] = plugin_host::catalog::updates_with_packs(&packs, &catalog)["updates"].clone();
+        result["catalog"] = catalog;
+        result["operations"] = plugin_host::operations::snapshot_with_states(&states)["operations"].clone();
+        result["scripts"] = plugin_host::script::snapshot();
+        result["startup"] = plugin_host::startup::snapshot();
+        let accounts = store.plugin_account_summary();
+        result["accountCounts"] = accounts["counts"].clone();
+        result["hiddenAccounts"] = accounts["hidden"].clone();
+
+        let startup_now = result
+            .get_mut("startup")
+            .and_then(Value::as_object_mut)
+            .and_then(|obj| obj.remove("now"));
+        let rev = {
+            use sha2::Digest;
+            let mut writer = Sha256Writer(sha2::Sha256::new());
+            let _ = serde_json::to_writer(&mut writer, &result);
+            format!("{:x}", writer.0.finalize())
+        };
+        if expected_rev.as_deref() == Some(rev.as_str()) {
+            return json!({ "unchanged": true, "revision": rev });
+        }
+        if let Some(now) = startup_now {
+            if let Some(obj) = result.get_mut("startup").and_then(Value::as_object_mut) {
+                obj.insert("now".to_string(), now);
+            }
+        }
+        result["capacity"] = crate::server::core::runtime_capacity::snapshot();
+        result["revision"] = json!(rev);
+        result
+    })
+    .await;
+    match built {
+        Ok(result) => ok_json(result),
+        Err(error) => management_error(500, format!("插件状态读取中断：{error}")),
+    }
 }
 
 pub async fn install_script(body: Bytes) -> Response {
@@ -97,6 +147,14 @@ pub async fn change_script(body: Bytes) -> Response {
     };
     let id = payload["id"].as_str().unwrap_or("").to_string();
     let action = payload["action"].as_str().unwrap_or("").to_string();
+    if action == "bind_alias" {
+        let original = payload["original"].as_str().unwrap_or("").to_string();
+        let alias = payload["alias"].as_str().unwrap_or("").to_string();
+        return match plugin_host::script::bind_alias(id, original, alias) {
+            Ok(operation) => ok_json(json!({ "operation": operation })),
+            Err(error) => management_error(400, error),
+        };
+    }
     let enabled = payload["enabled"].as_bool();
     let provider = payload["provider"].as_str().map(str::to_string);
     match plugin_host::script::change(id, action, enabled, provider) {
@@ -162,6 +220,37 @@ pub async fn install(axum::extract::Query(query): axum::extract::Query<InstallQu
     }
     let expected_id = query.expected_id.clone();
     let expected_version = query.expected_version.clone();
+    if crate::server::core::task_plugins::store_remote::looks_like_task_plugin_zip(&bytes) {
+        let prepared = match tokio::task::spawn_blocking(move || {
+            crate::server::core::task_plugins::store_remote::prepare_zip_bytes(
+                &bytes,
+                expected_id.as_deref(),
+                expected_version.as_deref(),
+            )
+        })
+        .await
+        {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => return management_error(400, error),
+            Err(error) => return management_error(500, format!("插件校验任务中断：{error}")),
+        };
+        let preview = prepared.preview();
+        if query
+            .expected_sha256
+            .as_deref()
+            .is_some_and(|expected| preview["sha256"].as_str() != Some(expected))
+        {
+            return management_error(400, "插件包与预览时的内容不同，请重新选择文件");
+        }
+        if query.preview {
+            return ok_json(json!({ "preview": preview }));
+        }
+        return match tokio::task::spawn_blocking(move || prepared.install()).await {
+            Ok(Ok(saved)) => ok_json(json!({ "kind": "task_script", "taskPlugin": saved })),
+            Ok(Err(error)) => management_error(400, format!("安装失败：{error}")),
+            Err(error) => management_error(500, format!("插件安装任务中断：{error}")),
+        };
+    }
     let prepared = match tokio::task::spawn_blocking(move || {
         plugin_host::prepare_pack(&bytes, expected_id.as_deref(), expected_version.as_deref(), false)
     })

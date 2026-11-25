@@ -14,6 +14,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::backend;
 use crate::gateway;
 use crate::login::{self, LoginState};
+use crate::native_ui::{self, TextKey};
 use crate::settings::{self, AppSettings};
 use crate::state::AppState;
 
@@ -523,10 +524,10 @@ pub async fn export_logs(app: AppHandle, query: Option<String>) -> Result<Value,
     let default_name = format!("workbuddy-logs-{stamp}.jsonl");
     let file = tauri_plugin_dialog::DialogExt::dialog(&app)
         .file()
-        .set_title("导出运行日志")
+        .set_title(native_ui::text(TextKey::ExportLogs))
         .set_file_name(&default_name)
         .add_filter("JSON Lines", &["jsonl"])
-        .add_filter("全部文件", &["*"])
+        .add_filter(native_ui::text(TextKey::AllFiles), &["*"])
         .blocking_save_file();
 
     let Some(target) = file else {
@@ -551,7 +552,7 @@ pub async fn export_logs(app: AppHandle, query: Option<String>) -> Result<Value,
 pub async fn pick_folder(app: AppHandle, default_dir: Option<String>) -> Result<Value, String> {
     let mut builder = tauri_plugin_dialog::DialogExt::dialog(&app)
         .file()
-        .set_title("选择文件夹");
+        .set_title(native_ui::text(TextKey::SelectFolder));
     if let Some(dir) = default_dir.filter(|text| !text.trim().is_empty()) {
         let path = std::path::PathBuf::from(dir);
         if path.is_dir() {
@@ -578,12 +579,12 @@ pub async fn pick_agent_config_file(
     tauri::async_runtime::spawn_blocking(move || {
         let mut picker = tauri_plugin_dialog::DialogExt::dialog(&app)
             .file()
-            .set_title("选择客户端配置文件")
+            .set_title(native_ui::text(TextKey::SelectClientConfigFile))
             .add_filter(
-                "配置文件",
+                native_ui::text(TextKey::ConfigFiles),
                 &["json", "jsonc", "toml", "yaml", "yml", "env"],
             )
-            .add_filter("所有文件", &["*"]);
+            .add_filter(native_ui::text(TextKey::AllFiles), &["*"]);
         if let Some(dir) = default_path
             .as_deref()
             .filter(|text| !text.trim().is_empty())
@@ -692,10 +693,10 @@ pub async fn export_accounts(app: AppHandle) -> Result<Value, String> {
     let file = app
         .dialog()
         .file()
-        .set_title("导出账号")
+        .set_title(native_ui::text(TextKey::ExportAccounts))
         .set_file_name(&default_name)
         .add_filter("JSON", &["json"])
-        .add_filter("全部文件", &["*"])
+        .add_filter(native_ui::text(TextKey::AllFiles), &["*"])
         .blocking_save_file();
 
     let Some(target) = file else {
@@ -714,33 +715,134 @@ pub async fn export_accounts(app: AppHandle) -> Result<Value, String> {
     }))
 }
 
-/// 从文件导入账号（merge 语义：按身份匹配，命中更新、未命中追加）。
+/// 从一个或多个文件导入账号（merge 语义：按身份匹配，命中更新、未命中追加）。
 ///
 /// 兼容整体导出文件 `{ version, exportedAt, customProviders, accounts }`、
-/// 单账号对象与直接的账号数组 `[...]`。`customProviders` 段（v2 起的自定义提供商定义）
-/// 原样透传给后端 —— 账号的 provider 字段指向这些定义，丢了它们自定义账号
-/// 就导不回。
+/// 单账号对象与直接的账号数组 `[...]`。支持一次多选多个 JSON 文件合并导入，
+/// 单个文件读取或格式异常不阻断其余有效文件。
 #[tauri::command]
 pub async fn import_accounts(app: AppHandle) -> Result<Value, String> {
-    let file = app
+    let files = app
         .dialog()
         .file()
-        .set_title("导入账号")
+        .set_title(native_ui::text(TextKey::ImportAccounts))
         .add_filter("JSON", &["json"])
-        .add_filter("全部文件", &["*"])
-        .blocking_pick_file();
+        .add_filter(native_ui::text(TextKey::AllFiles), &["*"])
+        .blocking_pick_files();
 
-    let Some(target) = file else {
+    let Some(targets) = files.filter(|items| !items.is_empty()) else {
         return Ok(json!({ "canceled": true }));
     };
-    let path = target
-        .into_path()
-        .map_err(|error| format!("文件路径无效: {error}"))?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(|error| format!("读取文件失败: {error}"))?;
 
-    let parsed: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("文件不是有效 JSON: {error}"))?;
+    let multi = targets.len() > 1;
+    let mut all_accounts: Vec<Value> = Vec::new();
+    let mut custom_provider_order: Vec<String> = Vec::new();
+    let mut custom_provider_map: std::collections::HashMap<String, Value> =
+        std::collections::HashMap::new();
+    let mut custom_provider_extra: Vec<Value> = Vec::new();
+    let mut file_errors: Vec<Value> = Vec::new();
+
+    for target in targets {
+        let path = match target.into_path() {
+            Ok(path) => path,
+            Err(error) => {
+                let message = format!("文件路径无效: {error}");
+                if !multi {
+                    return Err(message);
+                }
+                file_errors.push(json!({ "id": "未知文件", "message": message }));
+                continue;
+            }
+        };
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("未知文件")
+            .to_string();
+        let parsed = std::fs::read_to_string(&path)
+            .map_err(|error| format!("读取文件失败: {error}"))
+            .and_then(|text| parse_import_file_text(&text));
+        match parsed {
+            Ok((accounts, custom_providers)) => {
+                all_accounts.extend(accounts);
+                if let Some(definitions) = custom_providers {
+                    for definition in definitions {
+                        if let Some(id) = definition
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|id| !id.is_empty())
+                        {
+                            if !custom_provider_map.contains_key(id) {
+                                custom_provider_order.push(id.to_string());
+                            }
+                            custom_provider_map.insert(id.to_string(), definition);
+                        } else {
+                            custom_provider_extra.push(definition);
+                        }
+                    }
+                }
+            }
+            Err(message) => {
+                if !multi {
+                    return Err(message);
+                }
+                file_errors.push(json!({ "id": label, "message": message }));
+            }
+        }
+    }
+
+    if all_accounts.is_empty() {
+        if file_errors.is_empty() {
+            return Err("所选文件中没有可导入的账号".to_string());
+        }
+        return Ok(json!({
+            "total": 0,
+            "added": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": file_errors.len(),
+            "errors": file_errors,
+            "customProviders": { "added": 0, "updated": 0 },
+        }));
+    }
+
+    let mut payload = json!({ "accounts": all_accounts, "mode": "merge" });
+    let mut merged_providers: Vec<Value> = custom_provider_order
+        .into_iter()
+        .filter_map(|id| custom_provider_map.remove(&id))
+        .collect();
+    merged_providers.extend(custom_provider_extra);
+    if !merged_providers.is_empty() {
+        payload["customProviders"] = Value::Array(merged_providers);
+    }
+
+    let mut result = gateway::call("POST", "/api/accounts/import", Some(&payload)).await?;
+    if !file_errors.is_empty() {
+        if let Some(object) = result.as_object_mut() {
+            let prev_failed = object.get("failed").and_then(Value::as_u64).unwrap_or(0);
+            object.insert(
+                "failed".to_string(),
+                Value::from(prev_failed + file_errors.len() as u64),
+            );
+            let existing = object
+                .get("errors")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut combined = file_errors;
+            combined.extend(existing);
+            object.insert("errors".to_string(), Value::Array(combined));
+        }
+    }
+    Ok(result)
+}
+
+fn parse_import_file_text(text: &str) -> Result<(Vec<Value>, Option<Vec<Value>>), String> {
+    let trimmed = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let parsed: Value =
+        serde_json::from_str(trimmed).map_err(|error| format!("文件不是有效 JSON: {error}"))?;
     let document = unwrap_envelope_file(parsed);
     let accounts = match &document {
         Value::Object(map) if map.contains_key("accounts") => map
@@ -748,20 +850,26 @@ pub async fn import_accounts(app: AppHandle) -> Result<Value, String> {
             .and_then(Value::as_array)
             .cloned()
             .ok_or("文件中缺少 accounts 数组")?,
-        Value::Object(map) if map.get("id").and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty()) => vec![document.clone()],
+        Value::Object(map)
+            if map
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            vec![document.clone()]
+        }
         Value::Array(items) => items.clone(),
         _ => return Err("文件内容既不是导出文件、单账号文件，也不是账号数组".to_string()),
     };
-
-    let mut payload = json!({ "accounts": accounts, "mode": "merge" });
-    if let Value::Object(map) = &document {
-        if let Some(definitions) = map.get("customProviders") {
-            payload["customProviders"] = definitions.clone();
-        }
-    }
-
-    gateway::call("POST", "/api/accounts/import", Some(&payload)).await
+    let custom_providers = match &document {
+        Value::Object(map) => match map.get("customProviders") {
+            Some(Value::Array(definitions)) => Some(definitions.clone()),
+            Some(_) => return Err("customProviders 必须是数组".to_string()),
+            None => None,
+        },
+        _ => None,
+    };
+    Ok((accounts, custom_providers))
 }
 
 /// 网页端旧版「导出」把管理 API 的 `{ success, data }` 响应信封整个存成了
@@ -799,9 +907,9 @@ pub async fn export_database(
     let file = app
         .dialog()
         .file()
-        .set_title("整库备份")
+        .set_title(native_ui::text(TextKey::BackupDatabase))
         .set_file_name(&default_name)
-        .add_filter("Agent2API 加密备份", &["a2ab"])
+        .add_filter(native_ui::text(TextKey::EncryptedBackup), &["a2ab"])
         .blocking_save_file();
     let Some(target) = file else {
         return Ok(json!({ "canceled": true }));
@@ -846,9 +954,9 @@ pub async fn import_database(app: AppHandle, password: Option<String>) -> Result
     let file = app
         .dialog()
         .file()
-        .set_title("整库恢复")
-        .add_filter("Agent2API 备份", &["a2ab", "sql"])
-        .add_filter("全部文件", &["*"])
+        .set_title(native_ui::text(TextKey::RestoreDatabase))
+        .add_filter(native_ui::text(TextKey::DatabaseBackup), &["a2ab", "sql"])
+        .add_filter(native_ui::text(TextKey::AllFiles), &["*"])
         .blocking_pick_file();
     let Some(target) = file else {
         return Ok(json!({ "canceled": true }));

@@ -4,7 +4,12 @@
 
 #[path = "workbuddy_http.rs"]
 mod workbuddy_http;
+#[path = "http_rejection.rs"]
+mod http_rejection;
 pub(in crate::server::core::plugin_host) use workbuddy_http::{WorkBuddyExecution, MAX_BODY as WORKBUDDY_MAX_BODY};
+pub(in crate::server::core::plugin_host::wasm) use http_rejection::{
+    supports_http_200_rejection_inspection, HttpRejectionObserver,
+};
 
 use std::sync::Arc;
 
@@ -16,21 +21,80 @@ use crate::server::core::plugin_host::wasm::context::{Context, Shared};
 
 impl Context {
     pub(in crate::server::core::plugin_host::wasm) fn finish_http_submission(
-        &self,
+        &mut self,
         result: &Result<(Value, crate::server::core::plugin_host::script::HttpHandle), proto::WireError>,
     ) {
         let Some(call) = self.conversation.as_ref() else { return };
         let Ok(state) = call.signal.state.lock() else { return };
         if !state.http_submission { return; }
         drop(state);
-        if matches!(result.as_ref().ok().and_then(|(value, _)| value["status"].as_u64()), Some(status) if is_safe_http_rejection(status as u16)) {
-            call.preparation.confirm_unsubmitted_http_rejection();
-        } else {
-            call.preparation.lock_permanent_replay_block();
+        if let Ok((value, handle)) = result.as_ref() {
+            if value["status"].as_u64().is_some_and(|status| is_safe_http_rejection(status as u16)) {
+                call.preparation.confirm_unsubmitted_http_rejection();
+                return;
+            }
+            if let Some(observer) = HttpRejectionObserver::for_response(
+                &self.shared.options.provider,
+                handle.id(),
+                value,
+                call.preparation.clone(),
+            ) {
+                self.http_rejection = Some(observer);
+                return;
+            }
+        }
+        call.preparation.lock_permanent_replay_block();
+    }
+
+    pub(in crate::server::core::plugin_host::wasm) fn attach_http_rejection_observer(
+        &mut self,
+        handle_id: &str,
+        result: &Value,
+    ) {
+        let Some(call) = self.conversation.as_ref() else { return };
+        let Ok(state) = call.signal.state.lock() else { return };
+        if !state.http_submission { return; }
+        drop(state);
+        if let Some(observer) = HttpRejectionObserver::for_response(
+            &self.shared.options.provider,
+            handle_id,
+            result,
+            call.preparation.clone(),
+        ) {
+            self.http_rejection = Some(observer);
         }
     }
 
-    pub(in crate::server::core::plugin_host::wasm) fn confirm_stream_started(&self) {
+    pub(in crate::server::core::plugin_host::wasm) fn observe_http_rejection(
+        &mut self,
+        handle_id: &str,
+        result: &Result<Value, proto::WireError>,
+    ) {
+        if let Some(observer) = self.http_rejection.as_mut().filter(|observer| observer.matches(handle_id)) {
+            observer.observe(result);
+        }
+    }
+
+    pub(in crate::server::core::plugin_host::wasm) fn close_http_rejection(&mut self, handle_id: &str) {
+        if self.http_rejection.as_ref().is_some_and(|observer| observer.matches(handle_id)) {
+            if let Some(mut observer) = self.http_rejection.take() {
+                observer.finish_on_close();
+            }
+        }
+    }
+
+    pub(in crate::server::core::plugin_host::wasm) fn lock_http_rejection_for(&mut self, handle_id: &str) {
+        if self.http_rejection.as_ref().is_some_and(|observer| observer.matches(handle_id)) {
+            if let Some(mut observer) = self.http_rejection.take() {
+                observer.lock();
+            }
+        }
+    }
+
+    pub(in crate::server::core::plugin_host::wasm) fn confirm_stream_started(&mut self) {
+        if let Some(mut observer) = self.http_rejection.take() {
+            observer.lock();
+        }
         if let Some(call) = self.conversation.as_ref() {
             call.preparation.lock_permanent_replay_block();
         }

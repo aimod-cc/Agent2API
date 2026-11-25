@@ -1,7 +1,10 @@
 use serde::Serialize;
 
 #[cfg(target_os = "linux")]
-use std::sync::{atomic::{AtomicBool, Ordering}, OnceLock};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 #[cfg(target_os = "linux")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -73,7 +76,14 @@ pub fn initialize() {
             compatibility_mode: compatibility,
             saved: AtomicBool::new(false),
         });
-        eprintln!("[Graphics] 硬件加速{}", if active { "已开启" } else { "已关闭（兼容模式）" });
+        eprintln!(
+            "[Graphics] 硬件加速{}",
+            if active {
+                "已开启"
+            } else {
+                "已关闭（兼容模式）"
+            }
+        );
     }
 }
 
@@ -90,7 +100,9 @@ pub async fn get_graphics_settings() -> Result<GraphicsSettings, String> {
             environment_override: runtime.environment_override,
             compatibility_mode: runtime.compatibility_mode,
             restart_required: runtime.saved.load(Ordering::Relaxed)
-                || (enabled != runtime.active && !runtime.compatibility_mode && !runtime.environment_override),
+                || (enabled != runtime.active
+                    && !runtime.compatibility_mode
+                    && !runtime.environment_override),
         })
     }
     #[cfg(not(target_os = "linux"))]
@@ -104,7 +116,10 @@ pub async fn save_graphics_settings(app: tauri::AppHandle, enabled: bool) -> Res
         crate::startup::wait().await?;
         let runtime = RUNTIME.get().ok_or("图形设置尚未初始化")?;
         if enabled && runtime.environment_override {
-            return Err("启动环境已关闭硬件加速，请先移除 WEBKIT_DISABLE_COMPOSITING_MODE 后重新启动".into());
+            return Err(
+                "启动环境已关闭硬件加速，请先移除 WEBKIT_DISABLE_COMPOSITING_MODE 后重新启动"
+                    .into(),
+            );
         }
         let mut settings = crate::settings::load();
         settings.hardware_acceleration = enabled;
@@ -112,7 +127,9 @@ pub async fn save_graphics_settings(app: tauri::AppHandle, enabled: bool) -> Res
         runtime.saved.store(true, Ordering::Relaxed);
         let restart = crate::commands::schedule_app_restart(&app)
             .map_err(|error| format!("设置已保存，但未能重启应用：{error}"))?;
-        restart.wait().await
+        restart
+            .wait()
+            .await
             .map_err(|error| format!("设置已保存，但未能重启应用：{error}"))?;
         Ok(())
     }
@@ -125,22 +142,31 @@ pub async fn save_graphics_settings(app: tauri::AppHandle, enabled: bool) -> Res
 
 #[cfg(target_os = "linux")]
 pub fn confirm_compatibility_restart(app: &tauri::AppHandle) {
+    use crate::native_ui::{self, TextKey};
+
     let handle = app.clone();
     app.dialog()
-        .message("关闭 Agent2API 的硬件加速并重启，可能解决白屏、画面不更新或点击无响应。此选择会保存到本机，下次启动继续使用兼容模式；可在设置中重新开启。重启期间网关会短暂中断。")
-        .title("以兼容模式重启")
+        .message(native_ui::text(TextKey::CompatibilityRestartMessage))
+        .title(native_ui::text(TextKey::CompatibilityRestart))
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancel)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            native_ui::text(TextKey::Ok).to_string(),
+            native_ui::text(TextKey::Cancel).to_string(),
+        ))
         .show(move |accepted| {
             if !accepted {
                 return;
             }
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = save_graphics_settings(handle.clone(), false).await {
-                    handle.dialog()
+                    handle
+                        .dialog()
                         .message(error)
-                        .title("无法以兼容模式重启")
+                        .title(native_ui::text(TextKey::CompatibilityRestartFailed))
                         .kind(MessageDialogKind::Error)
+                        .buttons(MessageDialogButtons::OkCustom(
+                            native_ui::text(TextKey::Ok).to_string(),
+                        ))
                         .show(|_| {});
                 }
             });

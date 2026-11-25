@@ -17,7 +17,7 @@ impl ApiKeyIdentity {
     pub fn filter_value(&self) -> String {
         match self.source.as_str() {
             "key" => format!("key:{}", self.id),
-            "env" | "none" => self.source.clone(),
+            "env" | "none" | "local_direct" => self.source.clone(),
             _ => "unknown".to_string(),
         }
     }
@@ -25,7 +25,7 @@ impl ApiKeyIdentity {
     pub fn from_filter(value: &str) -> Option<Self> {
         let value = value.trim();
         let (source, id) = match value {
-            "env" | "none" => (value, ""),
+            "env" | "none" | "local_direct" => (value, ""),
             "unknown" => ("", ""),
             _ => ("key", value.strip_prefix("key:").filter(|id| !id.is_empty())?),
         };

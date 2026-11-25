@@ -171,6 +171,7 @@ pub async fn get_system_info(
         "features": {
             "debugMode": snapshot.debug_mode(),
             "sanitizeFingerprints": snapshot.sanitize_fingerprints(),
+            "privacyRedaction": snapshot.privacy_settings().settings.enabled,
             "cors": snapshot.cors_enabled(),
             "developerRoleCompat": snapshot.developer_role_compat(),
             "thirdPartyReasoningCollapse": snapshot.third_party_reasoning_collapse(),

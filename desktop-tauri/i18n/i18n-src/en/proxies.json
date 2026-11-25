@@ -391,5 +391,6 @@
   "首次购买使用优惠码 AGENT2API25 享 75 折。": "Use code AGENT2API25 for 25% off your first purchase.",
   "＋ 新增代理": "+ New proxy",
   "＋ 新增订阅": "+ New subscription",
-  "，": ", "
+  "，": ", ",
+  "{n} 个账号在用#one": "{n} account using"
 }

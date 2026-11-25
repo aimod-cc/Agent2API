@@ -35,11 +35,7 @@ import {
   TonalIconButton,
 } from '../ui/components'
 import { ProviderAvatar } from '../ui/icons'
-import {
-  CampaignsAndPlansSectionPanel,
-  GrowthSectionPanel,
-  OnboardingSectionPanel,
-} from './CheckinExtrasPanel'
+import { BenefitsSectionPanel } from './CheckinExtrasPanel'
 import { CheckinPlansSheet } from './CheckinPlansSheet'
 import { CheckinActivitySheet } from './CheckinActivitySheet'
 import { CheckinRecordsPanel, CheckinRecordsStickyControls } from './CheckinRecordsPanel'
@@ -108,9 +104,12 @@ export function CheckinView() {
     if (!center) return [{ id: 'daily' as CheckinSection, label: t('每日签到') }]
     return CHECKIN_SECTION_OPTIONS.filter(opt => {
       if (opt.value === 'daily') return true
-      if (opt.value === 'onboarding') return center.extras.onboarding.length > 0
-      if (opt.value === 'plans') return center.extras.plans.length > 0 || (center.extras.campaigns?.length || 0) > 0
-      if (opt.value === 'growth') return center.extras.growth.length > 0
+      if (opt.value === 'benefits') {
+        return center.extras.onboarding.length > 0
+          || center.extras.plans.length > 0
+          || (center.extras.campaigns?.length || 0) > 0
+          || center.extras.growth.length > 0
+      }
       return false
     }).map(opt => ({ id: opt.value as CheckinSection, label: t(opt.label) }))
   }, [center])
@@ -246,17 +245,15 @@ export function CheckinView() {
           }
         />
       ) : mainTab === 'daily' ? (
-        section === 'onboarding' ? (
-          <OnboardingSectionPanel items={center.extras.onboarding} onReload={() => loadCenter()} />
-        ) : section === 'plans' ? (
-          <CampaignsAndPlansSectionPanel
+        section === 'benefits' ? (
+          <BenefitsSectionPanel
+            onboarding={center.extras.onboarding}
             plans={center.extras.plans}
             campaigns={center.extras.campaigns || []}
+            growth={center.extras.growth}
             onOpenPlan={setActivePlan}
             onReload={() => loadCenter()}
           />
-        ) : section === 'growth' ? (
-          <GrowthSectionPanel items={center.extras.growth} onReload={() => loadCenter()} />
         ) : (
           <>
             <CommonCard>

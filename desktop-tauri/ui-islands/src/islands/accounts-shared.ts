@@ -584,7 +584,7 @@ export function formatTime(value: unknown): string {
   if (fn) return fn(value)
   const time = Number(value)
   if (!Number.isFinite(time) || time <= 0) return ''
-  return new Date(time).toLocaleString('zh-CN')
+  return new Date(time).toLocaleString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined)
 }
 
 export function errorMessage(error: unknown): string {

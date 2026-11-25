@@ -81,7 +81,7 @@ pub(super) const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_nam
      cache_read_tokens, provider, client_model, upstream_model, attempt_details, sensitive_hits, \
      client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, client, \
      api_key_id, api_key_name, api_key_source, credit, client_evidence, \
-     cache_creation_tokens, cache_creation_1h_tokens, cost_usd";
+     cache_creation_tokens, cache_creation_1h_tokens, cost_usd, privacy_hits, origin";
 
 /// 列表页轻量查询列：跳过四个大 JSON 文本列，仅在 SQL 里判定极轻量布尔/字符串提示，
 /// 彻底省掉整页行上的 JSON 解析与超大对象序列化开销。
@@ -105,7 +105,12 @@ pub(super) const REQUEST_LIST_SELECT: &str = "row_id, id, ts, model, account_id,
           THEN COALESCE(json_extract(client_evidence, '$.clientName'), '') ELSE '' END AS recorded_client_name, \
      CASE WHEN client_evidence <> '' AND client_evidence <> '{}' AND json_valid(client_evidence) \
           THEN COALESCE(json_extract(client_evidence, '$.userAgent'), '') ELSE '' END AS client_user_agent, \
-     cache_creation_tokens, cache_creation_1h_tokens, cost_usd";
+     cache_creation_tokens, cache_creation_1h_tokens, cost_usd, \
+     CASE WHEN privacy_hits <> '' AND privacy_hits <> '[]' THEN 1 ELSE 0 END AS has_privacy_hits, \
+     CASE WHEN privacy_hits <> '' AND privacy_hits <> '[]' AND instr(privacy_hits, '\"block\"') > 0 THEN 'block' \
+          WHEN privacy_hits <> '' AND privacy_hits <> '[]' AND instr(privacy_hits, '\"mask\"') > 0 THEN 'mask' \
+          WHEN privacy_hits <> '' AND privacy_hits <> '[]' AND instr(privacy_hits, '\"warn\"') > 0 THEN 'warn' \
+          ELSE '' END AS privacy_action, origin";
 
 // `request_daily`（按天聚合）那一支的列常量、编解码与读-改-写语句在
 // `daily.rs` —— 两张表的语句分文件后各自独立演化。
@@ -184,6 +189,8 @@ pub(super) fn decode_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
         cache_creation_tokens: row.get::<_, Option<i64>>(31)?.unwrap_or(0),
         cache_creation_1h_tokens: row.get::<_, Option<i64>>(32)?.unwrap_or(0),
         cost_usd: row.get(33)?,
+        privacy_hits: decode_json_list(&row.get::<_, String>(34)?),
+        origin: row.get(35)?,
     })
 }
 
@@ -228,6 +235,9 @@ pub(super) fn decode_request_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<R
         cache_creation_tokens: row.get::<_, Option<i64>>(36)?.unwrap_or(0),
         cache_creation_1h_tokens: row.get::<_, Option<i64>>(37)?.unwrap_or(0),
         cost_usd: row.get(38)?,
+        has_privacy_hits: row.get::<_, i64>(39)? != 0,
+        privacy_action: row.get(40)?,
+        origin: row.get(41)?,
     })
 }
 
@@ -364,6 +374,10 @@ impl FilterPlan {
         if let Some(to) = filter.end {
             fragments.push("ts < ?".to_string());
             binds.push(SqlValue::Integer(to));
+        }
+        if let Some(want) = super::aggregate::normalize_origin_filter(filter.origin.as_deref()) {
+            fragments.push("origin = ?".to_string());
+            binds.push(SqlValue::Text(want.to_string()));
         }
 
         let where_sql = if fragments.is_empty() {
@@ -593,7 +607,7 @@ pub(super) fn select_detail_by_row_id(
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![row_id])?;
     let Some(row) = rows.next()? else { return Ok(None); };
-    Ok(Some((row.get(34)?, decode_request(row)?)))
+    Ok(Some((row.get(36)?, decode_request(row)?)))
 }
 
 pub(super) fn select_detail_by_id(
@@ -608,7 +622,7 @@ pub(super) fn select_detail_by_id(
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![id, ts])?;
     let Some(row) = rows.next()? else { return Ok(None); };
-    Ok(Some((row.get(34)?, decode_request(row)?)))
+    Ok(Some((row.get(36)?, decode_request(row)?)))
 }
 
 /// 取区间 `[from_ms, to_ms]` 内的**完整明细**，按写入顺序（ts 升序、同 ts 按 row_id）。
@@ -646,9 +660,9 @@ pub(super) fn select_between(
     Ok(out)
 }
 
-/// 供按日重算费用与折叠日报使用的窄列集合：与 [`REQUEST_COLUMNS`] 保持完全一致的 34 列序号
-/// （复用 [`decode_request`]），但跳过 `attempt_details`、`sensitive_hits` 及完整 `route` 大 JSON 文本解析。
-const REQUEST_REPRICE_COLUMNS: &str = "id, ts, model, account_id, account_name, status, duration_ms, \
+/// 供按日重算费用与折叠日报使用的窄列集合：与 [`REQUEST_COLUMNS`] 保持完全一致的 35 列序号
+/// （复用 [`decode_request`]），但跳过 `attempt_details`、`sensitive_hits`、`privacy_hits` 及完整 `route` 大 JSON 文本解析。
+pub(super) const REQUEST_REPRICE_COLUMNS: &str = "id, ts, model, account_id, account_name, status, duration_ms, \
      first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
      cache_read_tokens, provider, client_model, upstream_model, '[]' AS attempt_details, '[]' AS sensitive_hits, \
      client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, \
@@ -656,7 +670,7 @@ const REQUEST_REPRICE_COLUMNS: &str = "id, ts, model, account_id, account_name, 
           THEN json_object('visionCompatibility', json_object('mode', json_extract(route, '$.visionCompatibility.mode'))) \
           ELSE NULL END AS route, \
      client, api_key_id, api_key_name, api_key_source, credit, client_evidence, \
-     cache_creation_tokens, cache_creation_1h_tokens, cost_usd";
+     cache_creation_tokens, cache_creation_1h_tokens, cost_usd, '[]' AS privacy_hits, origin";
 
 pub(super) fn select_between_with_row_id(
     conn: &Connection,
@@ -673,7 +687,7 @@ pub(super) fn select_between_with_row_id(
     let mut rows = stmt.query(params![from_ms, to_ms])?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
-        let row_id: i64 = row.get(34)?;
+        let row_id: i64 = row.get(36)?;
         out.push((row_id, decode_request(row)?));
     }
     Ok(out)
@@ -758,7 +772,7 @@ pub(super) fn finish_stale_running(
     conn.execute(
         "UPDATE requests SET status = 408, error = '网关重启或流中断，请求未能完成', \
          duration_ms = MAX(?2 - ts, 0), attempts = 1, \
-         attempt_details = '[]', sensitive_hits = '[]', phase = '', phase_started_at = NULL \
+         attempt_details = '[]', sensitive_hits = '[]', privacy_hits = '[]', phase = '', phase_started_at = NULL \
          WHERE status = 0 AND ts < ?1",
         params![cutoff, now],
     )
@@ -823,7 +837,7 @@ pub(super) fn update_running_progress(
         "UPDATE requests SET provider = ?2, account_id = ?3, account_name = ?4, \
          upstream_model = ?5, upstream_reasoning = ?6, attempts = ?7, first_response_ms = ?8, \
          attempt_details = ?9, sensitive_hits = ?10, phase = ?11, phase_started_at = ?12, \
-         route = COALESCE(?13, route) WHERE id = ?1 AND status = 0",
+         route = COALESCE(?13, route), privacy_hits = ?14 WHERE id = ?1 AND status = 0",
         params![
             id,
             progress.provider,
@@ -838,6 +852,7 @@ pub(super) fn update_running_progress(
             progress.phase,
             progress.phase_started_at,
             progress.route.as_ref().map(Value::to_string),
+            encode_json_list(&progress.privacy_hits),
         ],
     )
 }
@@ -872,7 +887,8 @@ pub(super) fn update_running_request(
          client_reasoning = ?20, upstream_reasoning = ?21, phase = '', phase_started_at = NULL, \
          is_test = ?22, route = ?23, client = ?24, \
          api_key_id = ?25, api_key_name = ?26, api_key_source = ?27, credit = ?28, client_evidence = ?29, \
-         cache_creation_tokens = ?30, cache_creation_1h_tokens = ?31, cost_usd = ?32 \
+         cache_creation_tokens = ?30, cache_creation_1h_tokens = ?31, cost_usd = ?32, privacy_hits = ?33, \
+         origin = ?34 \
          WHERE id = ?1 AND status = 0",
         params![
             entry.id,
@@ -911,6 +927,8 @@ pub(super) fn update_running_request(
             entry.cache_creation_tokens,
             entry.cache_creation_1h_tokens,
             entry.cost_usd,
+            encode_json_list(&entry.privacy_hits),
+            entry.origin,
         ],
     )
 }
@@ -938,9 +956,9 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
          cache_read_tokens, provider, client_model, upstream_model, attempt_details, \
          sensitive_hits, client_reasoning, upstream_reasoning, is_test, route, client, \
          api_key_id, api_key_name, api_key_source, credit, client_evidence, \
-         cache_creation_tokens, cache_creation_1h_tokens, cost_usd) \
+         cache_creation_tokens, cache_creation_1h_tokens, cost_usd, privacy_hits, origin) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
         params![
             entry.id,
             entry.ts,
@@ -974,6 +992,8 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
             entry.cache_creation_tokens,
             entry.cache_creation_1h_tokens,
             entry.cost_usd,
+            encode_json_list(&entry.privacy_hits),
+            entry.origin,
         ],
     )?;
     Ok(())
@@ -988,6 +1008,15 @@ pub(super) fn delete_matching(
     conn: &Connection,
     plan: &FilterPlan,
 ) -> rusqlite::Result<usize> {
+    if plan.is_empty() {
+        conn.execute("DELETE FROM local_direct_refs", [])?;
+    } else {
+        let ref_sql = format!(
+            "DELETE FROM local_direct_refs WHERE request_id IN (SELECT id FROM requests{})",
+            plan.where_sql
+        );
+        conn.execute(&ref_sql, params_from_iter(plan.binds.iter()))?;
+    }
     let sql = format!("DELETE FROM requests{}", plan.where_sql);
     conn.execute(&sql, params_from_iter(plan.binds.iter()))
 }
@@ -995,6 +1024,7 @@ pub(super) fn delete_matching(
 /// 清空全部明细。调用方必须先在同一事务中清理两侧报文。
 pub(super) fn delete_all_requests(conn: &Connection) -> rusqlite::Result<usize> {
     crate::server::db::invalidate_query_caches();
+    conn.execute("DELETE FROM local_direct_refs", [])?;
     conn.execute("DELETE FROM requests", [])
 }
 
@@ -1007,6 +1037,11 @@ pub(super) fn delete_all_requests(conn: &Connection) -> rusqlite::Result<usize> 
 pub(super) fn delete_expired_requests(conn: &Connection, cutoff: i64) -> rusqlite::Result<usize> {
     conn.execute(
         "DELETE FROM request_raw WHERE id IN \
+         (SELECT id FROM requests WHERE ts < ?1 AND id <> '')",
+        params![cutoff],
+    )?;
+    conn.execute(
+        "DELETE FROM local_direct_refs WHERE request_id IN \
          (SELECT id FROM requests WHERE ts < ?1 AND id <> '')",
         params![cutoff],
     )?;

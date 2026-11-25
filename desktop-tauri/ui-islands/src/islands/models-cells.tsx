@@ -147,7 +147,7 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
             title={on ? t('映射已启用，点击关闭') : conflicts.length
               ? t('启用后将自动关闭该提供商的其他同名绑定：{bindings}', { bindings: conflicts.map(binding => `${binding.alias} → ${binding.target}`).join('、') })
               : t('映射已关闭，点击启用')}
-            aria-label={t('{action}映射 {alias}', { action: on ? t('关闭') : t('启用'), alias })}
+            aria-label={t('{action}映射 {alias}', { action: on ? t('禁用') : t('启用'), alias })}
             onCheckedChange={next => {
               void runRowAction(
                 bindingKeyOf(alias, model.id, providerId),

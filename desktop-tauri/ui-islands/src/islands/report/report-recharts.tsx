@@ -52,7 +52,11 @@ export function UsageDonut({ view, ariaLabel, itemLabel }: { view: DonutView; ar
           data-highlighted={selected?.key === row.key ? '' : undefined} data-tip={row.tip}
           onMouseEnter={() => setHighlighted(row)} onMouseLeave={() => setHighlighted(null)}
           onFocus={() => setHighlighted(row)} onBlur={() => setHighlighted(null)}>
-          <span className='donut-legend-name' title={row.name}><span className='donut-dot' style={{ background: row.fill }} /><span>{row.name}</span></span>
+          <span className='donut-legend-name' title={row.name}>
+            <span className='donut-dot' style={{ background: row.fill }} />
+            <span className='donut-legend-label'>{row.name}</span>
+            {row.mergedSources ? <span className='report-merged-count'>+{row.mergedSources.length - 1}</span> : null}
+          </span>
           <span className='donut-legend-tokens' title={formatInt(row.tokens)}>{formatTokens(row.tokens)}</span>
           <span className='donut-legend-percent'>{formatUsagePercent(row.percentage)}</span>
         </div>)}

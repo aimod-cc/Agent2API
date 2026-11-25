@@ -514,11 +514,12 @@ pub(super) fn running_progress(snapshot: &TelemetrySnapshot, started_at: i64) ->
         attempt_details: stored_attempt_details(&snapshot.attempts_detail),
         route: snapshot.route.clone(),
         sensitive_hits: stored_sensitive_hits(&snapshot.sensitive_hits),
+        privacy_hits: stored_privacy_hits(&snapshot.privacy_hits),
     }
 }
 
 pub use super::record_persist::record_entry;
-pub(super) use super::record_persist::{stored_attempt_details, stored_sensitive_hits};
+pub(super) use super::record_persist::{stored_attempt_details, stored_privacy_hits, stored_sensitive_hits};
 
 /// 按字符截断（超出部分用 `…` 收尾）。
 pub fn truncate_chars(text: &str, limit: usize) -> String {

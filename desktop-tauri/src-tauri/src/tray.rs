@@ -11,11 +11,12 @@
 //! 不额外引入托盘专用图片资源。
 
 use tauri::{
+    AppHandle, Emitter, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
 };
 
+use crate::native_ui::{self, Locale, TextKey};
 use crate::state::AppState;
 
 pub const TRAY_ID: &str = "main-tray";
@@ -25,28 +26,67 @@ const MENU_QUIT: &str = "tray-quit";
 #[cfg(target_os = "linux")]
 const MENU_COMPATIBILITY: &str = "tray-compatibility";
 
-/// 创建托盘图标。应用启动时调用一次即可。
-pub fn create(app: &AppHandle) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, MENU_SHOW, "显示主窗口", true, None::<&str>)?;
-    let check_update_item =
-        MenuItem::with_id(app, MENU_CHECK_UPDATE, "检查更新", true, None::<&str>)?;
+/// 同一份结构用于首次创建和语言切换；locale 快照保证一次重建内文案一致。
+fn build_menu(app: &AppHandle, locale: Locale) -> tauri::Result<Menu<tauri::Wry>> {
+    let show_item = MenuItem::with_id(
+        app,
+        MENU_SHOW,
+        native_ui::text_for(locale, TextKey::TrayShowMain),
+        true,
+        None::<&str>,
+    )?;
+    let check_update_item = MenuItem::with_id(
+        app,
+        MENU_CHECK_UPDATE,
+        native_ui::text_for(locale, TextKey::TrayCheckUpdate),
+        true,
+        None::<&str>,
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, MENU_QUIT, "退出", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(
+        app,
+        MENU_QUIT,
+        native_ui::text_for(locale, TextKey::TrayQuit),
+        true,
+        None::<&str>,
+    )?;
     #[cfg(target_os = "linux")]
     let compatibility_item = MenuItem::with_id(
-        app, MENU_COMPATIBILITY, "以兼容模式重启", true, None::<&str>,
+        app,
+        MENU_COMPATIBILITY,
+        native_ui::text_for(locale, TextKey::CompatibilityRestart),
+        true,
+        None::<&str>,
     )?;
     #[cfg(target_os = "linux")]
-    let menu = Menu::with_items(
+    return Menu::with_items(
         app,
-        &[&show_item, &check_update_item, &compatibility_item, &separator, &quit_item],
-    )?;
+        &[
+            &show_item,
+            &check_update_item,
+            &compatibility_item,
+            &separator,
+            &quit_item,
+        ],
+    );
     #[cfg(not(target_os = "linux"))]
-    let menu = Menu::with_items(
+    Menu::with_items(
         app,
         &[&show_item, &check_update_item, &separator, &quit_item],
-    )?;
+    )
+}
 
+/// 前端每次词典初始化和语言切换都会调用。托盘尚未创建时无副作用。
+pub(crate) fn refresh_menu(app: &AppHandle) -> tauri::Result<()> {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return Ok(());
+    };
+    tray.set_menu(Some(build_menu(app, native_ui::current())?))
+}
+
+/// 创建托盘图标。应用启动时调用一次即可。
+pub fn create(app: &AppHandle) -> tauri::Result<()> {
+    let menu = build_menu(app, native_ui::current())?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         // 提示文字与窗口标题同一份（开发版带 "Dev" 标记，见 lib.rs 的 app_title）：
         // 两个实例同时跑时，托盘图标是唯一能一眼分清谁是谁的地方

@@ -149,17 +149,19 @@ function CampaignRow({ row, disabled, onReport }: {
   )
 }
 
-/** 组标题：报出这一组是谁、有几个；这一组通用的规则挂右侧，行里就不必复读 */
-function GroupLabel({ title, count, hint }: {
+/** 组标题：报出这一组是谁、有几个；这一组通用的规则与分组操作挂右侧，行里就不必复读 */
+function GroupLabel({ title, count, hint, actions }: {
   title: string
   count: number
   hint?: string
+  actions?: React.ReactNode
 }): React.ReactElement {
   return (
-    <div className='flex items-baseline gap-2 px-3.5 pb-1 pt-3'>
+    <div className='flex flex-wrap items-center gap-2 px-3.5 pb-1.5 pt-3'>
       <span className='text-[11px] font-semibold tracking-[0.08em] text-muted-foreground'>{title}</span>
       <span className='text-[11.5px] text-muted-foreground'>{t('{n} 个账号', { n: count })}</span>
-      {hint ? <span className='ml-auto text-[11.5px] text-muted-foreground'>{hint}</span> : null}
+      {hint ? <span className='text-[11.5px] text-muted-foreground'>{hint}</span> : null}
+      {actions ? <div className='ml-auto flex shrink-0 items-center gap-1.5'>{actions}</div> : null}
     </div>
   )
 }
@@ -177,6 +179,7 @@ type Filter = (typeof FILTERS)[number]['value']
 export type PlansCounts = {
   claimed: number
   total: number
+  visible: number
   claimable: number
   busy: boolean
   byProvider: Record<string, { claimed: number; total: number }>
@@ -193,7 +196,7 @@ type PlansRowState = {
 export type PlansRowReporter = (key: string, state: PlansRowState | null) => void
 
 export function PlansSection({ campaigns, plans, providerId = '', filter: outerFilter, onFilterChange,
-  queryAllToken: outerToken, claimAllToken = 0, onCountsChange, embedded }: {
+  queryAllToken: outerToken, claimAllToken = 0, onCountsChange, embedded, hideEmpty = false, topDivider = false }: {
   campaigns: CampaignEntry[]
   plans: PlanEntry[]
   providerId?: string
@@ -207,6 +210,10 @@ export function PlansSection({ campaigns, plans, providerId = '', filter: outerF
   onCountsChange?: (counts: PlansCounts) => void
   /** true = 只画列表（外层已经有卡片、标题与筛选） */
   embedded?: boolean
+  /** true = 不渲染内部空态（由外层统一兜底） */
+  hideEmpty?: boolean
+  /** true = 上方已有其他分组时在首组上方画分隔线 */
+  topDivider?: boolean
 }): React.ReactElement {
   const [ownFilter, setOwnFilter] = React.useState<Filter>('all')
   const [ownToken, setOwnToken] = React.useState(0)
@@ -246,13 +253,20 @@ export function PlansSection({ campaigns, plans, providerId = '', filter: outerF
   const scopedPlans = plans.filter(row => !providerId || row.provider === providerId)
   const campaignRows = scopedCampaigns.filter(row => keep(isCampaignClaimed(row)))
   const planRows = scopedPlans.filter(row => keep(isPlanClaimed(row)))
-  const visibleKeys = [...campaignRows.map(row => `campaign:${row.id}`), ...planRows.map(row => `plan:${row.id}`)]
-  const claimableTotal = visibleKeys.reduce((sum, key) => sum + (rowStates[key]?.claimable ?? 0), 0)
+  const campaignKeys = campaignRows.map(row => `campaign:${row.id}`)
+  const planKeys = planRows.map(row => `plan:${row.id}`)
+  const visibleKeys = [...campaignKeys, ...planKeys]
+  const campaignClaimable = campaignKeys.reduce((sum, key) => sum + (rowStates[key]?.claimable ?? 0), 0)
+  const planClaimable = planKeys.reduce((sum, key) => sum + (rowStates[key]?.claimable ?? 0), 0)
+  const claimableTotal = campaignClaimable + planClaimable
+  const campaignBusy = store.plansBatch !== null || campaignKeys.some(key => rowStates[key]?.busy)
+  const planBusy = store.plansBatch !== null || planKeys.some(key => rowStates[key]?.busy)
   const busy = store.plansBatch !== null || visibleKeys.some(key => rowStates[key]?.busy)
   const claimedTotal = scopedCampaigns.filter(isCampaignClaimed).length + scopedPlans.filter(isPlanClaimed).length
   const total = scopedCampaigns.length + scopedPlans.length
+  const visibleCount = visibleKeys.length
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const byProvider: PlansCounts['byProvider'] = {}
     const add = (provider: string, claimed: boolean) => {
       const entry = byProvider[provider] ?? { claimed: 0, total: 0 }
@@ -263,12 +277,12 @@ export function PlansSection({ campaigns, plans, providerId = '', filter: outerF
     for (const row of campaigns) add(row.provider, isCampaignClaimed(row))
     for (const row of plans) add(row.provider, isPlanClaimed(row))
     onCountsChange?.({ claimed: campaigns.filter(isCampaignClaimed).length + plans.filter(isPlanClaimed).length,
-      total: campaigns.length + plans.length, claimable: claimableTotal, busy, byProvider })
-  }, [campaigns, plans, rowStates, claimableTotal, busy, onCountsChange])
+      total: campaigns.length + plans.length, visible: visibleCount, claimable: claimableTotal, busy, byProvider })
+  }, [campaigns, plans, rowStates, visibleCount, claimableTotal, busy, onCountsChange])
 
-  const runBatch = async (mode: 'query' | 'claim') => {
+  const runBatch = async (mode: 'query' | 'claim', scope: 'campaigns' | 'plans' | 'all' = 'all') => {
     if (store.plansBatch) return
-    const keys = [...visibleKeys]
+    const keys = scope === 'campaigns' ? [...campaignKeys] : scope === 'plans' ? [...planKeys] : [...visibleKeys]
     if (!keys.length) return
     patch({ plansBatch: mode })
     try {
@@ -307,8 +321,21 @@ export function PlansSection({ campaigns, plans, providerId = '', filter: outerF
 
   const body = <>
     {campaigns.length > 0 ? (
-      <div className='pb-1' hidden={campaignRows.length === 0}>
-        <GroupLabel title={t('限时活动')} count={campaignRows.length} />
+      <div className={cn('pb-1', topDivider && 'border-t border-hairline')} hidden={campaignRows.length === 0}>
+        <GroupLabel
+          title={t('限时活动')}
+          count={campaignRows.length}
+          actions={embedded ? <>
+            <Button size='xs' variant='outline' disabled={campaignBusy || campaignRows.length === 0}
+              onClick={() => void runBatch('query', 'campaigns')}>
+              {store.plansBatch === 'query' ? t('查询中…') : t('全部查询')}
+            </Button>
+            <Button size='xs' variant='outline' disabled={campaignBusy || campaignClaimable === 0}
+              onClick={() => void runBatch('claim', 'campaigns')}>
+              {store.plansBatch === 'claim' ? t('领取中…') : t('全部领取')}
+            </Button>
+          </> : undefined}
+        />
         <ItemGroup>
           {campaigns.map(row => (
             <div key={row.id} hidden={!campaignRows.some(item => item.id === row.id)}>
@@ -320,9 +347,22 @@ export function PlansSection({ campaigns, plans, providerId = '', filter: outerF
     ) : null}
 
     {plans.length > 0 ? (
-      <div className={cn('pt-1 pb-1', campaignRows.length > 0 && 'border-t border-hairline')} hidden={planRows.length === 0}>
-        <GroupLabel title={t('体验套餐')} count={planRows.length}
-          hint={t('活动期内每天可再领一份 · 领取需完成滑块验证')} />
+      <div className={cn('pt-1 pb-1', (campaignRows.length > 0 || topDivider) && 'border-t border-hairline')} hidden={planRows.length === 0}>
+        <GroupLabel
+          title={t('体验套餐')}
+          count={planRows.length}
+          hint={t('活动期内每天可再领一份 · 领取需完成滑块验证')}
+          actions={embedded ? <>
+            <Button size='xs' variant='outline' disabled={planBusy || planRows.length === 0}
+              onClick={() => void runBatch('query', 'plans')}>
+              {store.plansBatch === 'query' ? t('查询中…') : t('全部查询')}
+            </Button>
+            <Button size='xs' variant='outline' disabled={planBusy || planClaimable === 0}
+              onClick={() => void runBatch('claim', 'plans')}>
+              {store.plansBatch === 'claim' ? t('领取中…') : t('全部领取')}
+            </Button>
+          </> : undefined}
+        />
         <ItemGroup>
           {plans.map(row => (
             <div key={row.id} hidden={!planRows.some(item => item.id === row.id)}>
@@ -333,7 +373,7 @@ export function PlansSection({ campaigns, plans, providerId = '', filter: outerF
       </div>
     ) : null}
 
-    {campaignRows.length === 0 && planRows.length === 0 ? (
+    {!hideEmpty && campaignRows.length === 0 && planRows.length === 0 ? (
       <Empty className='py-6'>
         {filter === 'claimed'
           ? t('今天还没有账号领到过，切到「全部」看看还能领什么。')

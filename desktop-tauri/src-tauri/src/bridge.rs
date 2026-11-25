@@ -276,7 +276,7 @@ const BRIDGE_JS: &str = r#"
       return call('POST', '/api/zcode/captcha', body);
     },
     onLoginState: callback => on('login:state', callback),
-    // 动态登录说明与 /wait 的 pending.hint；不含授权地址或用户输入。
+    // 动态登录说明、/wait 的 pending.hint 及已校验的系统浏览器授权链接（不含用户输入或凭据）。
     onLoginProgress: callback => on('login:progress', callback),
     // KukuAI 短信登录的窗口进度（壳侧监视任务推送，见 `start_kuku_sms`）：
     // {status: 'opening'|'filling'|'sending'|'sent'|'captcha'|'timeout'}。
@@ -467,6 +467,9 @@ const BRIDGE_JS: &str = r#"
     previewAgentProfile: payload => call('POST', '/api/agents/preview', payload || {}),
     restoreAgentClient: payload => call('POST', '/api/agents/restore', payload || {}),
     importAgentClient: payload => call('POST', '/api/agents/import', payload || {}),
+    getLocalDirectStatus: () => call('GET', '/api/agents/local-direct'),
+    saveLocalDirectSettings: payload => call('PUT', '/api/agents/local-direct', payload || {}),
+    syncLocalDirect: payload => call('POST', '/api/agents/local-direct/sync', payload || {}),
 
     // ── 代理池（「网络代理」页）──
     // 与 `server/src/web_shim.rs` 的同名方法成对存在（那个文件是 headless
@@ -736,11 +739,16 @@ const BRIDGE_JS: &str = r#"
       invoke('run_installer', { path: String(path || ''), restart: restart !== false }),
     openReleasePage: url => invoke('open_release_page', { url: String(url || '') }),
 
-    // ── 出站指纹脱敏 ──
+    // ── 关键词替换（原指纹脱敏）──
     // 部分更新；保留布尔签名以兼容缓存中的旧界面。
     getSanitize: () => call('GET', '/api/sanitize'),
     saveSanitize: patch => call('PUT', '/api/sanitize',
       typeof patch === 'boolean' ? { sanitizeBlacklistFingerprints: patch } : patch),
+
+    // ── 隐私脱敏 ──
+    getPrivacy: () => call('GET', '/api/privacy'),
+    savePrivacy: patch => call('PUT', '/api/privacy', patch || {}),
+    testPrivacy: payload => call('POST', '/api/privacy/test', payload || {}),
 
     // ── 开发者角色兼容开关 ──
     // 与 getSanitize / saveSanitize 同形：GET 读、PUT 写，响应体就是新状态。
@@ -870,6 +878,8 @@ const BRIDGE_JS: &str = r#"
       startDate: dates && dates.start,
       endDate: dates && dates.end,
       apiKey: options && options.apiKey,
+      client: options && options.client,
+      origin: options && options.origin,
     })),
     // 筛选条件是可选对象，复用上面 toQuery 的「空值跳过」语义：
     // 清空的输入框不该变成 `?model=` 这种永不命中的条件
@@ -884,7 +894,9 @@ const BRIDGE_JS: &str = r#"
     // 按 id 取单条请求的原始正文 `{id, requestBody, responseBody, truncated}`
     // （详情弹窗「预览对话」的数据源；列表接口不回正文，行保持轻）。
     // 找不到给 404，前端据此提示「没有保存原始报文」。
-    getStatsRequestRaw: id => call('GET', '/api/stats/requests/raw' + toQuery({ id })),
+    getStatsRequestRaw: (id, rowId) => call('GET', '/api/stats/requests/raw' + toQuery(
+      id && typeof id === 'object' ? id : { id, rowId }
+    )),
     // 手动终止一条**在途**请求（详情弹窗的「终止请求」按钮）：
     // 受理 `{success:true,terminated:true}`；不在进行中给 404（已结束 /
     // 上次启动遗留的进行中行），前端据此提示刷新列表
@@ -1025,6 +1037,9 @@ const BRIDGE_JS: &str = r#"
     // 调用方拿它回写显示。网页端 shim 里没有这个方法（浏览器自带缩放，
     // 界面按 platform==='web' 把这一项禁用掉，不会走到这里）。
     setZoom: scale => invoke('set_zoom', { scale }),
+
+    // 原生托盘与系统对话框使用进程级语言；词典初始化和切换时都会同步。
+    setUiLocale: locale => invoke('set_ui_locale', { locale: String(locale || '') }),
 
     // ── 本壳特有：自定义标题栏的窗口三键 ──
     // 主窗口去掉了系统装饰（lib.rs 建窗处 decorations(false)），最小化 /

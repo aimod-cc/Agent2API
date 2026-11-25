@@ -56,8 +56,9 @@ impl RequestVision {
 }
 
 pub(super) fn handles_error(ctx: &ProviderContext<'_>, error: &GatewayError) -> bool {
-    (ctx.routing.strict_vision || ctx.vision.as_ref().is_some_and(|vision|
-        !vision.triggered.load(Ordering::Acquire) && ctx.telemetry.vision_enabled()))
+    error.code.as_deref() != Some("privacy_blocked")
+        && (ctx.routing.strict_vision || ctx.vision.as_ref().is_some_and(|vision|
+            !vision.triggered.load(Ordering::Acquire) && ctx.telemetry.vision_enabled()))
         && stream::explicit_rejection(error)
 }
 

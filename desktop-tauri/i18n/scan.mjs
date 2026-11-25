@@ -11,6 +11,8 @@
  *   ① 代码里的 `t('...')` / `t("...")` / `wbI18n.t('...')` —— 只认字符串字面量首参；
  *   ② HTML 文件里的 `data-i18n="..."` 及属性族 `data-i18n-title` / `-placeholder`
  *      / `-tip` / `-aria-label` 的**显式值**及内联脚本里同样按 ① 提的 t() 字面量。
+ *   ③ 内置原生插件 `plugin/Agent2plugin/plugins/*.json` 的中文 description，
+ *      这些已知动态 t(description) 文案归入 common，不能只靠 nonliteral warning。
  * 注：HTML 文件两条提取通道都跑（data-i18n 属性 + 内联脚本 t()），结果合并去重；
  * 喂给代码提取器的是剥掉 HTML 注释后的源码，注释里写的调用示例不会被误采。
  * 模板串、变量传参这类非字面量**不提取**，只在报告里列为 warning 待人工处理
@@ -23,8 +25,9 @@
  *
  * ── 用法 ──────────────────────────────────────────────────────
  *   node scan.mjs            增量补齐各语言 JSON 骨架
- *   node scan.mjs --check    只体检：报缺失（扫到但没进 JSON）/ 空值 / 孤儿键，
- *                            任一语言有缺失键则退出码 1（便于 CI / pre-commit 卡）
+ *   node scan.mjs --check    只体检：按 DOMAIN_ORDER 合并最终非空词典，检查实际使用键、
+ *                            真实 {name} 占位符及孤儿键；有效缺译或占位符不一致退出码 1。
+ *                            跨域译文冲突、非字面量 t() 和未登记文件只给 warning。
  *
  * 注意：本脚本只「追加」，从不删除 JSON 里的键、也从不改已有值 —— 翻译是人工产物，
  * 任何自动流程都不该把它抹掉。孤儿键（JSON 有、源码扫不到）只在 --check 里报出来，
@@ -41,6 +44,7 @@ const UI = path.join(DESKTOP, 'ui')
 const ISLANDS_SRC = path.join(DESKTOP, 'ui-islands', 'src')
 const UI_KIT_SRC = path.join(DESKTOP, 'ui-kit', 'src')
 const SHARED_SRC = path.join(DESKTOP, 'ui-shared')
+const BUILTIN_PLUGIN_DIR = path.resolve(DESKTOP, '..', 'plugin', 'Agent2plugin', 'plugins')
 /**
  * 手机端源码目录（`desktop-tauri/mobile/src`）。
  *
@@ -74,7 +78,7 @@ const DOMAIN_RULES = [
   { domain: 'account-settings', files: ['accounts-settings-dialog.tsx', 'accounts-settings-fields.tsx', 'account-server-permissions.tsx', 'plugin-account-origin-permissions.tsx'] },
   { domain: 'desktop-launch', files: ['plugin-desktop-launch.ts', 'plugin-desktop-launch-dialog.tsx', 'accounts-desktop-launch.tsx', 'accounts-desktop-recovery.tsx'] },
   { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountsView.tsx', 'AccountsListBody.tsx', 'useAccountsList.ts', 'AccountSheet.tsx', 'AccountSheets.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-sort.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-batch-refresh.ts', 'accounts-features.ts', 'accounts-index-refresh.ts', 'accounts-limited-snapshot.ts', 'accounts-live-state.ts', 'accounts-realtime.ts', 'accounts-table-row.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'proxy-system.ts', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'credit-expiry.ts', 'credential-expiry.ts', 'usage-readings.ts', 'usage-query-state.ts', 'usage-query-task.ts', 'useAccountUsage.ts', 'accounts-usage.ts', 'accounts-usage-cache.ts', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-list-', 'accounts-group-order', 'accounts-limiter-', 'accounts-usage-', 'accounts-export', 'accounts-authorization'] },
-  { domain: 'add-account', files: ['plugin-codearts-enrollment.tsx', 'plugin-desktop-import.tsx', 'plugin-credential-file.tsx', 'plugin-secret-textarea.tsx', 'plugin-login-interaction.tsx', 'plugin-captcha-busy.ts', 'plugin-captcha-frames.ts', 'MobileCaptcha.tsx', 'MobileInteractionPanel.tsx', 'MobileSmsLogin.tsx', 'add-dynamic-provider.tsx', 'add-custom-provider.tsx', 'custom-provider-ui.js', 'providers.js', 'preset-providers.js', 'web-login.js', 'autoclaw-oauth.js', 'aliyun-captcha.js', 'zcode-claim.js', 'zcode-captcha-pool.js', 'codearts-welfare.js'], prefixes: ['plugin-login-', 'add-account-', 'add-provider-', 'add-workbuddy-', 'add-doubaowork-'] },
+  { domain: 'add-account', files: ['plugin-codearts-enrollment.tsx', 'plugin-desktop-import.tsx', 'plugin-credential-file.tsx', 'plugin-secret-textarea.tsx', 'plugin-login-interaction.tsx', 'plugin-captcha-busy.ts', 'plugin-captcha-frames.ts', 'MobileCaptcha.tsx', 'MobileInteractionPanel.tsx', 'MobileSmsLogin.tsx', 'add-dynamic-provider.tsx', 'add-dynamic-batch.ts', 'add-custom-provider.tsx', 'custom-provider-ui.js', 'providers.js', 'preset-providers.js', 'web-login.js', 'autoclaw-oauth.js', 'aliyun-captcha.js', 'zcode-claim.js', 'zcode-captcha-pool.js', 'codearts-welfare.js'], prefixes: ['plugin-login-', 'add-account-', 'add-provider-', 'add-workbuddy-', 'add-doubaowork-'] },
   { domain: 'models', files: ['ModelsPage.tsx', 'ModelsView.tsx', 'PricingSheet.tsx', 'pricing.ts', 'model-capability.ts', 'model-capability-dialog.tsx', 'model-pricing.ts', 'model-pricing-dialog.tsx', 'provider-pricing-dialog.tsx', 'model-test-dialog.tsx', 'model-test-result.tsx'], prefixes: ['models-'] },
   { domain: 'routing', files: ['api-routing.ts'], prefixes: ['routing-', 'Routing'] },
   // 「Agent」页：本机 AI 客户端的配置接管（客户端清单 / 配置编辑 / 写入预览）
@@ -92,9 +96,9 @@ const DOMAIN_RULES = [
   { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx', 'KeysView.tsx', 'model-api-key.ts', 'model-api-key-field.tsx', 'model-api-key-memory.ts', 'use-model-api-keys.ts'] },
   { domain: 'proxies', files: ['ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxy-editor-sheet.tsx', 'proxy-retirement-dialog.tsx', 'proxy-import.ts', 'proxy-batch-editor.tsx', 'proxy-pool-cache.ts', 'sponsor.ts', 'sponsor-card.tsx', 'proxy-sponsor-cards.tsx'] },
   { domain: 'docs', files: ['docs-page.tsx', 'DocsPage.tsx', 'DocsProviderData.ts', 'provider-docs-view.tsx'], prefixes: ['docs-provider-', 'docs-api-'] },
-  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'DashboardView.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'usage-donuts.tsx', 'activity-panel.tsx', 'cache-panels.tsx', 'overview-panel.tsx', 'rank-panel.tsx', 'usage-data.ts', 'compact-value.tsx', 'use-width.ts', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
+  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'DashboardView.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'source-inspector-detail.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'usage-donuts.tsx', 'activity-panel.tsx', 'cache-panels.tsx', 'overview-panel.tsx', 'rank-panel.tsx', 'usage-data.ts', 'compact-value.tsx', 'use-width.ts', 'report-merge.ts', 'merge-dialog.tsx', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
   { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'api-checkin.ts', 'api-zcode.ts', 'zcode-plans.ts', 'zcode-claim-verification.js', 'CheckinPage.tsx', 'ZcodeCaptchaPanel.tsx'], prefixes: ['checkin-', 'Checkin'] },
-  { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx', 'maintenance.ts'], prefixes: ['maintenance-'] },
+  { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx', 'maintenance.ts', 'scheduled-jobs-page.tsx', 'ScheduledView.tsx', 'ScheduledTaskForm.tsx', 'api-task-plugins.ts'], prefixes: ['maintenance-', 'task-'] },
   { domain: 'logs', files: ['logs.ts', 'LogsPage.tsx'], prefixes: ['logs-'] },
   { domain: 'requests', files: ['RequestsPage.tsx', 'requests-page.tsx', 'request-detail.tsx', 'request-raw-panes.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js', 'source-filters.tsx', 'request-cells.tsx', 'request-phase.ts', 'request-vision-detail.tsx'] },
   { domain: 'tables', files: ['table-columns.js', 'mobile-columns.js', 'table-col-settings.tsx', 'table-shell.tsx'] },
@@ -127,58 +131,38 @@ function uiScripts() {
     .filter(file => !EXCLUDED.has(file))
 }
 
-/** ui-islands/src 下所有 .ts / .tsx（递归） */
-function islandSources() {
+/** 递归收集 TypeScript 源码；测试、声明文件和测试目录不属于实际界面文案源。 */
+function sourceFiles(root) {
+  if (!fs.existsSync(root)) return []
   const out = []
   const walk = dir => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (/\.tsx?$/.test(entry.name)) out.push(full)
-    }
-  }
-  walk(ISLANDS_SRC)
-  if (fs.existsSync(SHARED_SRC)) {
-    for (const entry of fs.readdirSync(SHARED_SRC, { withFileTypes: true })) {
-      if (entry.isFile() && (entry.name === 'turnstile-widget.tsx' || entry.name === 'proxy-system.ts' || entry.name === 'proxy-import.ts' || entry.name === 'proxy-batch-editor.tsx' || entry.name === 'sponsor-card.tsx' || entry.name === 'proxy-sponsor-cards.tsx' || entry.name === 'logs.ts' || entry.name === 'credit-expiry.ts' || entry.name === 'credential-expiry.ts' || entry.name === 'usage-readings.ts' || entry.name === 'usage-query-state.ts' || entry.name === 'usage-query-task.ts' || entry.name === 'zcode-plans.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || entry.name === 'plugins.ts' || entry.name === 'proxy-retirement-dialog.tsx' || entry.name === 'settings-third-party-licenses.tsx' || /^(account-server-|cline-free-credential-|assistant-|agent-|tools-|docs-api-|model-api-key|client-identification|settings-vision-|settings-prompt-|request-vision-|checkin-|page-auto-refresh|maintenance-|provider-settings|plugin-|plugins-|runtime-capacity|routing-).*\.tsx?$/.test(entry.name))) {
-        out.push(path.join(SHARED_SRC, entry.name))
+      if (entry.isDirectory()) {
+        if (entry.name !== '__tests__' && entry.name !== '__mocks__') walk(full)
+        continue
       }
+      if (!/\.tsx?$/.test(entry.name)) continue
+      if (/\.d\.tsx?$/.test(entry.name) || /\.(?:test|spec)\.tsx?$/.test(entry.name)) continue
+      out.push(full)
     }
   }
+  walk(root)
   return out.filter(file => !EXCLUDED.has(file))
 }
 
-/**
- * mobile/src 下所有 .ts / .tsx（递归）。
- *
- * 目录不存在时返回空数组：手机端是后加的工程，别的分支 / 旧检出里没有它，
- * 扫描器不该因为一个可选目录直接崩掉。
- */
+/** ui-islands/src 与 ui-shared 全部递归扫描，避免共享文件白名单漏掉新界面。 */
+function islandSources() {
+  return [...sourceFiles(ISLANDS_SRC), ...sourceFiles(SHARED_SRC)]
+}
+
+/** 手机端源码目录在旧检出中可能不存在，此时返回空数组。 */
 function mobileSources() {
-  if (!fs.existsSync(MOBILE_SRC)) return []
-  const out = []
-  const walk = dir => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (/\.tsx?$/.test(entry.name)) out.push(full)
-    }
-  }
-  walk(MOBILE_SRC)
-  return out.filter(file => !EXCLUDED.has(file))
+  return sourceFiles(MOBILE_SRC)
 }
 
 function componentSources() {
-  const out = []
-  const walk = dir => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (/\.tsx?$/.test(entry.name)) out.push(full)
-    }
-  }
-  if (fs.existsSync(UI_KIT_SRC)) walk(UI_KIT_SRC)
-  return out.filter(file => !EXCLUDED.has(file))
+  return sourceFiles(UI_KIT_SRC)
 }
 
 /** 域解析：先精确名、再前缀；都命不中返回 null（调用方归 common + warning） */
@@ -282,6 +266,28 @@ function extractFromHtml(source, file, warnings) {
   return keys
 }
 
+/** 内置原生插件 description 由运行时动态 t(description) 翻译，显式提取其中文键。 */
+function builtinPluginDescriptions(warnings) {
+  if (!fs.existsSync(BUILTIN_PLUGIN_DIR)) return []
+  const keys = []
+  const entries = fs.readdirSync(BUILTIN_PLUGIN_DIR, { withFileTypes: true })
+    .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  for (const entry of entries) {
+    const file = path.join(BUILTIN_PLUGIN_DIR, entry.name)
+    let manifest
+    try {
+      manifest = JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      warnings.push(`${path.relative(DESKTOP, file)} 不是合法 JSON，未提取插件 description`)
+      continue
+    }
+    const description = manifest?.description
+    if (typeof description === 'string' && /[\u3400-\u9fff]/.test(description)) keys.push(description)
+  }
+  return keys
+}
+
 /** 汇总扫描结果：{ domain: Set<key> } + warnings */
 function scan() {
   const perDomain = new Map(DOMAIN_ORDER.map(domain => [domain, new Set()]))
@@ -294,12 +300,11 @@ function scan() {
     // 与 index.html 同一套提取通道。
     path.join(UI, 'm.html'),
     ...islandSources(),
-    path.join(SHARED_SRC, 'provider-docs-view.tsx'),
     ...componentSources(),
     ...mobileSources(),
   ]
 
-  for (const file of files) {
+  for (const file of new Set(files)) {
     if (!fs.existsSync(file)) continue
     const base = path.basename(file)
     let domain = domainOf(file)
@@ -319,6 +324,7 @@ function scan() {
       : extractFromCode(source, file, warnings)
     for (const key of keys) perDomain.get(domain).add(key)
   }
+  for (const key of builtinPluginDescriptions(warnings)) perDomain.get('common').add(key)
   return { perDomain, warnings }
 }
 
@@ -440,63 +446,155 @@ function runScan() {
   }
 }
 
+function hasTranslation(value) {
+  return typeof value === 'string' && value.length > 0
+}
+
+/** #one/#other 是词典专用复数变体；源码和有效缺译检查始终使用基键。 */
+function dictionaryBaseKey(key) {
+  return key.replace(/#(?:one|other)$/, '')
+}
+
+/** 某一语言在任一源域登记过的键，不考虑译文是否为空。 */
+function registeredKeys(json, locale) {
+  const keys = new Set()
+  for (const domain of DOMAIN_ORDER) {
+    for (const key of Object.keys(json.get(`${locale}/${domain}`) || {})) keys.add(key)
+  }
+  return keys
+}
+
+/** 与 build.mjs 一致：按 DOMAIN_ORDER 合并，空值跳过，后面的非空译文覆盖前面的。 */
+function mergedDictionary(json, locale) {
+  const merged = new Map()
+  for (const domain of DOMAIN_ORDER) {
+    const data = json.get(`${locale}/${domain}`) || {}
+    for (const [key, value] of Object.entries(data)) {
+      if (hasTranslation(value)) merged.set(key, value)
+    }
+  }
+  return merged
+}
+
+/** 真实插值是 {name}；{{类别_xxxxxxxx}} 这类双大括号只是展示示例，不参与替换。 */
+function placeholders(text) {
+  const names = new Set()
+  for (const match of String(text).matchAll(/(?<!\{)\{(\w+)\}(?!\})/g)) names.add(match[1])
+  return sortKeys(names)
+}
+
+function placeholderMismatches(json) {
+  const issues = []
+  for (const locale of LOCALES) {
+    for (const domain of DOMAIN_ORDER) {
+      const data = json.get(`${locale}/${domain}`) || {}
+      for (const [key, value] of Object.entries(data)) {
+        if (!hasTranslation(value)) continue
+        const expected = placeholders(dictionaryBaseKey(key))
+        const actual = placeholders(value)
+        if (expected.join(',') !== actual.join(',')) issues.push({ locale, domain, key, expected, actual })
+      }
+    }
+  }
+  return issues
+}
+
+/** 同一中文键的跨域译文冲突只提示；最终采用哪个值仍由 DOMAIN_ORDER 决定。 */
+function translationConflictWarnings(json) {
+  const result = []
+  for (const locale of LOCALES) {
+    const byKey = new Map()
+    for (const domain of DOMAIN_ORDER) {
+      const data = json.get(`${locale}/${domain}`) || {}
+      for (const [key, value] of Object.entries(data)) {
+        if (!hasTranslation(value)) continue
+        if (!byKey.has(key)) byKey.set(key, [])
+        byKey.get(key).push({ domain, value })
+      }
+    }
+    for (const [key, entries] of byKey) {
+      if (new Set(entries.map(entry => entry.value)).size < 2) continue
+      const variants = entries.map(entry => `${entry.domain}=${JSON.stringify(entry.value)}`).join('；')
+      const winner = entries[entries.length - 1]
+      result.push(`${locale} ${JSON.stringify(key)} 跨域非空译文冲突：${variants}；按 DOMAIN_ORDER 最终采用 ${winner.domain}（仅 warning，不因此失败）`)
+    }
+  }
+  return result
+}
+
 function runCheck() {
   const { perDomain, warnings } = scan()
-  const { owner, json } = readExisting()
-  const { assigned } = assign(perDomain, owner)
+  const { json } = readExisting()
 
-  // 全量扫到的键（用于判孤儿）
+  // 必须取 perDomain 的全集：assigned 会省掉已由其他域持有的键，造成误判孤儿和漏检。
   const allScanned = new Set()
-  for (const domain of DOMAIN_ORDER) for (const key of assigned.get(domain)) allScanned.add(key)
+  for (const keys of perDomain.values()) for (const key of keys) allScanned.add(key)
 
-  let missingTotal = 0
-  process.stdout.write('\n[check] 各语言 / 各域的缺失与空值：\n')
+  warnings.push(...translationConflictWarnings(json))
+  const placeholderIssues = placeholderMismatches(json)
+  // build.mjs 从所有语言的源键取并集后生成 zh-Hant，不要求繁体 JSON 逐键占位。
+  const buildRegistered = new Set()
   for (const locale of LOCALES) {
-    let localeMissing = 0
-    let localeEmpty = 0
-    for (const domain of ACTIVE_DOMAINS) {
-      const expected = assigned.get(domain)
-      if (expected.length === 0) continue
-      const data = json.get(`${locale}/${domain}`) || {}
-      const missing = expected.filter(key => !Object.prototype.hasOwnProperty.call(data, key))
-      const empty = Object.keys(data).filter(key => data[key] === '').length
-      if (missing.length > 0 || empty > 0) {
-        process.stdout.write(`  ${locale}/${domain}: 缺 ${missing.length}，空值 ${empty}\n`)
-        if (missing.length > 0) for (const key of missing) process.stdout.write(`      miss: ${key}\n`)
-      }
-      localeMissing += missing.length
-      localeEmpty += empty
-    }
-    missingTotal += localeMissing
-    process.stdout.write(`  ${locale.padEnd(8)} 缺失键 ${localeMissing}，空值键 ${localeEmpty}\n`)
+    for (const key of registeredKeys(json, locale)) buildRegistered.add(key)
   }
+  let invalidTotal = 0
+  process.stdout.write('\n[check] 全量实际扫描键 × 按 DOMAIN_ORDER 合并的最终非空词典：\n')
+  for (const locale of LOCALES) {
+    const registered = locale === 'zh-Hant' ? buildRegistered : registeredKeys(json, locale)
+    const merged = mergedDictionary(json, locale)
+    const invalid = sortKeys(allScanned).filter(key => locale === 'zh-Hant'
+      ? !registered.has(key)
+      : !merged.has(key))
+    // #one/#other 是可选增强：基键仍按自身译文检查，但绝不要求同名变体存在。
+    const unregistered = invalid.filter(key => !registered.has(key)).length
+    const empty = locale === 'zh-Hant' ? 0 : invalid.length - unregistered
+    invalidTotal += invalid.length
+    process.stdout.write(`  ${locale.padEnd(8)} 实际键 ${allScanned.size}，无效 ${invalid.length}（未登记 ${unregistered}，最终为空 ${empty}）\n`)
+    for (const key of invalid) {
+      const reason = locale === 'zh-Hant' || !registered.has(key) ? '未登记' : '最终为空'
+      process.stdout.write(`      ${reason}: ${key}\n`)
+    }
+  }
+  process.stdout.write('  注：zh-Hant 由 OpenCC 自动生成，只要求实际键已在任一语言的任一源域登记；非字面量 t() 无法完整静态提取，请结合 warning 人工核对。\n')
 
-  // 孤儿键：JSON 有、全量扫描扫不到
+  // 孤儿键：JSON 有、全量扫描扫不到；动态 t() 无法完整静态解析，需结合 warning 人工判断。
   const orphans = []
   for (const locale of LOCALES) {
     for (const domain of ACTIVE_DOMAINS) {
       const data = json.get(`${locale}/${domain}`)
       if (!data) continue
       for (const key of Object.keys(data)) {
-        if (!allScanned.has(key)) orphans.push(`${locale}/${domain}: ${key}`)
+        // 复数变体不需要在源码出现；其基键被扫描到就不算孤儿。
+        if (!allScanned.has(dictionaryBaseKey(key))) orphans.push(`${locale}/${domain}: ${key}`)
       }
     }
   }
   if (orphans.length > 0) {
-    process.stdout.write(`\n[check] 孤儿键（JSON 有、源码扫不到）${orphans.length} 条：\n`)
-    for (const orphan of orphans) process.stdout.write(`  - ${orphan}\n`)
+    const limit = 40
+    process.stdout.write(`\n[check] 孤儿键（JSON 有、源码扫不到）${orphans.length} 条，仅列前 ${Math.min(limit, orphans.length)} 条：\n`)
+    for (const orphan of orphans.slice(0, limit)) process.stdout.write(`  - ${orphan}\n`)
+    if (orphans.length > limit) process.stdout.write(`  … 其余 ${orphans.length - limit} 条省略；动态 t() 键需结合 warning 人工判断\n`)
+  }
+
+  if (placeholderIssues.length > 0) {
+    process.stdout.write(`\n[check] 真实 {name} 占位符不一致 ${placeholderIssues.length} 条（已忽略 {{...}} 示例）：\n`)
+    for (const issue of placeholderIssues) {
+      process.stdout.write(`  - ${issue.locale}/${issue.domain}: ${issue.key}\n`)
+      process.stdout.write(`      键: [${issue.expected.join(', ')}]；译文: [${issue.actual.join(', ')}]\n`)
+    }
   }
 
   if (warnings.length > 0) {
-    process.stdout.write(`\n[check] warning（${warnings.length} 条）：\n`)
+    process.stdout.write(`\n[check] warning（${warnings.length} 条，不因此失败）：\n`)
     for (const warning of warnings) process.stdout.write(`  - ${warning}\n`)
   }
 
-  if (missingTotal > 0) {
-    process.stdout.write(`\n[check] 失败：有 ${missingTotal} 处缺失键（先跑 node scan.mjs 补齐骨架）\n`)
+  const failureTotal = invalidTotal + placeholderIssues.length
+  if (failureTotal > 0) {
+    process.stdout.write(`\n[check] 失败：扫描键有效缺译/未登记 ${invalidTotal} 条，占位符不一致 ${placeholderIssues.length} 条\n`)
     process.exitCode = 1
   } else {
-    process.stdout.write('\n[check] 通过：所有语言的所有域都没有缺失键（空值属预期，等翻译）\n')
+    process.stdout.write('\n[check] 通过：扫描到的键均有有效译文（zh-Hant 仅需登记），真实占位符一致\n')
   }
 }
 

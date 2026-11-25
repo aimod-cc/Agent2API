@@ -91,6 +91,7 @@
     { key: 'docs', label: wbI18n.t('文档'), icon: 'logs' },
     { key: 'requests', label: wbI18n.t('请求日志'), icon: 'requests' },
     { key: 'logs', label: wbI18n.t('日志'), icon: 'logs' },
+    { key: 'scheduled', label: wbI18n.t('定时任务'), icon: 'scheduled' },
     { key: 'tasks', label: wbI18n.t('自动维护'), icon: 'tasks' },
     // 提供商插件：各家 provider 的转发与账号实现都在插件包里，这一页是装插件的
     // 唯一入口。排在「设置」上面 —— 它是「让软件能用起来」的前置步骤，与设置同级
@@ -233,7 +234,7 @@
         { id: 'g-forward', label: '转发链路', custom: false, hidden: false,
           items: ['routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs'] },
         { id: 'g-diag', label: '诊断', custom: false, hidden: false,
-          items: ['requests', 'logs', 'tasks'] },
+          items: ['requests', 'logs', 'scheduled', 'tasks'] },
         { id: 'g-system', label: '系统', custom: false, hidden: false,
           items: ['plugins', 'settings'] },
       ],

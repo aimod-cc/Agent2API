@@ -40,6 +40,8 @@ const OUT_DIR = path.join(DESKTOP, 'ui', 'i18n')
 
 /** 需要产出词典的语言（简体不需要：查不到就显示键本身，即简体原文） */
 const OUTPUT_LOCALES = ['en', 'zh-Hant', 'ja', 'ko', 'pt-BR']
+/** 复数变体只用人工译文；缺省时回退基础键，不能把语言无关的 #one 等后缀自动译成可见文案。 */
+const PLURAL_VARIANT = /#(?:zero|one|two|few|many|other)$/u
 /** 只有登录页会按需单独加载的域；主面板与手机端统一读 combined/<locale>.js */
 const SPLIT_DOMAINS = new Set(['login', 'accounts'])
 const ONLY_DOMAIN = process.argv.find(arg => arg.startsWith('--domain='))?.slice('--domain='.length)
@@ -168,7 +170,7 @@ async function main() {
         if (locale === 'zh-Hant') {
           if (typeof value === 'string' && value) {
             hantManual += 1
-          } else if (toHant) {
+          } else if (toHant && !PLURAL_VARIANT.test(key)) {
             value = toHant(key)
             if (value) hantGenerated += 1
           }

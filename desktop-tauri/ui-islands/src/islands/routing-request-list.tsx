@@ -93,7 +93,7 @@ export function RoutingRequestList({ active, query, selectedKey, refreshToken, o
   const renderRow = (row: ReplayRow) => {
     const key = requestKey(row)
     const selected = selectedKey === key
-    const clock = new Date(row.ts).toLocaleTimeString()
+    const clock = new Date(row.ts).toLocaleTimeString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined)
     const status = requestStateLabel(row)
     const account = [row.provider || row.providerLabel ? traceProvider(row.provider, row.providerLabel) : '', row.accountName || row.accountId].filter(Boolean).join(' · ')
     return <Button key={key} variant='ghost' aria-pressed={selected}

@@ -44,10 +44,10 @@ pub(super) async fn prepare(path: SelectedPath, url: &str, deadline: HttpDeadlin
     -> Result<(FrozenHttpClient, String), proto::WireError>
 {
     deadline.check()?;
-    let parsed = url::Url::parse(url).map_err(|_| super::invalid())?;
+    let parsed = url::Url::parse(url).map_err(|_| super::invalid_endpoint())?;
     let origin = parsed.origin().ascii_serialization();
     if !super::ORIGINS.contains(&origin.as_str()) || parsed.path() != super::PATH {
-        return Err(super::invalid());
+        return Err(super::invalid_endpoint());
     }
     let original = FrozenHttpClient::from_path(path.clone()).await.map_err(|_| super::unavailable())?;
     if probe(&original, &origin, deadline).await {
@@ -64,8 +64,8 @@ pub(super) async fn prepare(path: SelectedPath, url: &str, deadline: HttpDeadlin
         origin.as_str()
     };
     if path.is_direct() {
-        let hostname = url::Url::parse(backup).map_err(|_| super::invalid())?
-            .host_str().ok_or_else(super::invalid)?.to_string();
+        let hostname = url::Url::parse(backup).map_err(|_| super::invalid_endpoint())?
+            .host_str().ok_or_else(super::invalid_endpoint)?.to_string();
         let policy = policy();
         let mut addresses = http_dns::resolve(&policy, &hostname).await;
         addresses.extend(policy.fallback_addresses.iter().filter_map(|ip| ip.parse::<IpAddr>().ok()));

@@ -1,0 +1,1 @@
+ALTER TABLE requests ADD COLUMN privacy_hits TEXT NOT NULL DEFAULT '[]';

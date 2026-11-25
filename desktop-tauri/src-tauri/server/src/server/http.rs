@@ -443,6 +443,11 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/agents/preview", post(api::agents::preview_profile))
         .route("/api/agents/restore", post(api::agents::restore_client))
         .route("/api/agents/import", post(api::agents::import_client))
+        .route(
+            "/api/agents/local-direct",
+            get(api::agents::get_local_direct).put(api::agents::update_local_direct),
+        )
+        .route("/api/agents/local-direct/sync", post(api::agents::sync_local_direct))
         .route("/api/agents/{id}/resources", get(api::agent_resources::get))
         .route("/api/agents/{id}/resources/preview", post(api::agent_resources::preview))
         .route("/api/agents/{id}/resources/apply", post(api::agent_resources::apply))
@@ -678,6 +683,38 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/plugins/startup", get(api::plugins::startup))
         .route("/api/plugins/tasks", get(api::plugin_tasks::list).patch(api::plugin_tasks::configure))
         .route("/api/plugins/tasks/run", post(api::plugin_tasks::run))
+        .route("/api/task-plugins", get(api::task_plugins::list).post(api::task_plugins::create))
+        .route("/api/task-plugins/import", post(api::task_plugins::import_plugin))
+        .route("/api/task-plugins/install-store", post(api::task_plugins::install_store))
+        .route("/api/task-plugins/parse", post(api::task_plugins::parse_script))
+        .route("/api/task-plugins/preview", post(api::task_plugins::preview))
+        .route(
+            "/api/task-plugins/{id}",
+            axum::routing::put(api::task_plugins::update)
+                .patch(api::task_plugins::patch)
+                .post(api::task_plugins::patch)
+                .delete(api::task_plugins::remove),
+        )
+        .route("/api/task-plugins/{id}/export", get(api::task_plugins::export_single))
+        .route("/api/task-plugins/{id}/permissions", post(api::task_plugins::patch))
+        .route("/api/task-jobs", get(api::task_jobs::list).post(api::task_jobs::create))
+        .route("/api/task-jobs/validate-cron", post(api::task_jobs::validate_cron))
+        .route("/api/task-jobs/cron-preview", post(api::task_jobs::cron_preview))
+        .route(
+            "/api/task-jobs/{id}",
+            axum::routing::put(api::task_jobs::update)
+                .patch(api::task_jobs::patch)
+                .post(api::task_jobs::patch)
+                .delete(api::task_jobs::remove),
+        )
+        .route("/api/task-jobs/{id}/run", post(api::task_jobs::run_now))
+        .route("/api/task-jobs/{id}/stop", post(api::task_jobs::stop_now))
+        .route("/api/task-jobs/{id}/duplicate", post(api::task_jobs::duplicate))
+        .route("/api/task-jobs/{id}/action", post(api::task_jobs::trigger_action))
+        .route(
+            "/api/task-jobs/{id}/runs",
+            get(api::task_jobs::list_runs).delete(api::task_jobs::clear_runs),
+        )
         .route("/api/plugins/helpers", get(api::plugin_helpers::list).patch(api::plugin_helpers::configure))
         .route("/api/plugins/desktop-launch/pending", get(api::plugin_desktop_launch::pending))
         .route("/api/plugins/desktop-launch/recovery-prepare", post(api::plugin_desktop_launch::recovery_prepare))
@@ -726,6 +763,12 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/sanitize",
             get(api::sanitize::get_sanitize).put(api::sanitize::put_sanitize),
         )
+        // 隐私脱敏配置与实时预览：敏感配置同样挂 protected。
+        .route(
+            "/api/privacy",
+            get(api::privacy::get_privacy).put(api::privacy::put_privacy),
+        )
+        .route("/api/privacy/test", post(api::privacy::test_privacy))
         // ── 开发者角色兼容开关 ──
         // 与 /api/debug 同形的单开关端点（GET 读 / PUT 写），挂 protected：
         // 它决定出站请求里 developer 角色消息要不要归一成 system（改的是发给

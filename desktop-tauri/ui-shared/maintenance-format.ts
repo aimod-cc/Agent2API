@@ -35,7 +35,7 @@ export const statusLabel = (status: MaintenanceRunStatus): string => ({
 export const statusTone = (status: MaintenanceRunStatus): 'success' | 'warning' | 'destructive' | 'outline' =>
   status === 'completed' ? 'success' : status === 'partial' || status === 'interrupted' ? 'warning' : status === 'failed' ? 'destructive' : 'outline'
 export const resultLabel = (status: MaintenanceItem['status']): string => status === 'refreshed' ? t('成功') : status === 'failed' ? t('失败') : t('跳过')
-export const stamp = (value: number | null | undefined): string => value ? new Date(value).toLocaleString() : '—'
+export const stamp = (value: number | null | undefined): string => value ? new Date(value).toLocaleString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined) : '—'
 export const duration = (value: number | null | undefined): string => value == null ? '—' : t('{n} 秒', { n: Number((value / 1000).toFixed(1)) })
 export const hasFailures = (run: MaintenanceRun): boolean => run.failed > 0 || run.metadata?.status === 'failed'
 

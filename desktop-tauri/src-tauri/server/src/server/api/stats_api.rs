@@ -190,14 +190,36 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
     // runtime 线程」这一半。
     let api_key = text_of(&params, "apiKey");
     if api_key.as_deref().is_some_and(|value| crate::server::request_stats::ApiKeyIdentity::from_filter(value).is_none()) {
-        return errors::management_error(400, "apiKey 取值非法（需要 key:<id>、env、none 或 unknown）");
+        return errors::management_error(400, "apiKey 取值非法（需要 key:<id>、env、none、local_direct 或 unknown）");
+    }
+    let client = params.get("client").map(|value| {
+        let trimmed = value.trim();
+        if trimmed == "__unknown__" { String::new() } else { trimmed.to_string() }
+    });
+    let origin = text_of(&params, "origin");
+    if let Some(ref val) = origin {
+        let lower = val.trim().to_ascii_lowercase();
+        if !matches!(
+            lower.as_str(),
+            "all" | "gateway" | "local_direct" | "local-direct" | "localdirect"
+        ) {
+            return errors::management_error(400, "origin 取值非法（需要 all、gateway 或 local_direct）");
+        }
     }
     let stats = state.request_stats();
-    let count_only = params.get("view").is_some_and(|view| view == "requestCount") && requested == "today" && api_key.is_none();
+    let count_only = params.get("view").is_some_and(|view| view == "requestCount")
+        && requested == "today"
+        && api_key.is_none()
+        && client.is_none()
+        && origin.as_deref().is_none_or(|v| v.eq_ignore_ascii_case("all"));
     let result = tokio::task::spawn_blocking(move || {
-        if count_only { stats.today_request_count() }
-        else { stats.usage_summary(&requested, custom, api_key.as_deref()) }
-    }).await;
+        if count_only {
+            stats.today_request_count()
+        } else {
+            stats.usage_summary(&requested, custom, api_key.as_deref(), client.as_deref(), origin.as_deref())
+        }
+    })
+    .await;
     match result {
         Ok(value) => ok_json(value),
         // 任务被取消（runtime 关闭中）或 panic：给一个可读的 500 而不是让
@@ -252,6 +274,7 @@ fn filter_from_params(params: &Params) -> RequestQuery {
         // 闭开区间 [start, end)：翻页时上一页末尾的 ts 可直接当下页的 end
         start: parse_query_ms(params.get("start")),
         end: parse_query_ms(params.get("end")),
+        origin: text_of(params, "origin"),
         list_only: params.get("view").is_some_and(|value| value.trim() == "list"),
     }
 }
@@ -259,7 +282,7 @@ fn filter_from_params(params: &Params) -> RequestQuery {
 fn checked_filter(params: &Params) -> Result<RequestQuery, Response> {
     let mut filter = filter_from_params(params);
     if filter.api_key.as_deref().is_some_and(|value| crate::server::request_stats::ApiKeyIdentity::from_filter(value).is_none()) {
-        return Err(errors::management_error(400, "apiKey 取值非法（需要 key:<id>、env、none 或 unknown）"));
+        return Err(errors::management_error(400, "apiKey 取值非法（需要 key:<id>、env、none、local_direct 或 unknown）"));
     }
     if let Some((start, end)) = date_bounds(params).map_err(|message| errors::management_error(400, message))? {
         filter.start = Some(start);
@@ -394,10 +417,25 @@ pub async fn stats_request_raw(
     let Some(id) = text_of(&params, "id") else {
         return errors::management_error(400, "缺少 id 参数");
     };
-    match state.request_stats().raw_body(&id) {
-        Some(value) => ok_json(value),
-        None => errors::management_error(404, format!("未找到该请求的原始报文（id: {id}）")),
+    let stats = state.request_stats();
+    if let Some(value) = stats.raw_body(&id) {
+        return ok_json(value);
     }
+    let row_id = params
+        .get("rowId")
+        .and_then(|value| value.trim().parse::<i64>().ok());
+    if let Some(reference) = stats.local_direct_ref_by_request(row_id, Some(&id)) {
+        let preview = tokio::task::spawn_blocking(move || {
+            crate::server::core::local_direct::preview::build_live_preview(&reference)
+        })
+        .await;
+        return match preview {
+            Ok(Ok(value)) => ok_json(value),
+            Ok(Err(err)) => errors::management_error(i32::from(err.status), err.message),
+            Err(err) => errors::management_error(500, format!("读取本机对话原文失败: {err}")),
+        };
+    }
+    errors::management_error(404, format!("未找到该请求的原始报文（id: {id}）"))
 }
 
 /// GET /api/stats/requests/clear-preview —— 清理弹窗的预览统计。

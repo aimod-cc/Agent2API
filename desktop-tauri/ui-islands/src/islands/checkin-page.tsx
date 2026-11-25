@@ -88,9 +88,10 @@ function CheckinPage(): React.ReactElement {
   }, [])
 
   const switchTab = (next: string) => {
-    const section = CHECKIN_SECTION_OPTIONS.find(option => option.value === next)
+    const normalized = next === 'onboarding' || next === 'plans' || next === 'growth' ? 'benefits' : next
+    const section = CHECKIN_SECTION_OPTIONS.find(option => option.value === normalized)
     const value: Tab = section ? 'center'
-      : (TABS as readonly string[]).includes(next) ? next as Tab : 'center'
+      : (TABS as readonly string[]).includes(normalized) ? normalized as Tab : 'center'
     activeTab = value
     setTab(value)
     if (section) patch({ centerSection: section.value })

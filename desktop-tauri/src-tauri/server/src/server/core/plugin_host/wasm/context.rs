@@ -94,6 +94,7 @@ pub struct Context {
     pub(super) supplied_cookie_file: Option<bytes::Bytes>,
     pub(super) legacy_secret: Option<super::legacy_secret::Snapshot>,
     pub(super) conversation: Option<super::conversation::ConversationCall>,
+    pub(super) http_rejection: Option<super::conversation::HttpRejectionObserver>,
     pub(super) catpaw_material: Option<Arc<super::conversation::CatPawMaterial>>,
     pub(super) doubao_turn: Option<super::doubao_turn::Turn>,
     pub(super) codearts_session: Option<super::codearts_session::Session>,
@@ -127,7 +128,7 @@ impl Context {
         Self {
             shared, call_deadline, account: params["account"].as_str().unwrap_or("").to_string(),
             identity: String::new(), origin_binding: None, usage_query: false, account_maintenance: false, verification: None, claim_owner: None, checkin_call: None, managed: None, kiro_execution: None,
-            desktop_import: None, desktop_launch: None, desktop_selected: false, supplied_credentials: None, supplied_cookie_file: None, legacy_secret: None, conversation: None, catpaw_material: None, doubao_turn: None, codearts_session: None, doubao_rewards: None,
+            desktop_import: None, desktop_launch: None, desktop_selected: false, supplied_credentials: None, supplied_cookie_file: None, legacy_secret: None, conversation: None, http_rejection: None, catpaw_material: None, doubao_turn: None, codearts_session: None, doubao_rewards: None,
             task_service: Default::default(), catpaw_service: Default::default(),
             flow: params["flow"].as_str().unwrap_or("").to_string(),
             session: params["session"].as_str().unwrap_or("").to_string(),

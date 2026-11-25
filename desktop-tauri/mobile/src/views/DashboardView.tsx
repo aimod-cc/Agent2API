@@ -9,6 +9,7 @@ import {
   type StatsSummary,
 } from '../core/api'
 import { copyText, formatCompact, formatNumber, formatPercent, providerDisplayName } from '../core/format'
+import { t } from '../core/i18n'
 import { formatCost, switchPricingCurrency, syncPricingDisplay, usePricingDisplay } from '../core/pricing'
 import { baseLabel, serverIdentity } from '../core/servers'
 import { store, useStore } from '../core/store'
@@ -22,13 +23,15 @@ import {
 } from '../ui/components'
 import { GlyphIcon } from '../ui/icons'
 
-const RANGE_OPTIONS: ReadonlyArray<{ id: StatsRange; label: string }> = [
-  { id: 'today', label: '今天' },
-  { id: 'yesterday', label: '昨天' },
-  { id: '7', label: '7天' },
-  { id: '30', label: '30天' },
-  { id: 'all', label: '全部' },
-]
+function rangeOptions(): Array<{ id: StatsRange; label: string }> {
+  return [
+    { id: 'today', label: t('今天') },
+    { id: 'yesterday', label: t('昨天') },
+    { id: '7', label: t('7 天') },
+    { id: '30', label: t('30 天') },
+    { id: 'all', label: t('全部') },
+  ]
+}
 
 type RankTab = 'models' | 'providers' | 'accounts'
 
@@ -316,7 +319,7 @@ export function DashboardView() {
                 style={{ background: 'var(--fc-inset)' }}
                 onClick={() => store.setTab('checkin')}
               >
-                详情
+                {t('详情')}
               </button>
             )}
           </div>
@@ -324,7 +327,11 @@ export function DashboardView() {
       </DashboardCard>
 
       {/* 统计时间范围（FlClash ConnectedButtonGroup） */}
-      <ConnectedButtonGroup options={RANGE_OPTIONS} value={range} onChange={setRange} />
+      <ConnectedButtonGroup
+        options={rangeOptions()}
+        value={range}
+        onChange={setRange}
+      />
 
       {/* 4 项核心指标卡片 */}
       <div className='fc-kpi-grid'>

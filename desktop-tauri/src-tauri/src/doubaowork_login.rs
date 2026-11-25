@@ -150,22 +150,37 @@ pub async fn cookie(window: &WebviewWindow) -> Result<Option<String>, String> {
     }) {
         return Ok(None);
     }
+    let is_numeric_id = |text: &str| {
+        !text.is_empty()
+            && text.len() <= 32
+            && text.bytes().all(|byte| byte.is_ascii_digit())
+            && text.bytes().any(|byte| byte != b'0')
+    };
     let mut value = json!({"cookies":rows});
-    let captured = page_context(window).await?;
-    for key in ["deviceId", "webId", "fingerprint", "teaUuid", "webTabId", "userAgent", "clientVersion", "channel", "chromiumVersion"] {
-        if let Some(text) = captured[key].as_str().filter(|text| !text.is_empty() && text.len() <= 1024
-            && text.bytes().all(|byte| (32..=126).contains(&byte)) && !text.contains(';')) {
-            value[key] = json!(text);
+    if let Ok(captured) = page_context(window).await {
+        for key in ["deviceId", "webId", "fingerprint", "teaUuid", "webTabId", "userAgent", "clientVersion", "channel", "chromiumVersion"] {
+            if let Some(text) = captured[key].as_str().filter(|text| !text.is_empty() && text.len() <= 1024
+                && text.bytes().all(|byte| (32..=126).contains(&byte)) && !text.contains(';')) {
+                if key == "deviceId" && !is_numeric_id(text) {
+                    continue;
+                }
+                value[key] = json!(text);
+            }
         }
     }
     if value["deviceId"].is_null() {
         if let Some(device) = value["cookies"].as_array().into_iter().flatten()
-            .find(|cookie| cookie["name"] == "device_id").and_then(|cookie| cookie["value"].as_str()).map(str::to_string) {
+            .find(|cookie| cookie["name"] == "device_id")
+            .and_then(|cookie| cookie["value"].as_str())
+            .filter(|device| is_numeric_id(device))
+            .map(str::to_string) {
             value["deviceId"] = json!(device);
         }
     }
-    if value["deviceId"].as_str().is_none_or(|device| device.is_empty()) {
-        return Ok(None);
+    if value["deviceId"].is_null() {
+        if let Some(web_id) = value["webId"].as_str().filter(|id| is_numeric_id(id)).map(str::to_string) {
+            value["deviceId"] = json!(web_id);
+        }
     }
     Ok(Some(value.to_string()))
 }

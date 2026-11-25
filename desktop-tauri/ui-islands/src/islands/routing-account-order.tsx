@@ -5,18 +5,17 @@ import { CREDIT_EXPIRY_WINDOW_MS, creditExpiryLabel } from '../../../ui-shared/c
 import type { AccountSorting, GroupSortRule } from './accounts-shared'
 import { saveGroupSortRules } from './accounts-sort'
 import { RoutingSelect } from './routing-select'
-import { supportsCreditExpiry } from './accounts-domain'
-import { activeGroupSortRules, groupSortSummary, supportsBalanceSort } from './accounts-group-settings'
+import { activeGroupSortRules, groupSortSummary, supportsBalanceSort, supportsCreditSort } from './accounts-group-settings'
 import { RouteIcon } from './routing-ui'
 
 export function RoutingCreditExpiry({ id, provider, sorting, now }: {
   id: string; provider: string; sorting?: AccountSorting | null; now: number
 }) {
-  if (!supportsCreditExpiry(provider)) return null
+  if (!supportsCreditSort(provider, sorting)) return null
   const expiry = sorting?.creditExpiresAt[id]
   const text = expiry && expiry > now ? creditExpiryLabel(expiry, t, now) : ''
   return <small className='routing-credit-expiry' data-soon={text && expiry! - now <= CREDIT_EXPIRY_WINDOW_MS ? '' : undefined}
-    title={text ? t('最早到期的剩余积分包：{time}', { time: new Date(expiry!).toLocaleString() }) : t('尚未读取到有效的积分到期时间')}>
+    title={text ? t('最早到期的剩余积分包：{time}', { time: new Date(expiry!).toLocaleString(document.documentElement.lang || undefined) }) : t('尚未读取到有效的积分到期时间')}>
     {text ? t('积分：{time}', { time: text }) : t('积分到期：暂无数据')}
   </small>
 }
@@ -30,6 +29,7 @@ export function RoutingConsumptionOrder({ provider, sorting, independent, disabl
   const rules = activeGroupSortRules(provider, configured, sorting)
   const credit = rules.find(rule => rule.key === 'credit')
   const balance = rules.find(rule => rule.key === 'balance')
+  const creditSupported = supportsCreditSort(provider, sorting)
   const balanceSupported = supportsBalanceSort(provider, sorting)
   const summary = independent ? t('独立账号顺序') : groupSortSummary(rules) || t('仅按手动顺序')
   const changeRule = async (key: 'credit' | 'balance', value: string) => {
@@ -46,7 +46,7 @@ export function RoutingConsumptionOrder({ provider, sorting, independent, disabl
   }
   return <div className='routing-consumption-order'>
     <RouteIcon name='sort' size={13} /><span>{t('消耗顺序')}</span>
-    {!independent && supportsCreditExpiry(provider) ? <div className='routing-credit-sort'>
+    {!independent && creditSupported ? <div className='routing-credit-sort'>
       <RoutingSelect label={t('积分到期时间')} value={credit?.dir || 'off'} disabled={disabled || saving} onChange={value => void changeRule('credit', value)}
         options={[[ 'off', t('不按到期排序') ], [ 'soon', t('到期 近→远') ], [ 'late', t('到期 远→近') ]]} />
     </div> : null}
@@ -56,7 +56,7 @@ export function RoutingConsumptionOrder({ provider, sorting, independent, disabl
     </div> : null}
     <Button variant='ghost' size='sm' disabled={disabled || saving} onClick={onSettings}
       title={independent ? t('独立路由的账号顺序不受全局消耗规则影响') : t('调整到期时间、可用余额及其他消耗规则的优先级')}>
-      {!independent && (supportsCreditExpiry(provider) || balanceSupported) ? t('消耗规则') : summary}<RouteIcon name='chevronRight' size={11} />
+      {!independent && (creditSupported || balanceSupported) ? t('消耗规则') : summary}<RouteIcon name='chevronRight' size={11} />
     </Button>
     {!independent && rules.length ? <small className='basis-full leading-relaxed'>{t('优先级：{rules}；前一项相同才比较后一项。', { rules: summary })}</small> : null}
     {!independent && balance && sorting?.balanceSortStates?.[provider] === 'mixedUnits'

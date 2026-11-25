@@ -62,7 +62,7 @@ export function ProviderRoutingDialog({ provider, workspace, onSort, onClose }: 
         </DialogSection>
         <div className='flex flex-wrap gap-2'><Button variant='outline' onClick={() => { onClose(); host().wbApp?.showPage('gateway') }}>{t('模型管理')}</Button>
           <Button variant='outline' onClick={() => { onClose(); host().wbApp?.showPage('settings'); host().wbSettingsPanel?.showCategory('gateway') }}>{t('系统提示词')}</Button>
-          <Button variant='outline' onClick={() => { onClose(); host().wbApp?.showPage('settings'); host().wbSettingsPanel?.showCategory('security') }}>{t('指纹脱敏')}</Button></div>
+          <Button variant='outline' onClick={() => { onClose(); host().wbApp?.showPage('settings'); host().wbSettingsPanel?.showCategory('gateway') }}>{t('关键词替换')}</Button></div>
       </DialogBody>
       <DialogFooter><Button variant='ghost' className='mr-auto text-destructive' disabled={busy || (automatic && !enabled)} onClick={() => void remove()}>{t('移出本路由')}</Button><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button><Button disabled={busy} onClick={() => void save()}>{busy ? t('保存中…') : t('保存')}</Button></DialogFooter>
     </DialogContent>

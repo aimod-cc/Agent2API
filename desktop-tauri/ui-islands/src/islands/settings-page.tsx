@@ -135,6 +135,7 @@ import {
 import {
   readGroupTotalFiltered, readNamesHidden, setGroupTotalFiltered, setNamesHidden, subscribe,
 } from './accounts-store'
+import { useLoginNoAutoOpen } from '../../../ui-shared/login-browser-prefs'
 import { PromptSettingsPanel } from '../../../ui-shared/settings-prompt-panel'
 import { promptRulesApi } from './settings-prompt-api'
 // 云同步面板（设置 → 数据）：独立成文件、自带一份数据流（/api/cloud-sync），
@@ -148,6 +149,7 @@ import { NetworkAccessDialog, NetworkAccessPanel } from './settings-network-acce
 import { GraphicsSettingsPanel } from './settings-graphics'
 import { DbRestoreDialog } from './settings-db-restore'
 import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-backup'
+import { PrivacyPanel } from './settings-privacy'
 import { SanitizePanel } from './settings-sanitize'
 import { WebToolsPanel } from './settings-web-tools'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
@@ -349,6 +351,7 @@ function RefreshButton({ id, onClick }: { id: string; onClick: () => void }) {
 
 function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
   const app = snap.app
+  const [loginNoAutoOpen, setLoginNoAutoOpen] = useLoginNoAutoOpen()
   // 轻量模式只挂在「关闭到托盘」上（关闭即退出时没有窗口可轻量），
   // 状态行按 未开启托盘 → 开启托盘 → 轻量模式 三级派生
   const appState = app.status === 'unavailable'
@@ -402,6 +405,25 @@ function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
             />
           </div>
           <div className='settings-state'>{appState}</div>
+        </CardContent>
+      </Card>
+
+      <Card render={<section />} className='panel'>
+        <PanelHead title={t('账号登录')} />
+        <CardContent className='panel-body'>
+          <div className='settings-switches'>
+            <SwitchRow
+              id='settings-login-no-auto-open'
+              label={t('使用系统浏览器时不自动打开')}
+              checked={loginNoAutoOpen}
+              onCheckedChange={setLoginNoAutoOpen}
+            />
+          </div>
+          <div className='settings-state'>
+            {loginNoAutoOpen
+              ? t('使用系统浏览器登录时，仅在弹窗内生成只读授权链接供复制，不自动拉起默认浏览器。')
+              : t('使用系统浏览器登录时，自动拉起默认浏览器，同时在弹窗内保留授权链接供复制。')}
+          </div>
         </CardContent>
       </Card>
 
@@ -1157,6 +1179,8 @@ function SecurityPane({ snap }: { snap: SettingsSnapshot }) {
 
   return (
     <>
+      <PrivacyPanel snap={snap} />
+
       <Card render={<section />} className='panel'>
         <PanelHead
           title={t('网关跨域访问（CORS）')}

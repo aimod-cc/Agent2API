@@ -10,6 +10,8 @@ export function useModelApiKeys(load: () => Promise<unknown>) {
   loadRef.current = load
   const mountedRef = React.useRef(true)
   const taskRef = React.useRef<Promise<ModelApiKey[]> | null>(null)
+  const keysRef = React.useRef<ModelApiKey[]>([])
+  const lastUpdatedAtRef = React.useRef(0)
 
   const refresh = React.useCallback((): Promise<ModelApiKey[]> => {
     if (taskRef.current) return taskRef.current
@@ -17,6 +19,8 @@ export function useModelApiKeys(load: () => Promise<unknown>) {
     taskRef.current = loadRef.current().then(raw => {
       const keys = parseModelApiKeys(raw)
       if (mountedRef.current) {
+        keysRef.current = keys
+        lastUpdatedAtRef.current = Date.now()
         setKeys(keys)
         setReady(true)
         setError('')
@@ -41,5 +45,5 @@ export function useModelApiKeys(load: () => Promise<unknown>) {
     return () => { mountedRef.current = false }
   }, [refresh])
 
-  return { keys, ready, loading, error, refresh }
+  return { keys, keysRef, lastUpdatedAtRef, ready, loading, error, refresh }
 }

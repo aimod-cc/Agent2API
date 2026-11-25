@@ -196,6 +196,12 @@ fn account_file(
             "customProviders".to_string(),
             Value::Array(vec![definition.clone()]),
         );
+    } else if let Some(identities) =
+        crate::server::core::plugin_host::script::identities::export_for_providers(
+            &std::collections::HashSet::from([provider.clone()]),
+        )
+    {
+        content.insert("scriptPluginIdentities".to_string(), identities);
     }
     let label = if name.trim().is_empty() {
         record.id()

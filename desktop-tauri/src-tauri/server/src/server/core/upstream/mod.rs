@@ -503,6 +503,7 @@ impl UpstreamService {
         // 会让它悬空 —— 所以先取一份快照、再从它取两个读数值。
         let config = crate::server::config::current();
         let sanitize = config.sanitize_settings();
+        let privacy = config.privacy_settings();
         let developer_role_compat = config.developer_role_compat();
         let prompt_request = request.telemetry.prompt_request().unwrap_or_else(|| {
             let snapshot = crate::server::config::client_identification::current();
@@ -545,6 +546,7 @@ impl UpstreamService {
             client_headers: &request.client_headers,
             telemetry: &request.telemetry,
             sanitize,
+            privacy,
             developer_role_compat,
             image_compress,
             prompt,
@@ -559,8 +561,13 @@ impl UpstreamService {
         let outcome = if let Some(resumed) = resumed_vision {
             vision_compat::rewrite(outcome, &resumed.requested, self, request.telemetry.clone())
         } else { outcome };
-        Ok(if images.is_none() {
+        let outcome = if images.is_none() {
             usage_normalize::normalize_outcome(outcome, request.telemetry.clone())
+        } else {
+            outcome
+        };
+        Ok(if images.is_none() && request.telemetry.needs_privacy_restore() {
+            crate::server::core::privacy::unmask_outcome(outcome, request.telemetry.clone())
         } else {
             outcome
         })

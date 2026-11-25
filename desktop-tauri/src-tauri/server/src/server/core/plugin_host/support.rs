@@ -22,10 +22,11 @@ pub(super) fn require_wasm(manifest: &proto::PackManifest) -> Result<(), String>
 
 pub(crate) fn installed_state(pack: &InstalledPack) -> PackSupportState {
     let dir = install::plugins_dir().join(&pack.id).join(&pack.version);
-    let wasm = install::read_manifest(&dir)
-        .map(|manifest| super::wasm::manifest::is_wasm(&manifest))
-        .unwrap_or_else(|_| pack.entry.ends_with(".wasm"));
-    if wasm { PackSupportState::Supported } else { PackSupportState::LegacyUnsupported }
+    if super::pack_view::is_wasm_pack(&dir, &pack.entry) {
+        PackSupportState::Supported
+    } else {
+        PackSupportState::LegacyUnsupported
+    }
 }
 
 pub(super) fn legacy_reason(pack: &InstalledPack) -> Option<String> {

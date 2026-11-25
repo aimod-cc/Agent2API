@@ -932,9 +932,9 @@ pub fn shim_js() -> &'static str {
       return typeof value === 'string' && value;
     }).join('\n') : '';
   }
-  function loginSnapshot() {
+  function loginSnapshot(includeAuthUrl) {
     var flow = loginActive && currentFlow;
-    return {
+    var snapshot = {
       active: loginActive, provider: loginProvider,
       mode: flow ? flow.mode : null, edition: flow ? flow.edition : null,
       instructions: flow ? [flow.instructions].concat(flow.notices || []).filter(Boolean).join('\n') : '',
@@ -948,12 +948,20 @@ pub fn shim_js() -> &'static str {
       manualCallback: !!(flow && flow.dynamic && flow.manualCallback),
       callbackInput: flow && flow.dynamic ? flow.callbackInput : 'url',
     };
+    if (includeAuthUrl && flow && flow.dynamic && flow.authUrl) {
+      snapshot.authUrl = flow.authUrl;
+      snapshot.browserOpened = flow.browserOpened === true;
+    }
+    return snapshot;
   }
   function emitLogin() {
-    var payload = loginSnapshot();
-    var notify = function (cb) { try { cb(payload); } catch (e) { /* 不记录可能含登录 URL 的异常 */ } };
-    loginListeners.forEach(notify);
-    loginProgressListeners.forEach(notify);
+    var statePayload = loginSnapshot(false);
+    var progressPayload = loginSnapshot(true);
+    var notify = function (payload) {
+      return function (cb) { try { cb(payload); } catch (e) { /* 不记录可能含登录 URL 的异常 */ } };
+    };
+    loginListeners.forEach(notify(statePayload));
+    loginProgressListeners.forEach(notify(progressPayload));
     // 复用安全粘贴 dialog 的纯文本节点，轮询进度不能作为 HTML 解释。
     if (activeOverlay) {
       var text = activeOverlay.overlay.querySelector('[data-a2a-login-progress]');
@@ -1133,6 +1141,7 @@ pub fn shim_js() -> &'static str {
       state: '', provider: provider, canceled: false, dynamic: dynamic, managed: false,
       managementGeneration: managementGeneration, sourceLost: false, phase: undefined, saved: undefined,
       mode: config.mode || 'embedded', edition: config.edition || 'cn',
+      authUrl: '', browserOpened: false,
       instructions: '', hint: '', notices: [], manualCallback: false, callbackInput: 'url', started: null, callbackTargets: [],
       pollIntervalMs: 3000, deadline: 0,
     };
@@ -1206,8 +1215,13 @@ pub fn shim_js() -> &'static str {
         flow.callbackTargets = loginCallbackTargets(authUrl);
         // 旧版没有白名单契约，保留原 SSO 行为；动态版严格采用真实 allowedHosts。
         authUrl = checkedLoginUrl(authUrl, dynamic ? started : null, flow.callbackTargets);
-        if (popup && !popup.closed) popup.location.href = authUrl;
-        else {
+        flow.authUrl = authUrl;
+        if (config.autoOpenBrowser === false) {
+          flow.browserOpened = false;
+        } else if (popup && !popup.closed) {
+          popup.location.href = authUrl;
+          flow.browserOpened = true;
+        } else {
           var opened = false;
           try {
             // 先拿同源空页句柄再断开 opener；直接 noopener 会在成功时也返回 null，
@@ -1219,6 +1233,7 @@ pub fn shim_js() -> &'static str {
               opened = true;
             }
           } catch (e) { /* 显示安全链接兜底 */ }
+          flow.browserOpened = opened;
           if (!opened) showLinkFallback(authUrl);
         }
       } else if (popup && !popup.closed) {
@@ -1535,11 +1550,12 @@ pub fn shim_js() -> &'static str {
    * File（流式上传），账号导入要读成文本解析，两者的后续步骤没有交集。
    * 解析口径与桌面壳 `commands.rs::import_accounts` 对齐，见 buildImportPayload。
    */
-  function pickFile(accept) {
+  function pickFile(accept, multiple) {
     return new Promise(function (resolve, reject) {
       var input = document.createElement('input');
       input.type = 'file';
       input.accept = accept;
+      if (multiple) input.multiple = true;
       input.setAttribute('aria-hidden', 'true');
       input.tabIndex = -1;
       // 视觉隐藏而非 display:none（理由见上）
@@ -1579,12 +1595,12 @@ pub fn shim_js() -> &'static str {
       }
 
       input.addEventListener('change', function () {
-        var file = input.files && input.files[0];
-        if (!file) { settleCancel(); return; }
+        var files = input.files ? Array.prototype.slice.call(input.files) : [];
+        if (!files.length) { settleCancel(); return; }
         picked = true;          // 同步置位：兜底那条链不再当取消
         settled = true;
         cleanup();
-        resolve({ canceled: false, file: file });
+        resolve({ canceled: false, file: files[0], files: files });
       });
 
       document.body.appendChild(input);
@@ -1594,18 +1610,70 @@ pub fn shim_js() -> &'static str {
     });
   }
 
-  /** 网页端的「导入账号」：选 .json → 解析 → `POST /api/accounts/import` */
+  /** 网页端的「导入账号」：支持一次多选多个 .json → 合并解析 → `POST /api/accounts/import` */
   async function importAccountsViaFile() {
-    var picked = await pickFile('.json');
+    var picked = await pickFile('.json', true);
     if (picked.canceled) return { canceled: true };
-    var text = await picked.file.text();
-    var payload;
-    try {
-      payload = buildImportPayload(JSON.parse(text));
-    } catch (error) {
-      throw asError(error);
+    var files = Array.isArray(picked.files) && picked.files.length ? picked.files : (picked.file ? [picked.file] : []);
+    if (!files.length) return { canceled: true };
+    var multi = files.length > 1;
+    var allAccounts = [];
+    var providerOrder = [];
+    var providerMap = Object.create(null);
+    var extraProviders = [];
+    var fileErrors = [];
+
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      try {
+        var text = (await file.text()).replace(/^\uFEFF/, '');
+        var part = buildImportPayload(JSON.parse(text));
+        for (var j = 0; j < part.accounts.length; j++) allAccounts.push(part.accounts[j]);
+        if (part.customProviders !== undefined) {
+          if (!Array.isArray(part.customProviders)) throw new Error('customProviders 必须是数组');
+          for (var k = 0; k < part.customProviders.length; k++) {
+            var def = part.customProviders[k];
+            var defId = def && typeof def === 'object' && typeof def.id === 'string' ? def.id.trim() : '';
+            if (defId) {
+              if (!Object.prototype.hasOwnProperty.call(providerMap, defId)) providerOrder.push(defId);
+              providerMap[defId] = def;
+            } else {
+              extraProviders.push(def);
+            }
+          }
+        }
+      } catch (error) {
+        var err = asError(error);
+        if (!multi) throw err;
+        fileErrors.push({ id: file.name || '未知文件', message: err.message || '读取或解析失败' });
+      }
     }
-    return call('POST', '/api/accounts/import', payload);
+
+    if (!allAccounts.length) {
+      if (!fileErrors.length) throw new Error('所选文件中没有可导入的账号');
+      return {
+        total: 0,
+        added: 0,
+        updated: 0,
+        skipped: 0,
+        failed: fileErrors.length,
+        errors: fileErrors,
+        customProviders: { added: 0, updated: 0 },
+      };
+    }
+
+    var payload = { accounts: allAccounts };
+    var mergedProviders = [];
+    for (var p = 0; p < providerOrder.length; p++) mergedProviders.push(providerMap[providerOrder[p]]);
+    for (var q = 0; q < extraProviders.length; q++) mergedProviders.push(extraProviders[q]);
+    if (mergedProviders.length) payload.customProviders = mergedProviders;
+
+    var result = await call('POST', '/api/accounts/import', payload);
+    if (fileErrors.length && result && typeof result === 'object') {
+      result.failed = (Number(result.failed) || 0) + fileErrors.length;
+      result.errors = fileErrors.concat(Array.isArray(result.errors) ? result.errors : []);
+    }
+    return result;
   }
 
   /**
@@ -1680,7 +1748,12 @@ pub fn shim_js() -> &'static str {
         if (Object.prototype.hasOwnProperty.call(options, 'inputs')) body.inputs = options.inputs;
         if (Object.prototype.hasOwnProperty.call(options, 'proxy')) body.proxy = options.proxy;
         return call('POST', '/api/session/login/start', body);
-      }, { dynamic: true, mode: mode || 'embedded', edition: edition || 'cn' });
+      }, {
+        dynamic: true,
+        mode: mode || 'embedded',
+        edition: edition || 'cn',
+        autoOpenBrowser: !(options && options.autoOpenBrowser === false),
+      });
     },
     submitLoginCallback: function (state, callbackUrl) {
       return call('POST', '/api/session/login/callback', {
@@ -2001,6 +2074,9 @@ pub fn shim_js() -> &'static str {
     previewAgentProfile: function (payload) { return call('POST', '/api/agents/preview', payload || {}); },
     restoreAgentClient: function (payload) { return call('POST', '/api/agents/restore', payload || {}); },
     importAgentClient: function (payload) { return call('POST', '/api/agents/import', payload || {}); },
+    getLocalDirectStatus: function () { return call('GET', '/api/agents/local-direct'); },
+    saveLocalDirectSettings: function (payload) { return call('PUT', '/api/agents/local-direct', payload || {}); },
+    syncLocalDirect: function (payload) { return call('POST', '/api/agents/local-direct/sync', payload || {}); },
     // 代理池（「网络代理」页；与桌面壳 bridge.rs 的同名方法成对存在，
     // 契约见 api::proxies 的模块头 —— 只加一边时另一形态下的页面会报
     // 「桥接方法缺失」，标题栏那一族有同样的教训）
@@ -2253,12 +2329,17 @@ pub fn shim_js() -> &'static str {
     startWindowsServiceUpdate: function (payload) { return call('POST', '/api/update/windows-service', payload); },
     restartService: function () { return call('POST', '/api/update/restart', {}); },
 
-    // ── 出站指纹脱敏 ──
+    // ── 关键词替换（原指纹脱敏）──
     getSanitize: function () { return call('GET', '/api/sanitize'); },
     saveSanitize: function (patch) {
       return call('PUT', '/api/sanitize', typeof patch === 'boolean'
         ? { sanitizeBlacklistFingerprints: patch } : patch);
     },
+
+    // ── 隐私脱敏 ──
+    getPrivacy: function () { return call('GET', '/api/privacy'); },
+    savePrivacy: function (patch) { return call('PUT', '/api/privacy', patch || {}); },
+    testPrivacy: function (payload) { return call('POST', '/api/privacy/test', payload || {}); },
 
     // ── 开发者角色兼容 ──
     // 与桌面桥（src/bridge.rs 的 getDeveloperRoleCompat / saveDeveloperRoleCompat）
@@ -2355,6 +2436,8 @@ pub fn shim_js() -> &'static str {
         startDate: dates && dates.start,
         endDate: dates && dates.end,
         apiKey: options && options.apiKey,
+        client: options && options.client,
+        origin: options && options.origin,
       }));
     },
     getStatsRequests: function (query) { return call('GET', '/api/stats/requests' + toQuery(query)); },
@@ -2362,8 +2445,10 @@ pub fn shim_js() -> &'static str {
     getStatsRequestFilters: function () { return call('GET', '/api/stats/requests/filters'); },
     clearStatsRequests: function (query) { return call('DELETE', '/api/stats/requests' + toQuery(query)); },
     // 按 id 取单条请求的原始正文（详情弹窗「预览对话」的数据源；找不到给 404）
-    getStatsRequestRaw: function (id) {
-      return call('GET', '/api/stats/requests/raw' + toQuery({ id: id }));
+    getStatsRequestRaw: function (id, rowId) {
+      return call('GET', '/api/stats/requests/raw' + toQuery(
+        id && typeof id === 'object' ? id : { id: id, rowId: rowId }
+      ));
     },
     // 掐掉一条在途请求（请求日志的「终止」与模型测试弹窗共用；桌面壳的
     // invoke 没有 abort，这是前端唯一能中止在途请求的手段）。

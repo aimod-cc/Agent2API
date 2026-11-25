@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Card, CardContent, CardHeader, CardTitle, MetricCard, MetricGrid, MetricLabel, MetricValue } from '@ui'
+import { Card, CardContent, CardHeader, CardTitle, Meter, MetricCard, MetricGrid, MetricLabel, MetricValue } from '@ui'
 import { cacheRateCells, formatInt, formatPercent, formatTokens, type StatsHour, type StatsSummary } from '../report-charts'
 import { CacheTrendChart } from './report-recharts'
 import { amount, sumUsage } from './usage-data'
@@ -7,14 +7,29 @@ import { t } from '../../i18n'
 
 const TIP_CACHE = t('命中率 = 缓存读取 Token / 输入 Token（promptTokens）。窗口越短越贴近「此刻」：上游把缓存读取与输入分开上报时，该比值合法地可能超过 100%，此处不夹取值、如实展示。')
 
+function cacheMeterVariant(rate: number | null): 'success' | 'warning' | 'destructive' | 'muted' {
+  if (rate === null) return 'muted'
+  if (rate >= 0.8) return 'success'
+  if (rate >= 0.4) return 'warning'
+  return 'destructive'
+}
+
 export function CacheWindows({ summary, loading }: { summary: StatsSummary | null; loading: React.ReactNode }) {
   return <Card render={<section />} className='report-card report-cache-windows'>
     <CardHeader className='report-card-header'><CardTitle>{t('缓存命中率')}</CardTitle><span className='tip-q' data-tip={TIP_CACHE} /></CardHeader>
     <CardContent className='report-cache-window-content'>
       <MetricGrid className='report-cache-window-grid' id='report-cache-rates'>
-        {summary ? cacheRateCells(summary.cacheRates).map(cell => <MetricCard className='report-cache-window' key={cell.key}>
-          <MetricLabel>{cell.label}</MetricLabel><MetricValue>{cell.value.endsWith('%') ? <>{cell.value.slice(0, -1)}<small>%</small></> : cell.value}</MetricValue><div className='report-cache-window-reading'>{cell.sub}</div>
-        </MetricCard>) : loading}
+        {summary ? cacheRateCells(summary.cacheRates).map(cell => {
+          const meterValue = cell.rate === null ? null : Math.min(100, Math.max(0, cell.rate * 100))
+          return <MetricCard className='report-cache-window' key={cell.key}>
+            <MetricLabel>{cell.label}</MetricLabel>
+            <MetricValue data-empty={!cell.hasInput || undefined}>{cell.value.endsWith('%') ? <>{cell.value.slice(0, -1)}<small>%</small></> : cell.value}</MetricValue>
+            <div className='report-cache-meter-wrap'>
+              <Meter value={meterValue} variant={cacheMeterVariant(cell.rate)} aria-label={`${cell.label} ${cell.value}`} />
+            </div>
+            <div className='report-cache-window-reading'>{cell.sub}</div>
+          </MetricCard>
+        }) : loading}
       </MetricGrid>
     </CardContent>
   </Card>

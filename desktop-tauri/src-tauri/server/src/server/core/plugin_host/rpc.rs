@@ -356,6 +356,8 @@ impl RpcAdapter {
         let usage_query = crate::server::core::usage_query::is_account_query(provider, &account);
         let query_deadline = crate::server::core::usage_query::account_query_deadline(provider, &account)
             .filter(|_| host.options.wasm.is_some());
+        let query_cancel = crate::server::core::usage_query::account_query_cancel(provider, &account);
+        let cancel = cancel.or_else(|| query_cancel.clone());
         let timeout = query_deadline.map_or(timeout, |deadline| timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())));
         let query_reservation = super::wasm::query_queue::capture(provider, &account, &method);
         let query_trace = crate::server::core::usage_query::diagnostics::capture(provider, &account);
@@ -369,13 +371,15 @@ impl RpcAdapter {
             let _lease = lease;
             crate::server::core::usage_query::diagnostics::scope(query_trace,
                 super::wasm::query_queue::scope(query_reservation,
-                crate::server::core::usage_query::scope_query_deadline(query_deadline,
-                    crate::server::core::usage_query::scope_account_query(provider, &account, usage_query,
-                        super::wasm::desktop_credentials::supplied_scope(supplied_credentials,
-                            super::wasm::desktop_credentials::import_scope(provider, desktop_selected,
-                                crate::server::core::runtime_capacity::caller_scope(capacity_caller,
-                                    crate::server::core::runtime_capacity::background_if(capacity_background,
-                                        host.call_coded_with_cancel(&method, params, timeout, cancel.as_ref()))),
+                crate::server::core::usage_query::scope_query_cancel(query_cancel,
+                    crate::server::core::usage_query::scope_query_deadline(query_deadline,
+                        crate::server::core::usage_query::scope_account_query(provider, &account, usage_query,
+                            super::wasm::desktop_credentials::supplied_scope(supplied_credentials,
+                                super::wasm::desktop_credentials::import_scope(provider, desktop_selected,
+                                    crate::server::core::runtime_capacity::caller_scope(capacity_caller,
+                                        crate::server::core::runtime_capacity::background_if(capacity_background,
+                                            host.call_coded_with_cancel(&method, params, timeout, cancel.as_ref()))),
+                                ),
                             ),
                         ),
                     ),

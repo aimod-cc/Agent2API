@@ -82,6 +82,7 @@ mod mutations;
 pub(crate) mod plugin_task_grants;
 pub(crate) use mutations::{try_update_raw_field, try_update_raw_fields};
 pub(crate) mod parse;
+mod privacy_config;
 pub(crate) mod routing_groups;
 mod routing_profiles;
 pub(crate) mod routing_workspace;
@@ -95,6 +96,7 @@ pub use account_sort::{
     AddedSortDirection, BalanceSortDirection, CreditSortDirection,
 };
 pub use assistant_config::*;
+pub use privacy_config::{set_privacy_settings, KEY_PRIVACY_REDACTION};
 pub use sanitize_config::{
     set_sanitize_settings, SanitizePatch, SanitizeSettings, KEY_SANITIZE_PROVIDERS,
     KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
@@ -195,6 +197,7 @@ pub struct RuntimeConfig {
     debug_mode: bool,
     /// 规则在配置读取 / 保存时编译，请求间共享，同一次转发使用完整快照。
     sanitize: SanitizeSettings,
+    privacy: std::sync::Arc<crate::server::core::privacy::CompiledPrivacySettings>,
     /// 开发者角色兼容开关（设置页「网关 → 开发者角色兼容」）。
     ///
     /// 与 `sanitize_fingerprints` 同一理由：转发层**每次发送前**都要判一次
@@ -619,6 +622,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         // 「写坏回落」同一取向 —— 这个开关控制是否把凭据落盘，宁可少采
         debug_mode: raw.get(KEY_DEBUG_MODE).and_then(Value::as_bool).unwrap_or(false),
         sanitize: sanitize_config::from_raw(&raw),
+        privacy: privacy_config::from_raw(&raw),
         // 只有字面 `false` 算关闭：**默认开**（缺失 → true）。改写语义无损
         // （developer 与 system 在 OpenAI 语义上等价），而默认关会让发 developer
         // 角色的客户端（新版 OpenAI SDK、Claude Code 等）一上来就撞不认识该角色

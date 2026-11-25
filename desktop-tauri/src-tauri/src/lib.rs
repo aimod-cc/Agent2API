@@ -37,6 +37,7 @@ mod login;
 mod login_profile;
 mod script_login;
 mod monkeycode_login;
+mod native_ui;
 mod panel_session;
 mod settings;
 mod startup;
@@ -53,7 +54,7 @@ use agent2api_server::server;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use server::config_migration::MigrationOutcome;
 use state::AppState;
@@ -119,18 +120,22 @@ fn report_startup_failure(app: &tauri::AppHandle, error: &str) {
     /// 用户长时间不确认时强制结束的上限
     const FORCE_EXIT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 
-    let message = format!(
+    // 控制台诊断保持原有语言和内容；只有面向用户的原生对话框参与本地化。
+    let log_message = format!(
         "Agent2API 启动已中止：{error}\n\n\
          本次未改动、未删除任何旧数据，也未创建新配置目录。\
          排除原因（磁盘空间、文件占用、权限）后重新打开本程序即可自动重试迁移。"
     );
     exit::mark_startup_failure(app);
-    eprintln!("[Startup] ❌ {message}");
+    eprintln!("[Startup] ❌ {log_message}");
     let handle = app.clone();
     app.dialog()
-        .message(message)
-        .title("Agent2API 无法启动")
+        .message(native_ui::startup_failure_message(error))
+        .title(native_ui::text(native_ui::TextKey::StartupFailureTitle))
         .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCustom(
+            native_ui::text(native_ui::TextKey::Ok).to_string(),
+        ))
         .show(move |_| exit::early_exit(&handle));
 
     std::thread::spawn(|| {
@@ -263,6 +268,8 @@ fn install_desktop_runtime() {
 }
 
 pub fn run() {
+    // 必须早于任何窗口、托盘、迁移或原生错误提示；之后只由 set_ui_locale 覆盖。
+    native_ui::initialize_from_system();
     if let Some(code) = server::core::providers::subscriptions::dispatch_helper() {
         std::process::exit(i32::from(code));
     }
@@ -347,6 +354,7 @@ pub fn run() {
             commands::run_installer,
             commands::set_window_theme,
             commands::set_zoom,
+            native_ui::set_ui_locale,
             commands::open_release_page,
             // 自定义标题栏的窗口三键（窗口已 decorations(false)，见建窗处）
             commands::window_minimize,

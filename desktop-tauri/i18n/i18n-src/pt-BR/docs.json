@@ -166,6 +166,7 @@
   "接入指南与接口参考": "Guias e referência da API",
   "接口参考目录": "Sumário da referência da API",
   "接口地址": "Endereço da API",
+  "接口文档": "Documentação da API",
   "推荐使用 Authorization: Bearer YOUR_GATEWAY_KEY；Key 来自「网关 Key」页，并且必须处于启用状态。": "Use Authorization: Bearer YOUR_GATEWAY_KEY. Obtenha uma Key habilitada na página Chave do gateway.",
   "推荐显式指定当前目录中的对话模型 id。省略时尝试网关默认模型；默认选择也受该 Key 的授权范围限制。": "Recomenda-se escolher explicitamente o id de um modelo de conversa no catálogo atual. Se omitido, tenta o padrão do gateway, respeitando a autorização da Key.",
   "描述输入与输出模态，例如 text、image、video。字段缺失不表示自动支持其他文件、音频或服务端上传接口。": "Descrevem modalidades de entrada e saída, como text, image e video. Ausência de campos não implica suporte a outros arquivos, áudio ou endpoints de upload no servidor.",

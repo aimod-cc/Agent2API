@@ -69,6 +69,8 @@ const LOG_TABLES: &[&str] = &[
     "request_daily",
     "debug_traffic",
     "request_raw",
+    "local_direct_refs",
+    "local_direct_files",
 ];
 
 /// 暂存库执行完外部 SQL 后必须存在的表。只卡业务底线两张：精简备份合法地
@@ -665,6 +667,8 @@ fn table_row_counts(conn: &Connection, skip: &[&str]) -> Vec<Value> {
         "request_daily",
         "debug_traffic",
         "request_raw",
+        "local_direct_refs",
+        "local_direct_files",
         "account_usage_records",
         "account_limiter_events",
         "checkin_records",

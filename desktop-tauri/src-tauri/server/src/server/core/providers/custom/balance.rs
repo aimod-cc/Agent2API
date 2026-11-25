@@ -18,7 +18,7 @@
 //! | 方案 | 打哪里 | 认证 | 主读数 |
 //! |---|---|---|---|
 //! | `sub2api` | `{base}/v1/usage` | 账号 API Key（Bearer） | 剩余额度（`quota.limit/used`，单位默认 USD） |
-//! | `new_api` | `{base}/api/user/self` + `{base}/api/status` | **控制台访问令牌**（Bearer + 可选 `new-api-user` 头） | `data.quota`，按 `/api/status` 的显示口径换算成货币 |
+//! | `new_api` | `{base}/api/user/self` + `{base}/api/status` + `{base}/api/subscription/self` | **控制台访问令牌**（Bearer + 可选 `new-api-user` 头） | 有效订阅额度与钱包 `data.quota`，按 `/api/status` 的显示口径换算成货币 |
 //! | `deepseek` | `{base}/user/balance` | 账号 API Key（Bearer） | `balance_infos[].total_balance`（多币种） |
 //! | `opencode` | `{base}/v1/usage` | 账号 API Key（Bearer） | rolling / weekly / monthly 三窗口剩余百分比 |
 //! | `sensenova` | `platform.sensenova.cn` 控制面（与 base 无关） | **控制台账号密码**换 JWT（见 `sensenova_auth`） | 通用池 / Flash-Lite 池各 5 小时 / 7 天窗口剩余百分比 + 活动返赠 |
@@ -53,7 +53,7 @@ use url::Url;
 
 use crate::server::core::account_store::custom_accounts::{CustomBalanceQuery, CustomCredential};
 use crate::server::core::account_store::AccountStore;
-use crate::server::core::auth_http::send_raw;
+use crate::server::core::auth_http::{looks_like_html, send_raw, ApiResponse};
 use crate::server::core::custom_providers::{
     self, BALANCE_SCHEME_DEEPSEEK, BALANCE_SCHEME_NEW_API, BALANCE_SCHEME_OPENCODE,
     BALANCE_SCHEME_SENSENOVA, BALANCE_SCHEME_SUB2API, BALANCE_SCHEME_ZHIPU,
@@ -65,6 +65,7 @@ use crate::server::core::providers::adapter::usage_not_configured;
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 
+use super::balance_new_api as new_api;
 use super::balance_parse as parse;
 use super::sensenova_auth;
 
@@ -232,11 +233,12 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
     }).await
 }
 
-/// NewAPI：账户余额（`/api/user/self`）+ 显示口径（`/api/status`）。
+/// NewAPI：账户钱包余额（`/api/user/self`）+ 显示口径（`/api/status`）+ 订阅额度
+/// （`/api/subscription/self`）。
 ///
-/// 状态接口是**公开**的（不鉴权），拿不到只影响「原始配额怎么显示成钱」，
-/// 不该让整次查询失败 —— 那时退回原始配额 + 单位 `quota`（源实现同口径）。
-async fn query_new_api(
+/// 状态接口是公开的、订阅接口在旧版 OneAPI/NewAPI 站点可能不存在（404），
+/// 两者都按可选读取处理，拿不到时不阻断主查询 —— 读不到订阅时回退到钱包 `data.quota`。
+pub(super) async fn query_new_api(
     base_url: &str,
     query: &CustomBalanceQuery,
     proxy: Option<&ResolvedProxy>,
@@ -249,25 +251,37 @@ async fn query_new_api(
     }
     let self_url = build_url(base_url, Api::NewApiSelf)?;
     let status_url = build_url(base_url, Api::NewApiStatus)?;
+    let subscription_url = build_url(base_url, Api::NewApiSubscription)?;
     let mut headers = vec![("Authorization".to_string(), format!("Bearer {token}"))];
     let user_id = query.user_id.trim();
     if !user_id.is_empty() {
         headers.push(("new-api-user".to_string(), user_id.to_string()));
     }
     let account = get_json(&self_url, &headers, proxy, &format!("{label} 账户余额")).await?;
-    let Some((remaining, used)) = parse::parse_new_api_account(&account) else {
+    let Some((remaining, used)) = new_api::parse_new_api_account(&account) else {
         return Err(invalid_response(label));
     };
-    let status = get_json(&status_url, &[], proxy, &format!("{label} 站点状态"))
-        .await
-        .ok();
-    let display = status.as_ref().and_then(parse::new_api_display);
-    Ok(parse::new_api_document(
+    let status_what = format!("{label} 站点状态");
+    let sub_what = format!("{label} 订阅额度");
+    let (status_res, sub_res) = tokio::join!(
+        get_json(&status_url, &[], proxy, &status_what),
+        get_json(&subscription_url, &headers, proxy, &sub_what),
+    );
+    let status = status_res.ok();
+    let subscription_payload = sub_res.ok();
+    let display = status.as_ref().and_then(new_api::new_api_display);
+    let now_ms = logging::now_ms();
+    let subscription = subscription_payload
+        .as_ref()
+        .and_then(|payload| new_api::parse_new_api_subscription(payload, now_ms));
+    Ok(new_api::new_api_document(
         remaining,
         used,
         display.as_ref(),
         &account,
         status.as_ref(),
+        subscription.as_ref(),
+        subscription_payload.as_ref(),
     ))
 }
 
@@ -442,6 +456,8 @@ enum Api {
     NewApiSelf,
     /// `{base}/api/status`（NewAPI 站点状态，公开接口）
     NewApiStatus,
+    /// `{base}/api/subscription/self`（NewAPI 订阅额度）
+    NewApiSubscription,
 }
 
 /// base + 目标接口 → 完整地址（base 非法时报 400，文案指向「提供商设置」）。
@@ -474,7 +490,7 @@ fn build_url(base_url: &str, api: Api) -> Result<String, GatewayError> {
     match api {
         Api::Usage => {
             if !ends_with(&parts, &["v1", "usage"]) {
-                if parts.last().map(String::as_str) == Some("v1") {
+                if last_eq_ci(&parts, "v1") {
                     parts.push("usage".to_string());
                 } else {
                     parts.push("v1".to_string());
@@ -484,7 +500,7 @@ fn build_url(base_url: &str, api: Api) -> Result<String, GatewayError> {
         }
         Api::DeepSeekBalance => {
             if !ends_with(&parts, &["user", "balance"]) {
-                if parts.last().map(String::as_str) == Some("v1") {
+                if last_eq_ci(&parts, "v1") {
                     parts.pop();
                 }
                 parts.push("user".to_string());
@@ -493,6 +509,7 @@ fn build_url(base_url: &str, api: Api) -> Result<String, GatewayError> {
         }
         Api::NewApiSelf => append_api_path(&mut parts, &["api", "user", "self"]),
         Api::NewApiStatus => append_api_path(&mut parts, &["api", "status"]),
+        Api::NewApiSubscription => append_api_path(&mut parts, &["api", "subscription", "self"]),
     }
     url.set_path(&format!("/{}", parts.join("/")));
     url.set_query(None);
@@ -500,22 +517,42 @@ fn build_url(base_url: &str, api: Api) -> Result<String, GatewayError> {
     Ok(url.to_string())
 }
 
-/// NewAPI 的 `/api/...` 路径追加（末尾已是 `api` 时不重复那一段）
+/// NewAPI 的 `/api/...` 路径追加：
+/// - 末尾是 `/v1`（不区分大小写）时先剥掉，兼容 OpenAI 转发填到 `/v1` 的常见写法；
+/// - 末尾已经贴了另一条同族接口路径（如 `/api/user/self`）时先回退到站点根再追加；
+/// - 末尾已是 `api` 时不重复拼 `api`。
 fn append_api_path(parts: &mut Vec<String>, suffix: &[&str]) {
     if ends_with(parts, suffix) {
         return;
     }
-    if parts.last().map(String::as_str) == Some("v1") {
+    for sibling in [
+        &["api", "user", "self"][..],
+        &["api", "subscription", "self"][..],
+        &["api", "status"][..],
+    ] {
+        if ends_with(parts, sibling) {
+            let keep = parts.len().saturating_sub(sibling.len());
+            parts.truncate(keep);
+            break;
+        }
+    }
+    if last_eq_ci(parts, "v1") {
         parts.pop();
     }
-    if parts.last().map(String::as_str) == Some("api") && suffix.first() == Some(&"api") {
+    if last_eq_ci(parts, "api") && suffix.first() == Some(&"api") {
         parts.extend(suffix.iter().skip(1).map(|part| (*part).to_string()));
     } else {
         parts.extend(suffix.iter().map(|part| (*part).to_string()));
     }
 }
 
-/// 路径段是否以 `suffix` 结尾
+fn last_eq_ci(parts: &[String], expected: &str) -> bool {
+    parts
+        .last()
+        .is_some_and(|part| part.eq_ignore_ascii_case(expected))
+}
+
+/// 路径段是否以 `suffix` 结尾（ASCII 不区分大小写）
 fn ends_with(parts: &[String], suffix: &[&str]) -> bool {
     if parts.len() < suffix.len() {
         return false;
@@ -523,7 +560,19 @@ fn ends_with(parts: &[String], suffix: &[&str]) -> bool {
     parts[parts.len() - suffix.len()..]
         .iter()
         .zip(suffix)
-        .all(|(part, expected)| part == expected)
+        .all(|(part, expected)| part.eq_ignore_ascii_case(expected))
+}
+
+/// 脱敏展示请求 URL（去掉 query 与 fragment，避免把参数里的标识带进提示）
+fn display_url(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(mut parsed) => {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        }
+        Err(_) => url.split(['?', '#']).next().unwrap_or(url).to_string(),
+    }
 }
 
 /// 发一次 GET 并读出 JSON（超时、错误文案、错误码分流都在这里收口）。
@@ -533,28 +582,82 @@ async fn get_json(
     proxy: Option<&ResolvedProxy>,
     what: &str,
 ) -> Result<Value, GatewayError> {
+    let safe_url = display_url(url);
     let response = send_raw("GET", url, None, headers, proxy, Some(REQUEST_TIMEOUT_MS))
         .await
         .map_err(|error| {
             GatewayError::with_status(
                 502,
-                format!("{what}请求失败：{}", egress::describe_error_detail(&error)),
+                format!(
+                    "{what}请求失败（请求地址：{safe_url}）：{}",
+                    egress::describe_error_detail(&error)
+                ),
             )
         })?;
+    decode_json_response(&safe_url, what, response)
+}
+
+fn decode_json_response(
+    safe_url: &str,
+    what: &str,
+    response: ApiResponse,
+) -> Result<Value, GatewayError> {
+    let is_html = looks_like_html(&response.content_type, &response.raw_preview);
     if !response.ok {
-        let status = if (400..500).contains(&response.status) { response.status as i32 } else { 502 };
-        let detail = describe_payload_error(&response.payload);
-        return Err(GatewayError::with_status(
-            status,
-            format!("{what}被上游拒绝（HTTP {}）{detail}", response.status),
-        ));
+        let status = if (400..500).contains(&response.status) {
+            response.status as i32
+        } else {
+            502
+        };
+        let detail = describe_response_error(&response, is_html);
+        let message = match response.status {
+            404 => format!(
+                "{what}接口不存在（HTTP 404，请求地址：{safe_url}）：请检查 Base URL 是否多了或少了 /v1 或路径前缀{detail}"
+            ),
+            401 | 403 => format!(
+                "{what}认证失败（HTTP {}，请求地址：{safe_url}）：请检查访问令牌、API Key 或用户 ID 是否有效{detail}",
+                response.status
+            ),
+            _ if is_html => format!(
+                "{what}被上游拒绝（HTTP {}，返回了 HTML 页面，请求地址：{safe_url}）：请检查站点地址、代理或上游防护拦截",
+                response.status
+            ),
+            _ => format!(
+                "{what}被上游拒绝（HTTP {}，请求地址：{safe_url}）{detail}",
+                response.status
+            ),
+        };
+        return Err(GatewayError::with_status(status, message));
     }
     response.payload.ok_or_else(|| {
-        GatewayError::with_status(502, format!("{what}响应不是有效 JSON"))
+        let message = if is_html {
+            format!(
+                "{what}返回了 HTML 网页而非接口数据（请求地址：{safe_url}）：通常是 Base URL 路径不对（多了或少了 /v1）或命中了前端页面 / 防护拦截"
+            )
+        } else if response.raw_preview.trim().is_empty() {
+            format!("{what}返回空响应（请求地址：{safe_url}）")
+        } else {
+            format!(
+                "{what}响应不是有效 JSON（请求地址：{safe_url}）：{}",
+                parse::shorten(&response.raw_preview, 120)
+            )
+        };
+        GatewayError::with_status(502, message)
     })
 }
 
-/// 上游错误响应里的一句话（`error.message` / `message` / `msg` / `error`）
+fn describe_response_error(response: &ApiResponse, is_html: bool) -> String {
+    let from_json = describe_payload_error(&response.payload);
+    if !from_json.is_empty() {
+        return from_json;
+    }
+    if !is_html && !response.raw_preview.trim().is_empty() {
+        return format!("：{}", parse::shorten(&response.raw_preview, 120));
+    }
+    String::new()
+}
+
+/// 上游错误响应里的一句话（`error.message` / `message` / `msg` / `error` / `code`）
 fn describe_payload_error(payload: &Option<Value>) -> String {
     let Some(payload) = payload else { return String::new() };
     let message = payload
@@ -567,6 +670,7 @@ fn describe_payload_error(payload: &Option<Value>) -> String {
         })
         .or_else(|| payload.get("message").and_then(Value::as_str))
         .or_else(|| payload.get("msg").and_then(Value::as_str))
+        .or_else(|| payload.get("code").and_then(Value::as_str))
         .map(str::trim)
         .filter(|text| !text.is_empty());
     match message {
@@ -611,5 +715,86 @@ fn empty_query() -> CustomBalanceQuery {
         token: String::new(),
         sensenova_jwt: String::new(),
         sensenova_jwt_expires_at: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_url_strips_v1_case_insensitively_for_new_api_endpoints() {
+        assert_eq!(
+            build_url("https://freesharenow.com/v1", Api::NewApiSelf).unwrap(),
+            "https://freesharenow.com/api/user/self"
+        );
+        assert_eq!(
+            build_url("https://freesharenow.com/V1/", Api::NewApiSubscription).unwrap(),
+            "https://freesharenow.com/api/subscription/self"
+        );
+        assert_eq!(
+            build_url("https://freesharenow.com/api/v1", Api::NewApiStatus).unwrap(),
+            "https://freesharenow.com/api/status"
+        );
+        assert_eq!(
+            build_url("https://freesharenow.com/proxy/v1", Api::NewApiSubscription).unwrap(),
+            "https://freesharenow.com/proxy/api/subscription/self"
+        );
+        assert_eq!(
+            build_url("https://freesharenow.com/api/user/self", Api::NewApiSubscription).unwrap(),
+            "https://freesharenow.com/api/subscription/self"
+        );
+    }
+
+    #[test]
+    fn decode_json_response_distinguishes_404_401_and_html() {
+        let err_404 = decode_json_response(
+            "https://example.com/api/user/self",
+            "NewAPI 账户余额",
+            ApiResponse {
+                status: 404,
+                ok: false,
+                payload: Some(json!({"error": {"message": "Invalid URL"}})),
+                content_type: "application/json".to_string(),
+                raw_preview: String::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err_404.status_code, 404);
+        assert!(err_404.message.contains("https://example.com/api/user/self"));
+        assert!(err_404.message.contains("/v1"));
+
+        let err_401 = decode_json_response(
+            "https://example.com/api/user/self",
+            "NewAPI 账户余额",
+            ApiResponse {
+                status: 401,
+                ok: false,
+                payload: Some(json!({"code": "AUTH_UNAUTHORIZED"})),
+                content_type: "application/json".to_string(),
+                raw_preview: String::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err_401.status_code, 401);
+        assert!(err_401.message.contains("认证失败"));
+        assert!(err_401.message.contains("AUTH_UNAUTHORIZED"));
+
+        let err_html = decode_json_response(
+            "https://example.com/api/user/self",
+            "NewAPI 账户余额",
+            ApiResponse {
+                status: 200,
+                ok: true,
+                payload: None,
+                content_type: "text/html; charset=utf-8".to_string(),
+                raw_preview: "<!doctype html><html><body>SPA</body></html>".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err_html.status_code, 502);
+        assert!(err_html.message.contains("HTML"));
+        assert!(err_html.message.contains("https://example.com/api/user/self"));
     }
 }

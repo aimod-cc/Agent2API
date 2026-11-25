@@ -68,10 +68,26 @@
 
   /**
    * 取键的译文：非空字符串才算译到位，否则回落键本身。
+   * 数值 n / count 可额外选择词典里显式登记的 `${key}#one` / `${key}#other`
+   * 等 CLDR 复数变体；变体不存在时完全沿用原键，绝不自动猜英文单复数。
    * params 给出时把 {name} 形参按值替换 —— 取不到的形参替换成空串（不留占位符）。
    */
   function t(key, params) {
-    const value = (window.wbI18nDict || {})[key]
+    const dict = window.wbI18nDict || {}
+    let value
+    if (params) {
+      const count = typeof params.n === 'number' && Number.isFinite(params.n)
+        ? params.n
+        : (typeof params.count === 'number' && Number.isFinite(params.count) ? params.count : undefined)
+      if (count !== undefined) {
+        try {
+          const category = new Intl.PluralRules(locale()).select(count)
+          const variant = dict[key + '#' + category]
+          if (typeof variant === 'string' && variant) value = variant
+        } catch { /* Intl 不可用时保持原有查表行为 */ }
+      }
+    }
+    if (!value) value = dict[key]
     let text = (typeof value === 'string' && value) ? value : key
     if (params) {
       text = text.replace(/\{(\w+)\}/g, (_match, name) => (

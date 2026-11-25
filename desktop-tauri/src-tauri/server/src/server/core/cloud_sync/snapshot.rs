@@ -90,6 +90,7 @@ const SYNCED_RESERVED_KEYS: &[&str] = &[
     "proxySettings",
     "subscriptions",
     "sidebarLayout",
+    "scriptPluginIdentities",
 ];
 
 /// 这个 kv 键要不要进云同步。**唯一判定入口** —— 构建与比较都用它，

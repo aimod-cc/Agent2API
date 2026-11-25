@@ -250,7 +250,11 @@ pub(super) fn pick_release_assets(
         .filter_map(|item| {
             let name = item.get("name")?.as_str()?;
             let target = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
-            if target != super::wasm::manifest::TARGET { return None; }
+            if target != super::wasm::manifest::TARGET
+                && target != crate::server::core::task_plugins::types::TASK_SCRIPT_TARGET
+            {
+                return None;
+            }
             let url = text(item, "browser_download_url");
             if url.is_empty() {
                 return None;

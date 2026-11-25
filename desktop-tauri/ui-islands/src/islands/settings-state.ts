@@ -64,6 +64,10 @@ import {
   type PromptPatch,
 } from './settings-model'
 import {
+  INITIAL_PRIVACY, privacyStateFrom, type PrivacyPatch, type PrivacyPreviewResult,
+  type PrivacyState,
+} from './settings-privacy-model'
+import {
   INITIAL_SANITIZE, sanitizeStateFrom, type SanitizePatch, type SanitizeState,
 } from './settings-sanitize-model'
 import { t } from '../i18n'
@@ -92,6 +96,7 @@ export type BusyScope =
   | 'routing'
   | 'debug'
   | 'sanitize'
+  | 'privacy'
   | 'developerRoleCompat'
   | 'reasoningCollapse'
   | 'clineHeaders'
@@ -295,6 +300,7 @@ export type SettingsSnapshot = {
   routing: RoutingState
   debug: DebugState
   sanitize: SanitizeState
+  privacy: PrivacyState
   developerRoleCompat: DeveloperRoleCompatState
   reasoningCollapse: ReasoningCollapseState
   clineHeaders: ClineHeadersState
@@ -426,6 +432,7 @@ const INITIAL: SettingsSnapshot = {
   routing: { status: 'loading', strategy: 'order', sticky: 'auto', failoverBackoff: true, sink: true, breakerEnabled: false },
   debug: { status: 'loading', on: false, count: null, limit: null },
   sanitize: INITIAL_SANITIZE,
+  privacy: INITIAL_PRIVACY,
   developerRoleCompat: { status: 'loading', on: false },
   reasoningCollapse: { status: 'loading', on: false },
   clineHeaders: { status: 'loading', defaults: {}, overrides: {}, effective: {} },
@@ -872,8 +879,9 @@ export async function importAccounts(): Promise<void> {
     toast(notice ? `${message}\n${t(notice.text)}` : message, failed ? 'err' : notice?.warning ? 'warn' : 'ok')
     if (failed) {
       // 失败明细只列前 3 条，与账号页批量操作的展示密度保持一致；
-      // 定义警告（customProvider 标记）没有账号语义，展示时注明归属
-      const detail = errors.slice(0, 3)
+      // 跳过项带 skipped 标记，不混入失败明细；定义警告注明归属
+      const failureItems = errors.filter(item => !item?.skipped)
+      const detail = failureItems.slice(0, 3)
         .map(item => {
           const label = item?.customProvider
             ? t('自定义提供商 {id}', { id: item?.id || t('(无 id)') })
@@ -882,7 +890,7 @@ export async function importAccounts(): Promise<void> {
           return t('{label}（{message}）', { label, message })
         })
         .join(t('；'))
-      publish({ ioFailure: { failed, detail, more: errors.length > 3 } })
+      publish({ ioFailure: { failed, detail, more: failureItems.length > 3 } })
     }
 
     // 账号被改动（新增/更新）后让主界面立刻反映：账号列表、导航计数等；
@@ -1804,14 +1812,14 @@ async function loadSanitize(): Promise<void> {
   try {
     renderSanitize(await shared().workbuddyDesktop?.getSanitize())
   } catch (error) {
-    console.warn('读取出站指纹脱敏设置失败:', errorMessage(error))
+    console.warn('读取关键词替换设置失败:', errorMessage(error))
     renderSanitize(null)
   }
 }
 
 export async function saveSanitize(next: boolean): Promise<void> {
   await saveSanitizeConfig({ sanitizeBlacklistFingerprints: next }, next
-    ? t('✅ 出站指纹脱敏已开启') : t('已关闭出站指纹脱敏'))
+    ? t('✅ 关键词替换已开启') : t('已关闭关键词替换'))
 }
 
 export async function saveSanitizeConfig(patch: SanitizePatch, message?: string): Promise<boolean> {
@@ -1824,12 +1832,12 @@ export async function saveSanitizeConfig(patch: SanitizePatch, message?: string)
       ? patch.sanitizeBlacklistFingerprints : patch
     const data = await api.saveSanitize(request)
     const state = sanitizeStateFrom(data, snapshot.sanitize)
-    if (state.status !== 'ready') throw new Error(t('未能读取保存后的指纹脱敏设置'))
+    if (state.status !== 'ready') throw new Error(t('未能读取保存后的关键词替换设置'))
     publish({ sanitize: state })
     toast(
       state.saved
-        ? message ?? t('✅ 指纹脱敏设置已保存')
-        : t('指纹脱敏设置仅本次运行生效，写入数据库失败，请检查配置目录'),
+        ? message ?? t('✅ 关键词替换设置已保存')
+        : t('关键词替换设置仅本次运行生效，写入数据库失败，请检查配置目录'),
       state.saved ? 'ok' : 'err',
     )
     return true
@@ -1839,6 +1847,68 @@ export async function saveSanitizeConfig(patch: SanitizePatch, message?: string)
   } finally {
     endBusy()
   }
+}
+
+/* ─── 隐私脱敏 ── */
+
+export function renderPrivacy(data?: unknown): void {
+  if (data === undefined) return
+  publish({ privacy: privacyStateFrom(data, snapshot.privacy) })
+}
+
+async function loadPrivacy(): Promise<void> {
+  try {
+    renderPrivacy(await shared().workbuddyDesktop?.getPrivacy?.())
+  } catch (error) {
+    console.warn('读取隐私脱敏设置失败:', errorMessage(error))
+    renderPrivacy(null)
+  }
+}
+
+export async function refreshPrivacy(): Promise<void> {
+  await loadPrivacy()
+  toast(t('隐私脱敏设置已刷新'))
+}
+
+export async function savePrivacyConfig(patch: PrivacyPatch, message?: string): Promise<boolean> {
+  if (busyScope) { repaint(); return false }
+  beginBusy('privacy')
+  try {
+    const api = shared().workbuddyDesktop
+    if (!api?.savePrivacy) throw new Error(t('主进程桥不可用'))
+    const data = await api.savePrivacy(patch as Record<string, unknown>)
+    const state = privacyStateFrom(data, snapshot.privacy)
+    if (state.status !== 'ready') throw new Error(t('未能读取保存后的隐私脱敏设置'))
+    publish({ privacy: state })
+    toast(
+      state.saved
+        ? message ?? t('✅ 隐私脱敏设置已保存')
+        : t('隐私脱敏设置仅本次运行生效，写入数据库失败，请检查配置目录'),
+      state.saved ? 'ok' : 'err',
+    )
+    return true
+  } catch (error) {
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
+    return false
+  } finally {
+    endBusy()
+  }
+}
+
+export async function testPrivacyPreview(
+  text: string,
+  draftConfig: PrivacyPatch,
+): Promise<PrivacyPreviewResult> {
+  const api = shared().workbuddyDesktop
+  if (!api?.testPrivacy) throw new Error(t('主进程桥不可用'))
+  const res = await api.testPrivacy({
+    text,
+    config: draftConfig as Record<string, unknown>,
+  })
+  if (!res || typeof res !== 'object') {
+    throw new Error(t('模拟测试返回无效结果'))
+  }
+  return res as PrivacyPreviewResult
 }
 
 /* ─── 开发者角色兼容（developer 角色消息归一为 system）── */
@@ -2667,6 +2737,7 @@ export async function load({ checkUpdate = false }: { checkUpdate?: boolean } = 
     loadCaptchaPool(),
     loadDebug(),
     loadSanitize(),
+    loadPrivacy(),
     loadDeveloperRoleCompat(),
     loadReasoningCollapse(),
     loadClineHeaders(),
@@ -2728,7 +2799,7 @@ export async function refreshDebug(): Promise<void> {
 
 export async function refreshSanitize(): Promise<void> {
   await loadSanitize()
-  toast(t('指纹脱敏设置已刷新'))
+  toast(t('关键词替换设置已刷新'))
 }
 
 export async function refreshDeveloperRoleCompat(): Promise<void> {

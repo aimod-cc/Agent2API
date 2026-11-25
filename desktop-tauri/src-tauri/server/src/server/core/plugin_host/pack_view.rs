@@ -1,12 +1,139 @@
 //! 已安装插件的界面摘要、图标与静态页面路径。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use agent2api_provider_protocol as proto;
 use base64::Engine;
 use serde::Serialize;
 
-use super::install::{plugins_dir, read_manifest, PackRegistry};
+use super::install::{plugins_dir, PackRegistry};
+
+const PACK_DISK_CACHE_CAP: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified_ns: Option<u128>,
+}
+
+struct CachedPackDisk {
+    pack_json_stamp: Option<FileStamp>,
+    wasm_json_stamp: Option<FileStamp>,
+    host_json_stamp: Option<FileStamp>,
+    icon_path: Option<PathBuf>,
+    icon_stamp: Option<FileStamp>,
+    manifest: Result<proto::PackManifest, String>,
+    description: Option<String>,
+    provider_category: super::ProviderCategory,
+    compatibility_error: Option<String>,
+    icon: Option<String>,
+}
+
+fn pack_disk_cache() -> &'static Mutex<HashMap<PathBuf, Arc<CachedPackDisk>>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<CachedPackDisk>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified_ns = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    Some(FileStamp {
+        len: meta.len(),
+        modified_ns,
+    })
+}
+
+pub(super) fn clear_cache() {
+    if let Ok(mut guard) = pack_disk_cache().lock() {
+        guard.clear();
+    }
+}
+
+fn cached_pack_disk(dir: &Path) -> Arc<CachedPackDisk> {
+    let pack_json_path = dir.join("pack.json");
+    let pack_json_stamp = file_stamp(&pack_json_path);
+    let wasm_json_stamp = file_stamp(&dir.join("wasm.json"));
+    let host_json_stamp = file_stamp(&dir.join("host.json"));
+    let cached = pack_disk_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(dir)
+        .cloned();
+    if let Some(entry) = cached {
+        if entry.pack_json_stamp == pack_json_stamp
+            && entry.wasm_json_stamp == wasm_json_stamp
+            && entry.host_json_stamp == host_json_stamp
+            && entry.icon_path.as_deref().and_then(file_stamp) == entry.icon_stamp
+        {
+            return entry;
+        }
+    }
+
+    let text_result = std::fs::read_to_string(&pack_json_path)
+        .map_err(|e| format!("读不到 pack.json（{}）: {e}", pack_json_path.display()));
+    let (manifest, description, provider_category) = match text_result {
+        Ok(text) => {
+            let manifest = serde_json::from_str::<proto::PackManifest>(&text)
+                .map_err(|e| format!("pack.json 不是合法 JSON: {e}"));
+            let raw = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let description = raw
+                .as_ref()
+                .and_then(|value| value["description"].as_str())
+                .map(str::to_string);
+            let provider_category = raw
+                .as_ref()
+                .and_then(|value| value.get("provider_category").cloned())
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
+            (manifest, description, provider_category)
+        }
+        Err(error) => (Err(error), None, super::ProviderCategory::default()),
+    };
+    let compatibility_error = manifest
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|item| super::compatibility::validate(dir, item))
+        .err();
+    let (icon_path, icon_stamp, icon) = pack_icon_with_path(dir, manifest.as_ref().ok());
+    let entry = Arc::new(CachedPackDisk {
+        pack_json_stamp,
+        wasm_json_stamp,
+        host_json_stamp,
+        icon_path,
+        icon_stamp,
+        manifest,
+        description,
+        provider_category,
+        compatibility_error,
+        icon,
+    });
+    let mut guard = pack_disk_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if guard.len() >= PACK_DISK_CACHE_CAP {
+        guard.clear();
+    }
+    guard.insert(dir.to_path_buf(), Arc::clone(&entry));
+    entry
+}
+
+fn is_wasm_from_disk(disk: &CachedPackDisk, entry: &str) -> bool {
+    disk.manifest
+        .as_ref()
+        .map(super::wasm::manifest::is_wasm)
+        .unwrap_or_else(|_| entry.ends_with(".wasm"))
+}
+
+pub(super) fn is_wasm_pack(dir: &Path, entry: &str) -> bool {
+    is_wasm_from_disk(&cached_pack_disk(dir), entry)
+}
 
 pub(super) fn display_name(name: &str) -> &str {
     name.trim_end().rsplit_once('·')
@@ -126,13 +253,18 @@ const ICON_MAX_BYTES: u64 = 2 * 1024 * 1024;
 ///
 /// 任何一步失败都返回 `None`（界面回落字母），不报错 —— 图标是装饰，
 /// 不该让「列表」这个核心功能跟着失败。
-fn pack_icon(dir: &Path, manifest: Option<&proto::PackManifest>) -> Option<String> {
-    let icons_dir = manifest?.icons.as_ref()?;
+fn pack_icon_with_path(
+    dir: &Path,
+    manifest: Option<&proto::PackManifest>,
+) -> (Option<PathBuf>, Option<FileStamp>, Option<String>) {
+    let Some(icons_dir) = manifest.and_then(|item| item.icons.as_ref()) else {
+        return (None, None, None);
+    };
     if icons_dir.starts_with(['/', '\\'])
         || icons_dir.contains(':')
         || icons_dir.split(['/', '\\']).any(|part| part == "..")
     {
-        return None;
+        return (None, None, None);
     }
     let icons_dir = dir.join(icons_dir);
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -151,18 +283,26 @@ fn pack_icon(dir: &Path, manifest: Option<&proto::PackManifest>) -> Option<Strin
         rest.sort();
         candidates.extend(rest);
     }
-    let path = candidates
+    let Some(path) = candidates
         .into_iter()
-        .find(|path| path.is_file())?
-        .canonicalize()
-        .ok()?;
-    if !path.starts_with(dir.canonicalize().ok()?) {
-        return None;
+        .find(|path| path.is_file())
+        .and_then(|path| path.canonicalize().ok())
+    else {
+        return (None, None, None);
+    };
+    let Some(dir_canonical) = dir.canonicalize().ok() else {
+        return (None, None, None);
+    };
+    if !path.starts_with(dir_canonical) {
+        return (None, None, None);
     }
-    if std::fs::metadata(&path).ok()?.len() > ICON_MAX_BYTES {
-        return None;
+    let stamp = file_stamp(&path);
+    if stamp.is_none_or(|meta| meta.len > ICON_MAX_BYTES) {
+        return (Some(path), stamp, None);
     }
-    let bytes = std::fs::read(&path).ok()?;
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (Some(path), stamp, None);
+    };
     let mime = match path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -174,10 +314,10 @@ fn pack_icon(dir: &Path, manifest: Option<&proto::PackManifest>) -> Option<Strin
         "webp" => "image/webp",
         "jpg" | "jpeg" => "image/jpeg",
         "svg" => "image/svg+xml",
-        _ => return None,
+        _ => return (Some(path), stamp, None),
     };
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Some(format!("data:{mime};base64,{encoded}"))
+    (Some(path), stamp, Some(format!("data:{mime};base64,{encoded}")))
 }
 
 /// 扩展名是不是界面能显示的图片。
@@ -210,12 +350,12 @@ pub(super) fn provider_label(id: &str) -> Option<String> {
                 .map(|item| item.label.clone())
         } else {
             let dir = plugins_dir().join(&pack.id).join(&pack.version);
-            read_manifest(&dir).ok().and_then(|manifest| {
+            cached_pack_disk(&dir).manifest.as_ref().ok().and_then(|manifest| {
                 manifest
                     .providers
-                    .into_iter()
+                    .iter()
                     .find(|item| item.id.as_str() == id)
-                    .map(|item| item.label)
+                    .map(|item| item.label.clone())
             })
         };
         if let Some(label) = found {
@@ -238,23 +378,23 @@ pub fn list_packs() -> Vec<PackSummary> {
         .iter()
         .map(|pack| {
             let dir = plugins_dir().join(&pack.id).join(&pack.version);
-            let support_state = super::support::installed_state(pack);
+            let disk = cached_pack_disk(&dir);
+            let support_state = if is_wasm_from_disk(&disk, &pack.entry) {
+                super::PackSupportState::Supported
+            } else {
+                super::PackSupportState::LegacyUnsupported
+            };
             let supported = support_state == super::PackSupportState::Supported;
-            let compatibility_error = supported.then(|| super::compatibility::installed_error(pack)).flatten();
+            let compatibility_error = supported.then(|| disk.compatibility_error.clone()).flatten();
             let update_required = compatibility_error.is_some();
-            let manifest = read_manifest(&dir).ok();
+            let manifest = disk.manifest.as_ref().ok();
             let name = manifest
-                .as_ref()
                 .map(|item| display_name(&item.name).to_string())
                 .unwrap_or_else(|| pack.id.clone());
-            let description = std::fs::read_to_string(dir.join("pack.json"))
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                .and_then(|value| value["description"].as_str().map(str::to_string));
-            let protocol = manifest.as_ref().map(|item| item.protocol).unwrap_or(0);
-            let homepage = manifest.as_ref().and_then(|item| item.homepage.clone());
+            let description = disk.description.clone();
+            let protocol = manifest.map(|item| item.protocol).unwrap_or(0);
+            let homepage = manifest.and_then(|item| item.homepage.clone());
             let declared = manifest
-                .as_ref()
                 .map(|item| item.providers.clone())
                 .unwrap_or_else(|| pack.manifest_providers.clone());
             let providers = declared
@@ -298,11 +438,11 @@ pub fn list_packs() -> Vec<PackSummary> {
                     })
                 }),
                 startup: super::startup::status(&pack.id),
-                provider_category: super::ownership::category(&dir),
+                provider_category: disk.provider_category,
                 entry_present: dir.join(&pack.entry).exists(),
                 protocol,
                 homepage,
-                icon: pack_icon(&dir, manifest.as_ref()),
+                icon: disk.icon.clone(),
                 ui: Vec::new(),
             }
         })
@@ -324,12 +464,13 @@ pub fn provider_icons() -> serde_json::Value {
         // 已安装的 Wasm 包保留提供商归属，缺图不能借用被覆盖的脚本插件图标。
         icons.remove(id);
         let dir = plugins_dir().join(&pack.id).join(&pack.version);
-        let Ok(manifest) = read_manifest(&dir) else { continue };
-        if manifest.id != pack.id || !super::wasm::manifest::is_wasm(&manifest)
+        let disk = cached_pack_disk(&dir);
+        let Ok(manifest) = disk.manifest.as_ref() else { continue };
+        if manifest.id != pack.id || !super::wasm::manifest::is_wasm(manifest)
             || manifest.providers.len() != 1 || manifest.providers[0].id.as_str() != id {
             continue;
         }
-        if let Some(icon) = pack_icon(&dir, Some(&manifest)) {
+        if let Some(icon) = disk.icon.clone() {
             icons.insert(id.to_string(), serde_json::Value::String(icon));
         }
     }

@@ -68,7 +68,7 @@ pub async fn retry_start(manager: Source, intent: &str, restart_confirmed: bool)
             if !runner.manager.is_current() || runner.binding.current().is_err() { return Err("本机启动来源已变化，未启动客户端".into()); }
             runner.check_proxy()?;
             runner.state.lock().map_err(|_| "本机启动状态不可用")?.phase = "starting";
-            windows::start(&runner.executable, runner.proxy.resolved.as_ref())?;
+            windows::start(&runner.executable, runner.proxy.resolved.as_ref(), &runner.launch_args)?;
             {
                 let mut state = runner.state.lock().map_err(|_| "本机启动状态不可用")?;
                 state.started = true; state.client_running = true;

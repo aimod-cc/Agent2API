@@ -58,6 +58,8 @@ export type LoginOptions = {
   locale?: string
   proxy?: unknown
   requestId?: string
+  /** 使用系统浏览器时是否自动打开默认浏览器（默认 true；false 表示仅生成链接供复制）。 */
+  autoOpenBrowser?: boolean
 }
 
 /** 共享登录桥推送的公开进度；设备授权只展示 userCode，不展示 device_code 或凭证。 */
@@ -70,6 +72,10 @@ export type LoginProgress = {
   instructions?: string
   hint?: string
   userCode?: string
+  /** 系统浏览器模式下已通过白名单校验的授权链接（仅驻留当前等待态内存）。 */
+  authUrl?: string
+  /** 本次授权是否已自动唤起系统浏览器。 */
+  browserOpened?: boolean
   managedLogin?: boolean
   methodIndex?: number
   remainingMs?: number

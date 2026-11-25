@@ -8,9 +8,10 @@ export type PluginBridge = {
     invoke?: (command: string, args?: unknown) => Promise<unknown>
   }
   wbApp?: {
-    toast?: (message: string, kind?: 'err' | 'ok') => void
+    toast?: (message: string, kind?: 'err' | 'ok' | 'warn') => void
     refresh?: () => Promise<boolean>
     refreshPluginPages?: (payload?: PluginMutation) => Promise<void> | void
+    showPage?: (page: string) => void
     readonly currentPage?: string
   }
 }
@@ -23,7 +24,7 @@ export function errorMessage(error: unknown): string {
   return updateErrorMessage(error, t)
 }
 
-export function toast(message: string, kind?: 'err' | 'ok'): void {
+export function toast(message: string, kind?: 'err' | 'ok' | 'warn'): void {
   bridge().wbApp?.toast?.(kind === 'err' ? summarizeNetworkError(message, t).summary : errorMessage(message), kind)
 }
 
@@ -42,7 +43,7 @@ export async function api<T>(method: string, path: string, body?: unknown, optio
 }
 
 export function formatTime(value: number): string {
-  return value ? new Date(value).toLocaleString() : '—'
+  return value ? new Date(value).toLocaleString(document.documentElement.lang || undefined) : '—'
 }
 
 export function formatSize(bytes: number): string {
@@ -88,5 +89,6 @@ export function pluginDescription(id: string, description?: string | null): stri
   if (id === 'agent2api-web-providers') {
     return t('为 Agent2API 扩展网页提供商，支持智谱清言的模型调用、访客与登录账号、凭证续期、模型目录、积分查询、签到和任务领取。')
   }
-  return description || t('作者尚未提供插件介绍。')
+  const trimmed = description?.trim()
+  return trimmed ? t(trimmed) : t('作者尚未提供插件介绍。')
 }

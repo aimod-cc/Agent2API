@@ -104,12 +104,12 @@ pub struct RuleSet {
 impl RuleSet {
     pub fn compile(mut entries: Vec<SanitizeRule>) -> Result<Self, String> {
         if entries.len() > MAX_RULES {
-            return Err(format!("脱敏词表最多 {MAX_RULES} 条规则"));
+            return Err(format!("替换规则最多 {MAX_RULES} 条"));
         }
         let mut ids = BTreeSet::new();
         let mut compiled = Vec::with_capacity(entries.len());
         for (index, rule) in entries.iter_mut().enumerate() {
-            let prefix = format!("第 {} 条脱敏规则", index + 1);
+            let prefix = format!("第 {} 条替换规则", index + 1);
             if rule.id.is_empty()
                 || rule.id.len() > 64
                 || !rule
@@ -122,7 +122,7 @@ impl RuleSet {
                 ));
             }
             if !ids.insert(rule.id.clone()) {
-                return Err(format!("脱敏规则 id 重复：{}", rule.id));
+                return Err(format!("替换规则 id 重复：{}", rule.id));
             }
             rule.name = rule.name.trim().to_string();
             if rule.name.is_empty() || rule.name.chars().count() > MAX_NAME_CHARS {

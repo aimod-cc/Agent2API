@@ -5,6 +5,7 @@ import { t } from '../i18n'
 import { clearFilters, counts, getAgentStore, isDesktopEnvironment, loadPanel, selectClient, selectedClient, setFilter, setQuery, subscribeAgentStore, visibleClients, type LoadOptions } from './agent-state'
 import { blankProfile, detectionLabel } from './agent-model'
 import { ProfileEditor } from './agent-editor'
+import { LocalDirectSection } from './agent-local-direct-card'
 import { PathDialog } from './agent-path-dialog'
 import { ApplyDialog } from './agent-preview'
 import { ProfileDialog } from './agent-profile-dialog'
@@ -73,6 +74,7 @@ export function AgentPage() {
       <span className='min-w-0 flex-1'>{store.error}</span>
       <Button variant='outline' size='sm' disabled={isDetecting || Boolean(store.busy)} onClick={() => void loadPanel({ force: true })}>{t('重新检测')}</Button>
     </Alert>}
+    <LocalDirectSection />
     <div className='agent-body'>
       <Sidebar className='agent-rail p-0 gap-0' aria-label={t('客户端清单')}><NavList className='agent-rail-scroll'>
         {initialLoading ? Array.from({ length: 8 }, (_, index) => (

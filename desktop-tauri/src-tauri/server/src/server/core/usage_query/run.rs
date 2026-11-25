@@ -16,6 +16,14 @@ pub(super) fn start(store: &AccountStore, account: &Value, replace: bool) -> Opt
     Some(job)
 }
 
+struct CancelOnDrop(tokio_util::sync::CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 pub(super) async fn execute(store: AccountStore, task: Arc<jobs::Job>) {
     let account = task.account.clone();
     crate::server::core::runtime_capacity::background_scope(async {
@@ -28,10 +36,13 @@ pub(super) async fn execute(store: AccountStore, task: Arc<jobs::Job>) {
         };
         let Some(expires) = jobs::start_execution(&task) else { return; };
         let trace = diagnostics::Trace::new(provider, &task.id, task.timeout_seconds);
+        let run_cancel = task.cancel.child_token();
+        let _cancel_guard = CancelOnDrop(run_cancel.clone());
         let query = diagnostics::scope(Some(trace.clone()),
             crate::server::core::plugin_host::wasm::query_queue::scope(reservation,
-                super::scope_query_deadline(Some(expires),
-                    super::scope_account_query(provider, &task.id, true, query_usage_for(&store, &account)))));
+                super::scope_query_cancel(Some(run_cancel.clone()),
+                    super::scope_query_deadline(Some(expires),
+                        super::scope_account_query(provider, &task.id, true, query_usage_for(&store, &account))))));
         tokio::pin!(query);
         let mut check = tokio::time::interval(Duration::from_millis(300));
         check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -40,8 +51,12 @@ pub(super) async fn execute(store: AccountStore, task: Arc<jobs::Job>) {
         let row = loop {
             tokio::select! {
                 biased;
-                _ = task.cancel.cancelled() => return,
+                _ = task.cancel.cancelled() => {
+                    run_cancel.cancel();
+                    return;
+                },
                 _ = &mut deadline => {
+                    run_cancel.cancel();
                     let mut row = trace.failure_row(&task.id, &account["name"]);
                     trace.attach(&mut row, Some("deadline"));
                     break row;

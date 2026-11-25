@@ -117,6 +117,11 @@ pub fn install(
             }
             let before = super::storage::read()?;
             let mut after = before.clone();
+            if let Some(db) = super::identities::shared_db() {
+                if let Some(accounts) = super::identities::account_providers(&db) {
+                    super::identities::prune_unused(&mut after, &accounts);
+                }
+            }
             if let Some(previous) = after.packages.iter_mut().find(|item| item.id == package.id) {
                 package.enabled = previous.enabled;
                 package.installed_at = previous.installed_at;
@@ -221,14 +226,111 @@ pub fn change(
     Ok(operation())
 }
 
+pub fn bind_alias(id: String, original: String, alias: String) -> Result<Value, String> {
+    let before = super::storage::read()?;
+    let db = super::identities::shared_db().ok_or("账号库尚未就绪")?;
+    let active_accounts =
+        super::identities::account_providers(&db).ok_or("无法读取账号提供商列表")?;
+    let reserved_native = super::identities::native_reserved_ids();
+    let mut after = before.clone();
+    super::identities::bind_alias_in_registry(
+        &mut after,
+        &id,
+        &original,
+        &alias,
+        &active_accounts,
+        &reserved_native,
+    )?;
+    let package = after
+        .packages
+        .iter()
+        .find(|package| package.id == id)
+        .ok_or("脚本插件不存在")?;
+    let target = json!({ "id": package.id, "name": package.name, "version": package.version });
+    begin("bind_alias", target)?;
+    crate::spawn_task(async move {
+        let result = async {
+            let executable = if after.packages.iter().any(|package| package.enabled) {
+                super::bun::ensure().await?
+            } else {
+                std::path::PathBuf::new()
+            };
+            switch(before, after, executable, None).await
+        }
+        .await;
+        finished(result);
+    });
+    Ok(operation())
+}
+
+/// 云同步下载或整库恢复后对齐脚本插件身份映射；若已安装插件需要切换提供商标识，则平滑重载脚本宿主。
+pub async fn reconcile_after_restore(db: &crate::server::db::Db) -> Result<bool, String> {
+    let _mutation = plugin_host::operations::mutation_guard().await;
+    let Some(active_accounts) = super::identities::account_providers(db) else {
+        return Ok(false);
+    };
+    let before = super::storage::read()?;
+    let mut after = before.clone();
+    let mut outcome = match super::identities::load_from_db(db) {
+        Some(synced) => super::identities::apply_synced(&mut after, &synced, &active_accounts),
+        None => super::identities::ReconcileOutcome {
+            changed: super::identities::prune_unused(&mut after, &active_accounts),
+            needs_reload: false,
+        },
+    };
+    if !outcome.needs_reload && super::runtime::host().is_some() {
+        let mismatch = after
+            .packages
+            .iter()
+            .filter(|package| package.enabled)
+            .any(|package| {
+                package.providers.iter().any(|provider| {
+                    super::runtime::package_for_provider(provider).as_deref()
+                        != Some(package.id.as_str())
+                })
+            });
+        if mismatch {
+            outcome.needs_reload = true;
+        }
+    }
+    if !outcome.changed && !outcome.needs_reload {
+        return Ok(false);
+    }
+    if !outcome.needs_reload {
+        super::storage::save(&after)?;
+        return Ok(false);
+    }
+    if plugin_accounts::shared().is_none() {
+        super::storage::save(&after)?;
+        return Ok(false);
+    }
+    let executable = if after.packages.iter().any(|package| package.enabled) {
+        super::bun::ensure().await?
+    } else {
+        std::path::PathBuf::new()
+    };
+    switch_locked(before, after, executable, None, false).await?;
+    Ok(true)
+}
+
 pub(super) async fn switch(
+    before: Registry,
+    after: Registry,
+    executable: std::path::PathBuf,
+    retry: Option<&str>,
+) -> Result<(), String> {
+    let _mutation = plugin_host::operations::mutation_guard().await;
+    switch_locked(before, after, executable, retry, true).await
+}
+
+async fn switch_locked(
     mut before: Registry,
     mut after: Registry,
     executable: std::path::PathBuf,
     retry: Option<&str>,
+    sync_db: bool,
 ) -> Result<(), String> {
     let store = plugin_accounts::shared().ok_or("账号库尚未就绪")?;
-    let _mutation = plugin_host::operations::mutation_guard().await;
     if let Some(id) = retry {
         let current = super::storage::read()?;
         if !current.packages.iter().any(|package| package.id == id && package.enabled) {
@@ -246,6 +348,11 @@ pub(super) async fn switch(
     let current = super::storage::read()?;
     if serde_json::to_value(&current).map_err(|error| error.to_string())? != serde_json::to_value(&before).map_err(|error| error.to_string())? {
         return Err("插件配置已被其他操作修改，请重新操作".into());
+    }
+    if let Some(db) = store.database() {
+        if let Some(accounts) = super::identities::account_providers(db) {
+            super::identities::prune_unused(&mut after, &accounts);
+        }
     }
     let mut ids = super::runtime::all_ids(&before);
     ids.extend(super::runtime::all_ids(&after));
@@ -315,6 +422,11 @@ pub(super) async fn switch(
             }
         }
         return Err(format!("{error}；原安装记录已保留"));
+    }
+    if sync_db {
+        if let Some(db) = store.database() {
+            super::identities::sync_to_db(&after, db);
+        }
     }
     drop(guard);
     crate::server::core::providers::catalog::invalidate();

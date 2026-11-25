@@ -81,7 +81,7 @@ function RulePanel({ title, lede, enabled, onEnabled, busy, dirty, error, loadin
       </div>
       <label className='rp-enable'>
         <span>{enabled ? t('已启用') : t('已关闭')}</span>
-        <Switch checked={enabled} disabled={busy} aria-label={enabled ? t('关闭') : t('启用')}
+        <Switch checked={enabled} disabled={busy} aria-label={enabled ? t('禁用') : t('启用')}
           onCheckedChange={onEnabled} />
       </label>
     </header>

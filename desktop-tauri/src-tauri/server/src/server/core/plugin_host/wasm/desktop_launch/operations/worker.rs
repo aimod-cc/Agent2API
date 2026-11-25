@@ -132,7 +132,7 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
         }
         if journal.phase == "rolled_back" && running && operation.manager.is_current()
             && operation.binding.current().is_ok() && windows::running(&operation.executable) == Ok(false) {
-            if windows::start(&operation.executable, None).is_ok() {
+            if windows::start(&operation.executable, None, &operation.launch_args).is_ok() {
                 if let Ok(mut state) = operation.state.lock() { state.client_running = true; }
             }
         }
@@ -147,7 +147,7 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
         operation.finish("committed", format!("凭证已切换；{error}"), false);
         return Ok(());
     }
-    match operation.check_proxy().and_then(|_| windows::start(&operation.executable, operation.proxy.resolved.as_ref())) {
+    match operation.check_proxy().and_then(|_| windows::start(&operation.executable, operation.proxy.resolved.as_ref(), &operation.launch_args)) {
         Ok(()) => {
             {
                 let mut state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;

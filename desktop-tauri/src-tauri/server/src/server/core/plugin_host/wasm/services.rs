@@ -417,6 +417,8 @@ impl Context {
                     result
                 } else {
                     if let Some((result, handle)) = self.workbuddy_http(&params, deadline).await? {
+                        let id = handle.id().to_string();
+                        self.attach_http_rejection_observer(&id, &result);
                         return self.keep_http(result, handle, deadline);
                     }
                     if let Some((result, handle)) = self.doubao_http(&params, deadline).await? {
@@ -449,6 +451,7 @@ impl Context {
                     Some(handle) => handle.read().await,
                     None => Err(super::error("当前调用的 HTTP 连接已结束")),
                 };
+                self.observe_http_rejection(&id, &result);
                 if let (Some(turn),Ok(value)) = (&mut self.doubao_turn,&result) {
                     if let Err(error) = super::doubao_turn::observe(turn,&id,value) { self.forget_http(&id); return Err(error); }
                 }

@@ -8,12 +8,13 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::server::core::crypto::{self, SecretScope};
 
-const SCOPES: [SecretScope; 5] = [
+const SCOPES: [SecretScope; 6] = [
     SecretScope::Accounts,
     SecretScope::UpdateToken,
     SecretScope::CloudSync,
     SecretScope::CodingSessions,
     SecretScope::PanelCaptcha,
+    SecretScope::TaskPlugins,
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -318,6 +319,45 @@ fn transform(conn: &Connection, source: &BackupKeys, rewrite: bool) -> Result<us
                 params![serialized, name],
             )
             .map_err(|error| format!("迁移加密配置失败: {error}"))?;
+        }
+    }
+    let has_task_jobs: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_jobs'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|error| format!("检查定时任务表失败: {error}"))?
+        .unwrap_or(false);
+    if has_task_jobs {
+        let mut last_job_rowid = None;
+        loop {
+            let row: Option<(i64, String, String)> = conn
+                .query_row(
+                    "SELECT rowid, secrets_enc, storage_enc FROM task_jobs WHERE ?1 IS NULL OR rowid > ?1 ORDER BY rowid LIMIT 1",
+                    [last_job_rowid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|error| format!("读取定时任务凭证失败: {error}"))?;
+            let Some((rowid, secrets_enc, storage_enc)) = row else { break };
+            last_job_rowid = Some(rowid);
+            let mut secrets_val = Value::String(secrets_enc);
+            let mut storage_val = Value::String(storage_enc);
+            if !secrets_val.as_str().unwrap_or("").is_empty() {
+                transform.value(&mut secrets_val, SecretScope::TaskPlugins, "定时任务密钥", false)?;
+            }
+            if !storage_val.as_str().unwrap_or("").is_empty() {
+                transform.value(&mut storage_val, SecretScope::TaskPlugins, "定时任务状态", false)?;
+            }
+            if rewrite {
+                conn.execute(
+                    "UPDATE task_jobs SET secrets_enc=?1, storage_enc=?2 WHERE rowid=?3",
+                    params![secrets_val.as_str().unwrap_or(""), storage_val.as_str().unwrap_or(""), rowid],
+                )
+                .map_err(|error| format!("迁移定时任务凭证失败: {error}"))?;
+            }
         }
     }
     Ok(transform.count)

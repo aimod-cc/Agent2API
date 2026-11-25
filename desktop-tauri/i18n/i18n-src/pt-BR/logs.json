@@ -143,5 +143,6 @@
   "错误 {n}": "Erros {n}",
   "阅读模式": "Modo de leitura",
   "阅读模式，列表保持不动": "Modo de leitura: lista fixa",
-  "附加数据": "Dados adicionais"
+  "附加数据": "Dados adicionais",
+  "{n} 条#one": "{n} registro"
 }

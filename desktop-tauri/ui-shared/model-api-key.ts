@@ -73,6 +73,7 @@ export function requestApiKeyLabel(entry: RequestIdentity, t: Translate): string
   if (entry.apiKeySource === 'key') return entry.apiKeyName || entry.apiKeyId || t('未命名')
   if (entry.apiKeySource === 'env') return t('环境变量 Key')
   if (entry.apiKeySource === 'none') return t('免鉴权调用')
+  if (entry.apiKeySource === 'local_direct') return t('本机直连')
   if (entry.isTest) return requestClientLabel(entry, t)
   return t('历史未记录 Key')
 }

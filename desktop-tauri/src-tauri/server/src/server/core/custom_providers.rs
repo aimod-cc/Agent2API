@@ -1091,15 +1091,57 @@ pub async fn fetch_upstream_models(
     let response = crate::server::core::user_agent::AccountRequest::with_user_agent(
         builder, crate::server::core::user_agent::override_value(provider_id, &credential.user_agent),
     ).send().await.map_err(|error| {
-        format!("上游请求失败: {}", egress::describe_error_detail(&error))
+        format!(
+            "上游请求失败（请求地址：{url}）: {}",
+            egress::describe_error_detail(&error)
+        )
     })?;
     let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let text = response.text().await.unwrap_or_default();
+    let is_html = crate::server::core::auth_http::looks_like_html(&content_type, &text);
     if !response_ok(status) {
-        return Err(format!("上游返回 {status}: {text}"));
+        let excerpt = if is_html {
+            String::new()
+        } else {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                String::new()
+            } else if trimmed.chars().count() <= 160 {
+                format!("：{trimmed}")
+            } else {
+                let head: String = trimmed.chars().take(157).collect();
+                format!("：{head}...")
+            }
+        };
+        let message = match status {
+            404 => format!(
+                "模型列表接口不存在（HTTP 404，请求地址：{url}）：请检查 Base URL 是否多了或少了 /v1{excerpt}"
+            ),
+            401 | 403 => format!(
+                "上游认证失败（HTTP {status}，请求地址：{url}）：请检查 API Key 是否有效或具备权限{excerpt}"
+            ),
+            _ if is_html => format!(
+                "上游返回 HTTP {status} 且内容为 HTML 网页（请求地址：{url}）：请检查 Base URL 或上游防护拦截"
+            ),
+            _ => format!("上游返回 HTTP {status}（请求地址：{url}）{excerpt}"),
+        };
+        return Err(message);
     }
-    let payload: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("上游响应不是合法 JSON: {error}"))?;
+    let payload: Value = serde_json::from_str(&text).map_err(|error| {
+        if is_html {
+            format!(
+                "上游返回了 HTML 网页而非模型列表 JSON（请求地址：{url}）：Base URL 可能缺少或多余 /v1，或请求落到了前端页面"
+            )
+        } else {
+            format!("上游响应不是合法 JSON（请求地址：{url}）: {error}")
+        }
+    })?;
     let ids = payload
         .get("data")
         .and_then(Value::as_array)

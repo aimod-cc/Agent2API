@@ -9,15 +9,6 @@ mod gate;
 mod json_text;
 mod network;
 pub(in crate::server::core::plugin_host::wasm) mod parse;
-mod claim;
-
-pub(in crate::server::core::plugin_host::wasm::checkin_call) use claim::DailyRun;
-
-#[derive(Clone)]
-pub(in crate::server::core::plugin_host) struct SubmitRejection {
-    pub(in crate::server::core::plugin_host) code: Option<i64>,
-    pub(in crate::server::core::plugin_host) message: String,
-}
 
 use std::sync::{atomic::{AtomicBool, AtomicU8, Ordering}, Arc, Weak};
 
@@ -44,8 +35,7 @@ pub(in crate::server::core::plugin_host::wasm) enum DailyError {
     QueryUnknown,
     ResponseInvalid,
     ResponseRejected,
-    SubmitRejected,
-    PendingConfirmation,
+    DesktopOnly,
     NoActivity,
     NoDaily,
     AmbiguousDaily,

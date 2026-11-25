@@ -16,6 +16,24 @@ function headersOf(input, init) {
   return Object.fromEntries(headers)
 }
 
+function responseHeaders(head) {
+  const headers = new Headers()
+  if (Array.isArray(head.headers_raw)) {
+    for (const entry of head.headers_raw) {
+      if (Array.isArray(entry) && entry.length >= 2 && entry[1] !== undefined && entry[1] !== null) {
+        headers.append(String(entry[0]), String(entry[1]))
+      }
+    }
+  } else if (head.headers && typeof head.headers === "object") {
+    for (const [name, value] of Object.entries(head.headers)) {
+      if (value !== undefined && value !== null) headers.append(name, String(value))
+    }
+  }
+  headers.delete("content-encoding")
+  headers.delete("content-length")
+  return headers
+}
+
 async function perform(input, init = {}) {
   const inherited = scope.getStore()
   if (!inherited) throw new Error("Plugin network access requires a provider context")
@@ -103,9 +121,7 @@ async function perform(input, init = {}) {
     },
     cancel() { close() },
   }, { highWaterMark: 0 })
-  const headers = new Headers(head.headers)
-  headers.delete("content-encoding")
-  headers.delete("content-length")
+  const headers = responseHeaders(head)
   const noBody = [101, 204, 205, 304].includes(head.status) || method.toUpperCase() === "HEAD"
   if (noBody) close()
   const response = new Response(noBody ? null : stream, { status: head.status, headers })

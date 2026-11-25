@@ -53,7 +53,10 @@ import { Meter, Popover, PopoverContent, PopoverTrigger, Button } from '@ui'
 import { t } from '../i18n'
 import { formatTime, numberText, type UsageEntry } from './accounts-shared'
 import { creditPacksOf, snapshotReadingOf, usageUnitLabel, type UsageAggregate } from '../../../ui-shared/usage-readings'
-import { creditExpiryLabel, creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditOf, type ExpiringCredit } from '../../../ui-shared/credit-expiry'
+import {
+  creditExpiryLabel, creditExpiryRatioOf, creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf,
+  expiringCreditOf, isCreditExpiringToday, type ExpiringCredit,
+} from '../../../ui-shared/credit-expiry'
 
 /** 明细里的一行（`creditRowsOf` 的产物；渲染输入与 `usageDetailOf` 的行同形） */
 export type CreditRow = {
@@ -297,11 +300,16 @@ export function creditRowsOf(entry: UsageEntry, now = Date.now()): CreditRow[] {
 
 /** 明细弹层里的一行（视觉与 CodeArts 那份明细同一套类名，观感一致） */
 function CreditRowView({ row, now }: { row: CreditRow; now: number }) {
+  const soonToday = row.expiry ? isCreditExpiringToday(row.expiry.expireAt, now) : false
   return (
     <div className='usage-pop-row' title={row.title}>
       <div className='usage-pop-line'>
         <span className='usage-pop-name'>{row.name}</span>
-        {row.expiry ? <span className='usage-pop-soon-tag'>{creditExpiryLabel(row.expiry.expireAt, t, now)}</span> : null}
+        {row.expiry ? (
+          <span className={`usage-pop-soon-tag${soonToday ? ' is-today' : ''}`}>
+            {creditExpiryLabel(row.expiry.expireAt, t, now)}
+          </span>
+        ) : null}
         <span className={`usage-pop-view ${row.tone}`}>{row.view}</span>
       </div>
       {row.window ? <div className='usage-pop-window'>{row.window}</div> : null}
@@ -353,7 +361,19 @@ export function CreditDetailButton({ rows, now, expiryUnit, subscriptionLine, ag
   const restRows = liveRows.filter(row => row.expiry === null)
   const expiring = creditExpirySummaryOf(soonRows.flatMap(row => row.expiry ? [row.expiry] : []), now)
   const expiryText = creditExpiryText(expiring, t, numberText, expiryUnit)
-  const className = variant === 'pool' ? `usage-toggle usage-pool-line ${kind}` : `usage-toggle ${kind}`
+  const hasSumSoon = variant === 'sum' && Boolean(expiryText.badge)
+  const soonRatio = hasSumSoon
+    ? creditExpiryRatioOf(expiring, aggregate && !aggregate.unlimited ? aggregate.remaining : null, expiryUnit)
+    : null
+  const soonToday = expiring.todayCount > 0
+  // 细条至少保留 6% 可见暖色段，避免小额快到期在 3px 轨道上肉眼消失；无法算真比例时不画条。
+  const visualSoonPercent = soonRatio === null ? null : Math.max(6, Math.min(100, soonRatio))
+  const safePercent = visualSoonPercent === null ? null : Math.max(0, 100 - visualSoonPercent)
+  const className = variant === 'pool'
+    ? `usage-toggle usage-pool-line ${kind}`
+    : hasSumSoon
+      ? `usage-toggle usage-toggle-has-soon${visualSoonPercent !== null ? ' has-ratio' : ''} ${kind}`
+      : `usage-toggle ${kind}`
 
   /**
    * 滚动容器本身（挂载时归零、当初始焦点，见下面两段注释）。
@@ -407,8 +427,25 @@ export function CreditDetailButton({ rows, now, expiryUnit, subscriptionLine, ag
         render={<Button size='default' variant='ghost' type='button' className={className} title={title}
           aria-label={detailLabel} />}
       >
-        {variant === 'pool' ? children : <span className='val'>{children}</span>}
-        {variant === 'sum' && expiryText.badge ? <span className='usage-toggle-soon'>{expiryText.badge}</span> : null}
+        {variant === 'pool' ? children : hasSumSoon ? (
+          <span className='usage-soon-body'>
+            <span className='usage-soon-head'>
+              <span className='val'>{children}</span>
+              <span className={`usage-toggle-soon${soonToday ? ' is-today' : ''}`}>{expiryText.badge}</span>
+            </span>
+            {visualSoonPercent !== null ? (
+              <span className='usage-soon-track' aria-hidden='true'>
+                {safePercent !== null && safePercent > 0 ? (
+                  <span className='usage-soon-safe' style={{ width: `${safePercent}%` }} />
+                ) : null}
+                <span
+                  className={`usage-soon-risk${soonToday ? ' is-today' : ''}${safePercent === 0 ? ' is-full' : ''}`}
+                  style={{ width: `${visualSoonPercent}%` }}
+                />
+              </span>
+            ) : null}
+          </span>
+        ) : <span className='val'>{children}</span>}
         <span className='caret' aria-hidden>▾</span>
       </PopoverTrigger>
       {/* `align='center'`：浮层以读数按钮为中心展开。原来是 'end'（右缘对齐），

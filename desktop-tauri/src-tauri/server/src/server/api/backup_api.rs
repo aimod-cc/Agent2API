@@ -105,10 +105,23 @@ pub async fn import_backup(State(state): State<ServerState>, body: Bytes) -> Res
     let Some(db) = state.db().cloned() else {
         return errors::management_error(500, "数据库不可用，无法恢复");
     };
+    let db_after = db.clone();
     let result = tokio::task::spawn_blocking(move || {
         backup::import_from_file(&db, &source, &state.config_dir, &password)
     })
     .await;
+    if matches!(&result, Ok(Ok(_))) {
+        let _suppress = crate::server::core::cloud_sync::auto_sync::SuppressionGuard::new();
+        if let Err(error) =
+            crate::server::core::plugin_host::script::reconcile_after_restore(&db_after).await
+        {
+            logging::log_with_level(
+                "[Storage]",
+                &format!("⚠️ 恢复后同步脚本插件身份映射失败：{error}"),
+                "warn",
+            );
+        }
+    }
     task_response(result, "恢复")
 }
 
@@ -239,10 +252,23 @@ pub async fn upload_backup(
         return errors::management_error(500, format!("写入上传暂存文件失败: {error}"));
     }
     drop(writer);
+    let db_after = db.clone();
     let result = tokio::task::spawn_blocking(move || {
         backup::import_from_file(&db, file.path(), &state.config_dir, &password)
     })
     .await;
+    if matches!(&result, Ok(Ok(_))) {
+        let _suppress = crate::server::core::cloud_sync::auto_sync::SuppressionGuard::new();
+        if let Err(error) =
+            crate::server::core::plugin_host::script::reconcile_after_restore(&db_after).await
+        {
+            logging::log_with_level(
+                "[Storage]",
+                &format!("⚠️ 恢复后同步脚本插件身份映射失败：{error}"),
+                "warn",
+            );
+        }
+    }
     task_response(result, "恢复")
 }
 

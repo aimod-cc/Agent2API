@@ -34,11 +34,33 @@ env.WORKBUDDY_PROXY_HOME = home
 env.NO_PROXY = 'localhost,127.0.0.1,::1'
 env.no_proxy = env.NO_PROXY
 if (plugins) env.AGENT2API_TEST_PLUGIN_EXE = executable
+// 所有单元测试都在 lib 目标内；默认带 --lib 可避免同时编译 lib / lib(test) / bin(test) 与空 doctest，
+// 防止小内存 CI 机器（尤其是 macOS runner）因并行编译多份大 crate 触发内存换页而耗时飙升。
+const sepIndex = argv.indexOf('--')
+const cargoFlags = sepIndex === -1 ? argv : argv.slice(0, sepIndex)
+const hasTargetSelection = cargoFlags.some(flag =>
+  flag === '--lib'
+  || flag === '--bins'
+  || flag === '--bin'
+  || flag.startsWith('--bin=')
+  || flag === '--tests'
+  || flag === '--test'
+  || flag.startsWith('--test=')
+  || flag === '--examples'
+  || flag === '--example'
+  || flag.startsWith('--example=')
+  || flag === '--benches'
+  || flag === '--bench'
+  || flag.startsWith('--bench=')
+  || flag === '--all-targets'
+  || flag === '--doc'
+)
+const defaultTestArgs = hasTargetSelection ? argv : ['--lib', ...argv]
 const args = coverage
   ? ['llvm-cov', '--locked', '-p', 'agent2api-server', '--lib', ...argv]
   : ['test', '--locked', '-p', 'agent2api-server', ...(plugins
       ? ['--lib', 'server::core::plugin_host::tests::', '--', '--ignored', ...argv]
-      : argv)]
+      : defaultTestArgs)]
 console.log(plugins ? '运行插件联调（使用独立临时目录）' : '运行服务端测试（使用独立临时目录）')
 const child = spawn('cargo', args, { cwd, env, stdio: 'inherit' })
 let cleaned = false

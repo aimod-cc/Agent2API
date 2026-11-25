@@ -15,6 +15,7 @@ import {
   type ManageModel,
 } from '../core/api'
 import { copyText, formatRelativeTime, providerDisplayName } from '../core/format'
+import { t } from '../core/i18n'
 import { serverIdentity } from '../core/servers'
 import { store, useStore } from '../core/store'
 import {
@@ -260,7 +261,7 @@ export function ChatView() {
               whiteSpace: 'nowrap',
             }}
           >
-            {selectedModel || '选择模型'}
+            {selectedModel || t('选择模型')}
           </span>
           <GlyphIcon name='chevron-down' size={14} />
         </button>

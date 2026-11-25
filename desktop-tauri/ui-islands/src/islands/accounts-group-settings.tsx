@@ -27,7 +27,7 @@ import {
 import { t } from '../i18n'
 import { shared, type AccountRecord, type AccountSorting } from './accounts-shared'
 import {
-  creditExpiryOf, providerFeatures, providerOf, supportsCreditExpiry, supportsUsage, type GroupSortRule,
+  creditExpiryOf, hasCreditExpiryReading, providerFeatures, providerOf, supportsCreditExpiry, supportsUsage, type GroupSortRule,
 } from './accounts-domain'
 import {
   allAccounts, getStore, groupSortRules, hasCustomGroupSort, setGroupSortRules, subscribe,
@@ -78,6 +78,18 @@ function ruleMeta(key: GroupSortRule['key']): {
   }
 }
 
+export function supportsCreditSort(provider: string, sorting?: AccountSorting | null): boolean {
+  const snapshot = sorting || getStore().sorting
+  if (snapshot?.creditSortStates) {
+    const state = snapshot.creditSortStates[provider]
+    if (state !== undefined) return state !== 'unsupported'
+  }
+  if (supportsCreditExpiry(provider)) return true
+  if (snapshot && !snapshot.creditSortStates) return false
+  return allAccounts().some(account => providerOf(account) === provider
+    && (snapshot?.creditExpiresAt?.[account.id] != null || hasCreditExpiryReading(usageEntryOf(account))))
+}
+
 export function supportsBalanceSort(provider: string, sorting?: AccountSorting | null): boolean {
   const snapshot = sorting || getStore().sorting
   if (snapshot?.balanceSortStates) return snapshot.balanceSortStates[provider] !== undefined
@@ -87,7 +99,7 @@ export function supportsBalanceSort(provider: string, sorting?: AccountSorting |
 }
 
 export function activeGroupSortRules(provider: string, rules: GroupSortRule[], sorting?: AccountSorting | null): GroupSortRule[] {
-  return rules.filter(rule => rule.on && (rule.key === 'credit' ? supportsCreditExpiry(provider)
+  return rules.filter(rule => rule.on && (rule.key === 'credit' ? supportsCreditSort(provider, sorting)
     : rule.key === 'balance' ? supportsBalanceSort(provider, sorting) : true))
 }
 
@@ -234,17 +246,21 @@ export function GroupSettingsDialog({ provider, onClose, accounts, sorting, rout
    * 方案 B：运行时是否**真的**读到了 —— 名单里的家如果这一组所有账号都还没查到
    * 到期（没点过「查询余额」、或者都过期了），这一项不该假装可用。
    */
-  const creditSupported = supportsCreditExpiry(provider)
   const version = getStore().version
   const sortSnapshot = sorting || getStore().sorting
   const members = (accounts || allAccounts()).filter(account => providerOf(account) === provider)
+  const creditSortState = sortSnapshot?.creditSortStates?.[provider]
+  const creditSupported = supportsCreditSort(provider, sortSnapshot)
   const creditHasData = React.useMemo(
-    () => members.some(account => sortSnapshot
-      ? sortSnapshot.creditExpiresAt[account.id] != null
-      : creditExpiryOf(usageEntryOf(account)) !== null),
-    [provider, version, accounts, sorting, sortSnapshot],
+    () => creditSortState ? creditSortState === 'ready'
+      : members.some(account => sortSnapshot
+        ? sortSnapshot.creditExpiresAt[account.id] != null
+        : creditExpiryOf(usageEntryOf(account)) !== null),
+    [provider, version, accounts, sorting, sortSnapshot, creditSortState],
   )
-  const creditState: RuleState = !creditSupported ? 'unsupported' : creditHasData ? 'ready' : 'no-data'
+  const creditState: RuleState = creditSortState
+    ? (creditSortState === 'noData' ? 'no-data' : creditSortState)
+    : (!creditSupported ? 'unsupported' : creditHasData ? 'ready' : 'no-data')
   const balanceState: BalanceSortState = sortSnapshot?.balanceSortStates?.[provider]
     || (supportsBalanceSort(provider, sortSnapshot)
       ? balanceSortStateOf(members.map(account => accountSortBalanceOf(usageEntryOf(account)))) : 'unsupported')

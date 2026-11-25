@@ -109,6 +109,33 @@ function amountsText(amounts: CreditExpiryAmount[], t: Translate, format: Format
   }).join('；')
 }
 
+export function isCreditExpiringToday(expireAt: number, now = Date.now()): boolean {
+  if (!Number.isFinite(expireAt) || expireAt <= now) return false
+  const tomorrow = new Date(now)
+  tomorrow.setHours(24, 0, 0, 0)
+  return expireAt < tomorrow.getTime()
+}
+
+/** 计算 7 天内快到期额度占总可用额度的比例（0–100）；口径不一致或有缺失时返回 null，不画假比例。 */
+export function creditExpiryRatioOf(
+  summary: CreditExpirySummary,
+  totalRemaining: number | null | undefined,
+  displayUnit = '',
+): number | null {
+  if (!summary.count || totalRemaining === null || totalRemaining === undefined
+    || !Number.isFinite(totalRemaining) || totalRemaining <= 0) {
+    return null
+  }
+  if (summary.amounts.length !== 1) return null
+  const single = summary.amounts[0]
+  if (!single || single.sum === null || single.sum <= 0 || single.unknownCount > 0 || !single.unit || single.unit === '%') {
+    return null
+  }
+  const normalizedDisplay = unitOf(displayUnit)
+  if (normalizedDisplay && single.unit !== normalizedDisplay) return null
+  return Math.max(0, Math.min(100, (single.sum / totalRemaining) * 100))
+}
+
 export function creditExpiryText(summary: CreditExpirySummary, t: Translate, format: Format, displayUnit = ''): {
   badge: string
   group: string
@@ -120,6 +147,7 @@ export function creditExpiryText(summary: CreditExpirySummary, t: Translate, for
   const single = summary.amounts.length === 1 ? summary.amounts[0] : null
   const compact = isCreditUnit(displayUnit) && single?.unit === '积分' && single.unknownCount === 0 && single.sum !== null
     ? amountNumber(single.sum, t, format) : null
+  const allToday = summary.todayCount > 0 && summary.todayCount === summary.count
   const main = t('7 天内到期 {amount}（{count} 份）', {
     amount: amountsText(summary.amounts, t, format), count: summary.count,
   })
@@ -127,7 +155,9 @@ export function creditExpiryText(summary: CreditExpirySummary, t: Translate, for
     amount: amountsText(summary.todayAmounts, t, format), count: summary.todayCount,
   }) : ''
   return {
-    badge: compact === null ? t('7天 {count}份', { count: summary.count }) : t('7天 {n}', { n: compact }),
+    badge: allToday
+      ? (compact === null ? t('今天 {count}份', { count: summary.count }) : t('今天 {n}', { n: compact }))
+      : (compact === null ? t('7天 {count}份', { count: summary.count }) : t('7天 {n}', { n: compact })),
     group: compact === null ? t('即将到期 {count} 份', { count: summary.count }) : t('即将过期 {n}', { n: compact }),
     summary: main,
     today,

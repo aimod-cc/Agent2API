@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom'
 import { createRoot, type Root } from 'react-dom/client'
 import { t } from '../i18n'
 import { Tooltip, TooltipContent, TooltipProvider } from '@ui'
+import { privacyActionLabel, privacyKindLabel } from './settings-privacy-model'
 
 /**
  * 请求日志「重试 / 敏感词」标签的只读悬停面板。
@@ -43,6 +44,7 @@ type RequestEntry = {
   error?: unknown
   attemptDetails?: unknown
   sensitiveHits?: unknown
+  privacyHits?: unknown
   loadingDetail?: boolean
 }
 
@@ -59,14 +61,16 @@ type AttemptDetail = {
 /** 一轮内部的一次退避重试 */
 type AttemptRetry = { reason?: unknown; status?: unknown; delayMs?: unknown }
 
-/** 敏感词命中明细（后端 SensitiveHit） */
+/** 关键词替换命中明细（后端 SensitiveHit） */
 type SensitiveHit = { word?: unknown; count?: unknown }
 
+/** 隐私脱敏命中明细（后端 PrivacyHit） */
+type PrivacyHit = { kind?: unknown; count?: unknown; action?: unknown; restored?: unknown }
+
 /**
- * 面板类型：取自标签的 `data-req-hover` —— 只有 'sensitive' 是特例，其余（含空值）
- * 一律按重试链面板渲染（与旧实现 `=== 'sensitive' ? sensitive : chain` 同判据）。
+ * 面板类型：取自标签的 `data-req-hover`
  */
-type PanelKind = 'chain' | 'sensitive'
+type PanelKind = 'chain' | 'sensitive' | 'privacy'
 
 /** 重绘期间的锚点处置意图；`null` = 没有重绘在进行 */
 type Remap = { action: 'move'; kind: string; key: string } | { action: 'close' }
@@ -113,9 +117,13 @@ const detailsOf = (entry: RequestEntry | null | undefined): AttemptDetail[] =>
 const retriesOf = (item: AttemptDetail | null | undefined): AttemptRetry[] =>
   Array.isArray(item?.retries) ? (item.retries as AttemptRetry[]) : []
 
-/** 敏感词命中明细（后端字段是 sensitiveHits；旧行没有该键 → 空表） */
+/** 关键词替换命中明细（后端字段是 sensitiveHits；旧行没有该键 → 空表） */
 const hitsOf = (entry: RequestEntry | null | undefined): SensitiveHit[] =>
   Array.isArray(entry?.sensitiveHits) ? (entry.sensitiveHits as SensitiveHit[]) : []
+
+/** 隐私脱敏命中明细（后端字段是 privacyHits；旧行没有该键 → 空表） */
+const privacyHitsOf = (entry: RequestEntry | null | undefined): PrivacyHit[] =>
+  Array.isArray(entry?.privacyHits) ? (entry.privacyHits as PrivacyHit[]) : []
 
 /**
  * provider id → 展示名，查不到就原样回显 id。
@@ -151,7 +159,9 @@ function hasProcessFacts(entry: unknown): boolean {
 
 /** 标签 → 面板类型（见 PanelKind 的说明） */
 function kindOfTag(tag: HTMLElement): PanelKind {
-  return tag.dataset.reqHover === 'sensitive' ? 'sensitive' : 'chain'
+  if (tag.dataset.reqHover === 'sensitive') return 'sensitive'
+  if (tag.dataset.reqHover === 'privacy') return 'privacy'
+  return 'chain'
 }
 
 /* ─── 面板内容（纯展示，与旧内容构造函数逐字对应）── */
@@ -334,13 +344,13 @@ function SensitivePanel({ entry }: { entry: RequestEntry }) {
     return <div className={DIM_ROW}>{t('正在加载详情…')}</div>
   }
   if (!hits.length) {
-    return <div className={DIM_ROW}>{t('这条记录命中了敏感词，但没有留下命中明细')}</div>
+    return <div className={DIM_ROW}>{t('这条记录命中了关键词替换，但没有留下命中明细')}</div>
   }
   // 后端已按次数降序给出，这里不重排（顺序定义只有一处）
   return (
     <>
       <div className='rh-title mb-1 text-[11.5px] font-semibold tracking-[.02em] text-muted-foreground'>
-        {t('命中的敏感词')}
+        {t('命中的替换规则')}
       </div>
       {hits.slice(0, MAX_TERM_ROWS).map((hit, index) => (
         <div key={index} className='rh-row rh-hit flex items-baseline justify-between gap-2.5'>
@@ -357,6 +367,41 @@ function SensitivePanel({ entry }: { entry: RequestEntry }) {
   )
 }
 
+function PrivacyPanel({ entry }: { entry: RequestEntry }) {
+  const hits = privacyHitsOf(entry)
+  if (entry.loadingDetail && !hits.length) {
+    return <div className={DIM_ROW}>{t('正在加载详情…')}</div>
+  }
+  if (!hits.length) {
+    return <div className={DIM_ROW}>{t('这条记录触发了隐私脱敏，但没有留下命中明细')}</div>
+  }
+  return (
+    <>
+      <div className='rh-title mb-1 text-[11.5px] font-semibold tracking-[.02em] text-muted-foreground'>
+        {t('隐私脱敏记录')}
+      </div>
+      {hits.slice(0, MAX_TERM_ROWS).map((hit, index) => {
+        const count = Number(hit?.count) || 0
+        const restored = Number(hit?.restored) || 0
+        return (
+          <div key={index} className='rh-row rh-hit flex items-baseline justify-between gap-2.5'>
+            <span className='rh-hit-w break-words text-foreground'>
+              {privacyKindLabel(hit?.kind)} · {privacyActionLabel(hit?.action)}
+            </span>
+            <span className='rh-hit-c text-muted-foreground tabular-nums whitespace-nowrap'>
+              {`× ${String(count)}`}
+              {restored > 0 ? t('（已还原 {n}）', { n: restored }) : ''}
+            </span>
+          </div>
+        )
+      })}
+      {hits.length > MAX_TERM_ROWS ? (
+        <div className={DIM_ROW}>{t('另有 {n} 类敏感内容命中', { n: hits.length - MAX_TERM_ROWS })}</div>
+      ) : null}
+    </>
+  )
+}
+
 /** 组件库处理定位与边界碰撞，业务只提供锚点和面板内容。 */
 function HoverPanel({
   kind,
@@ -367,10 +412,12 @@ function HoverPanel({
 }) {
   return <TooltipProvider><Tooltip open disableHoverablePopup>
     <TooltipContent anchor={anchor} id={PANEL_ID} side='bottom' variant='plain' data-kind={kind}
-      className={kind === 'sensitive'
-        ? 'pointer-events-none w-max min-w-[220px] max-w-[min(900px,calc(100vw-16px))] text-[12px]'
+      className={kind === 'sensitive' || kind === 'privacy'
+        ? 'pointer-events-none w-max min-w-[240px] max-w-[min(900px,calc(100vw-16px))] text-[12px]'
         : 'pointer-events-none w-[min(520px,calc(100vw-16px))] max-w-[min(900px,calc(100vw-16px))] text-[12px]'}>
-      {kind === 'sensitive' ? <SensitivePanel entry={entry} /> : <ChainPanel entry={entry} />}
+      {kind === 'sensitive' ? <SensitivePanel entry={entry} />
+        : kind === 'privacy' ? <PrivacyPanel entry={entry} />
+          : <ChainPanel entry={entry} />}
     </TooltipContent>
   </Tooltip></TooltipProvider>
 }

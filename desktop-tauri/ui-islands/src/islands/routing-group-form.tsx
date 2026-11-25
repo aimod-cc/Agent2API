@@ -39,6 +39,6 @@ export function RoutingGroupForm({ value, onChange, disabled = false }: {
     <Field><FieldLabel htmlFor={`${id}-name`}>{t('组名')}</FieldLabel><Input id={`${id}-name`} maxLength={64} disabled={disabled}
       value={value.name} placeholder={t('例如：日常省钱')} onChange={event => onChange({ ...value, name: event.currentTarget.value })} /></Field>
     <Field><FieldLabel htmlFor={`${id}-model`}>{t('对外模型 ID')}</FieldLabel><Input id={`${id}-model`} maxLength={256} disabled={disabled}
-      value={value.model} placeholder='budget-chat' onChange={event => onChange({ ...value, model: event.currentTarget.value })} /></Field>
+      className='font-mono' value={value.model} placeholder='budget-chat' onChange={event => onChange({ ...value, model: event.currentTarget.value })} /></Field>
   </div>
 }

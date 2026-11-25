@@ -21,6 +21,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   const [client, setClient] = React.useState(clients[0]?.id || '')
   const [settings, setSettings] = React.useState<LaunchSettings | null>(null)
   const [path, setPath] = React.useState('')
+  const [args, setArgs] = React.useState('')
   const [result, setResult] = React.useState<LaunchResult | null>(null)
   const [busy, setBusy] = React.useState(false)
   const [notice, setNotice] = React.useState('')
@@ -41,7 +42,9 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   const processing = !!result && launchPending(result.phase)
   const locked = busy || processing
   const activeClient = result?.client.label || selected?.label
+  const argsDirty = !!settings && args.trim() !== settings.args
   const pathInput = React.useId()
+  const argsInput = React.useId()
 
   React.useEffect(() => {
     alive.current = true
@@ -106,9 +109,11 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
     setRestartConfirm(false)
   }
 
-  async function prepareLaunch(nextUseProxy = useProxyRef.current) {
+  async function prepareLaunch(nextUseProxy = useProxyRef.current): Promise<LaunchResult> {
     const payload = nextUseProxy === undefined ? selection : { ...selection, useProxy: nextUseProxy }
-    accept(await request('POST', `${BASE}/prepare`, payload, { retry: 'never' }))
+    const value = readLaunchResult(await request('POST', `${BASE}/prepare`, payload, { retry: 'never' }))
+    accept(value)
+    return value
   }
 
   async function load() {
@@ -123,6 +128,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
     if (!alive.current || session.current !== managementGeneration) return
     setSettings(value)
     setPath(value.path || value.detected || '')
+    setArgs(value.args || '')
     setShowPath(!value.detected || !!value.error)
     if (!value.detected || value.error) return
     await prepareLaunch()
@@ -170,13 +176,65 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   async function savePath() {
     if (!settings) return
     await action(async () => {
-      await request('PATCH', `${BASE}/settings`, { selection, path: path.trim(), revision: settings.revision }, { retry: 'never' })
+      await request('PATCH', `${BASE}/settings`, { selection, path: path.trim(), args: args.trim(), revision: settings.revision }, { retry: 'never' })
       await load()
     })
   }
 
+  async function persistArgs(): Promise<LaunchResult | null> {
+    if (!settings) return null
+    const next = readLaunchSettings(
+      await request('PATCH', `${BASE}/settings`, { selection, args: args.trim(), revision: settings.revision }, { retry: 'never' }),
+      selection
+    )
+    if (!alive.current || session.current !== managementGeneration) return null
+    setSettings(next)
+    setArgs(next.args || '')
+    if (!next.detected || next.error) {
+      await cancelPending(true)
+      return null
+    }
+    try {
+      await cancelPending(false)
+      return await prepareLaunch()
+    } catch (error) {
+      if (alive.current) setResult(null)
+      throw error
+    }
+  }
+
+  async function saveArgs() {
+    if (!settings || !argsDirty) return
+    await action(async () => { await persistArgs() })
+  }
+
   async function execute(kind: 'confirm' | 'restore' | 'retry-start') {
     if (!result || pending.current || session.current !== managementGeneration) return
+    if (kind === 'confirm' && argsDirty) {
+      const prevRequiresRestart = result.requiresRestart
+      const prevHotSwitch = result.hotSwitch
+      await action(async () => {
+        const fresh = await persistArgs()
+        if (!fresh || fresh.phase !== 'awaiting_confirmation' || fresh.pendingBackup
+          || fresh.remainingMs === 0 || (fresh.proxy.enabled && !fresh.proxy.available)) return
+        if (fresh.requiresRestart && (!prevRequiresRestart || prevHotSwitch)) return
+        const freshKey = `confirm:${fresh.intent}`
+        if (sent.current.has(freshKey)) return
+        sent.current.add(freshKey)
+        try {
+          const value = await request('POST', `${BASE}/confirm`, {
+            intent: fresh.intent,
+            confirmed: true,
+            restartConfirmed: fresh.requiresRestart,
+          }, { retry: 'never' })
+          accept(value)
+        } catch (error) {
+          setUnknown(true)
+          throw error
+        }
+      })
+      return
+    }
     const key = `${kind}:${result.intent}`
     if (sent.current.has(key)) return
     sent.current.add(key)
@@ -242,6 +300,22 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
                 aria-label={t('使用账号代理启动')} onCheckedChange={checked => void toggleProxy(checked === true)} />
             </dd>
           </> : null}
+          {!recoveryBackup && settings ? <>
+            <dt className='self-center text-muted-foreground'><label htmlFor={argsInput}>{t('启动参数')}</label></dt>
+            <dd className='flex min-w-0 items-center gap-2'>
+              <Input id={argsInput} className='min-w-0 flex-1 font-mono text-xs' value={args}
+                disabled={locked || !!result?.committed || !!result?.restored}
+                placeholder={t('例如 --remote-debugging-port=0')}
+                onChange={event => setArgs(event.currentTarget.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && argsDirty && !locked && !result?.committed && !result?.restored) {
+                    event.preventDefault()
+                    void saveArgs()
+                  }
+                }} />
+              {argsDirty && !result?.committed && !result?.restored ? <Button size='sm' variant='outline' disabled={locked} onClick={() => void saveArgs()}>{t('保存')}</Button> : null}
+            </dd>
+          </> : null}
         </dl>
         {settings && (showPath || !result) ? <div className='flex flex-col gap-2'>
           <Label htmlFor={pathInput}>{t('程序位置')}</Label>
@@ -254,7 +328,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
           <div className='flex items-center gap-2'>
             <Button size='sm' variant='outline' disabled={locked} onClick={() => void savePath()}>{t('保存并继续')}</Button>
             <Button size='sm' variant='ghost' disabled={locked} onClick={() => { setPath(''); void action(async () => {
-              await request('PATCH', `${BASE}/settings`, { selection, path: '', revision: settings.revision }, { retry: 'never' }); await load()
+              await request('PATCH', `${BASE}/settings`, { selection, path: '', args: args.trim(), revision: settings.revision }, { retry: 'never' }); await load()
             }) }}>{t('自动探测')}</Button>
           </div>
           {settings.error ? <p className='text-xs text-warning'>{launchMessage(settings.error, t)}</p> : null}

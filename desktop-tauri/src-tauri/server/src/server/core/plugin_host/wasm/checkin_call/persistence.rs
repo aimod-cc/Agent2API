@@ -63,7 +63,6 @@ struct Collector {
     submitted: bool,
     claimed: bool,
     rollback_pending: bool,
-    rejection: Option<super::doubao_daily::SubmitRejection>,
     failure: Option<super::doubao_daily::DailyError>,
 }
 
@@ -75,7 +74,6 @@ pub(in crate::server::core::plugin_host) struct Settlement {
     submitted: bool,
     claimed: bool,
     rollback_pending: bool,
-    rejection: Option<super::doubao_daily::SubmitRejection>,
     failure: Option<super::doubao_daily::DailyError>,
     pending: bool,
 }
@@ -151,7 +149,6 @@ impl PersistenceSlot {
             submitted: false,
             claimed: false,
             rollback_pending: false,
-            rejection: None,
             failure: None,
         };
         let mut slot = self.inner.collector.try_lock().map_err(|_| unavailable())?;
@@ -207,7 +204,6 @@ impl PersistenceSlot {
             submitted,
             claimed,
             rollback_pending,
-            rejection,
             failure,
         } = collector;
         let pending = bound.pending_today();
@@ -225,7 +221,6 @@ impl PersistenceSlot {
                 submitted,
                 claimed,
                 rollback_pending: false,
-                rejection: None,
                 failure,
                 pending,
             }));
@@ -235,7 +230,7 @@ impl PersistenceSlot {
             drop(bound);
             return Ok(Some(Settlement {
                 saved: Some(false), reported, summary, save_requested: false,
-                submitted, claimed, rollback_pending: false, rejection, failure, pending,
+                submitted, claimed, rollback_pending: false, failure, pending,
             }));
         }
         // 同步保存任务仍按值持原桥/回执/typed Fact；摘要只展示，不能替代它的保存许可。
@@ -258,7 +253,6 @@ impl PersistenceSlot {
             submitted,
             claimed,
             rollback_pending,
-            rejection,
             failure,
             pending,
         }))
@@ -293,20 +287,17 @@ impl Settlement {
         let confirmed_today = official.is_some();
         let completed = confirmed_today && (historical || self.saved == Some(true));
         let inactive = matches!(self.failure, Some(super::doubao_daily::DailyError::NoActivity | super::doubao_daily::DailyError::NoDaily));
+        let desktop_only = matches!(self.failure, Some(super::doubao_daily::DailyError::DesktopOnly));
         let rolled_back = self.rollback_pending && self.saved == Some(true);
-        let pending = !completed && !rolled_back && (self.pending || self.save_requested);
-        let rejected_text = self.rejection.as_ref().map(|rej| match rej.code {
-            Some(code) => format!("豆包工作签到被拒绝（{code}）：{}", rej.message),
-            None => format!("豆包工作签到被拒绝：{}", rej.message),
-        });
+        let pending = !completed && !desktop_only && !rolled_back && (self.pending || self.save_requested);
         let message = if completed {
             "豆包工作今日签到已由官方确认；本次收益未查询，不补零或猜测奖励".to_string()
+        } else if desktop_only {
+            daily_failure_message(self.failure).to_string()
         } else if pending && self.submitted {
             "豆包工作本次领取结果仍待确认；领取记录已保留，再次点击仅查询结果，不会重复领取".to_string()
         } else if pending {
             "豆包工作原签到结果仍待确认；本次仅回查，没有再次领取，原待确认记录保持不变".to_string()
-        } else if let Some(text) = rejected_text {
-            text
         } else if !self.save_requested {
             daily_failure_message(self.failure).to_string()
         } else {
@@ -317,12 +308,12 @@ impl Settlement {
         json!({
             "success": completed && self.claimed, "alreadyCompleted": completed && !self.claimed,
             "outcome": if completed { if self.claimed { "claimed" } else { "done" } }
-                else if inactive { "inactive" } else { "failed" },
+                else if inactive { "inactive" } else if desktop_only { "ineligible" } else { "failed" },
             "credit": null, "streak": null, "msg": message, "retryAt": null,
             "dailyCheckin": {
                 "status": if confirmed_today { "official_confirmed" } else if inactive { "inactive" }
-                    else if pending { "confirming" } else { "failed" },
-                "completed": if completed { Some(true) } else { None }, "execution": "unknown", "saved": self.saved,
+                    else if desktop_only { "ineligible" } else if pending { "confirming" } else { "failed" },
+                "completed": if completed { Some(true) } else if desktop_only { Some(false) } else { None }, "execution": if desktop_only { "readonly" } else { "unknown" }, "saved": self.saved,
                 "saveRequested": self.save_requested, "historySaved": history_saved,
                 "historyAppliesToday": history_applies_today, "official": official,
                 "pluginReported": self.reported, "queryOnly": !self.submitted, "sourcesComplete": completed,
@@ -335,10 +326,11 @@ impl Settlement {
 fn daily_failure_message(error: Option<super::doubao_daily::DailyError>) -> &'static str {
     use super::doubao_daily::DailyError;
     match error {
+        Some(DailyError::DesktopOnly) => "官方显示今日尚未签到；豆包工作每日签到已锁定官方桌面端安全校验，接口提交会消耗当日领取资格，请打开豆包工作桌面端手动签到（本页仅查询状态）",
         Some(DailyError::NoActivity) => "豆包工作官方未向当前账号开放签到活动；本次未领取，也未新增待确认记录",
         Some(DailyError::NoDaily) => "豆包工作当前活动没有每日签到项；本次未领取，也未新增待确认记录",
         Some(DailyError::CredentialsInvalid) => "豆包工作登录快照无法用于活动请求，请重新导入当前账号登录态；本次未领取",
-        Some(DailyError::ResponseRejected | DailyError::SubmitRejected) => "豆包工作活动请求被官方拒绝，请在官方客户端核对登录和活动资格；本次未领取，也未新增待确认记录",
+        Some(DailyError::ResponseRejected) => "豆包工作活动请求被官方拒绝，请在官方客户端核对登录和活动资格；本次未领取，也未新增待确认记录",
         Some(DailyError::AmbiguousDaily | DailyError::MissingOriginalTask | DailyError::ResponseInvalid) => "豆包工作活动查询未确认唯一的原签到任务；本次未领取，也未新增待确认记录",
         Some(DailyError::CrossDay | DailyError::InvalidClock | DailyError::Deadline) => "豆包工作本次签到查询已超时或日期变化；本次未领取，也未新增待确认记录",
         _ => "豆包工作本次账号核对或活动查询未完成；未领取，也未新增当天待确认记录，可重新查询",

@@ -31,7 +31,11 @@ export function RankPanel({ panelId, listId, labelId, title, tip, rows, badge, e
       <div className='report-rank-list' id={listId}>
         {shown.length ? shown.map((row, index) => <div className='report-rank-row' data-tip={row.tip} key={row.key}>
           <span className='report-rank-order'>{String(index + 1).padStart(2, '0')}</span>
-          <div className='report-rank-name'><span title={row.full}>{row.name}</span>{badge?.(row.id)}</div>
+          <div className='report-rank-name'>
+            <span title={row.full}>{row.name}</span>
+            {row.mergedSources ? <span className='report-merged-count'>{t('含 {n} 项', { n: formatInt(row.mergedSources.length) })}</span> : null}
+            {badge?.(row.id)}
+          </div>
           <Meter value={Number.parseFloat(row.barWidth) || 0} className='report-rank-meter'
             trackClassName='report-rank-track' indicatorClassName='report-rank-fill' aria-label={row.full} />
           <strong className='report-rank-amount' title={row.tokensText}>

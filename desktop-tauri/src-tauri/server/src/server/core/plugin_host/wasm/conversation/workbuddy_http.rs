@@ -21,7 +21,11 @@ use crate::server::core::{
     proxies::chain::SelectedPath,
     upstream::replay_guard::PreparationRef,
 };
-use crate::server::core::plugin_host::wasm::{context::{Context, Shared}, runtime::Runtime};
+use crate::server::core::plugin_host::wasm::{
+    context::{Context, Shared},
+    managed_task::declaration::{self, ParseObjectError},
+    runtime::Runtime,
+};
 use super::super::{ConversationEgress, EndState, Signal};
 
 const PROVIDER: &str = "workbuddy";
@@ -154,9 +158,10 @@ impl Context {
                 ticket.consume(request, &url, &headers, &expected_bytes)
             }).await;
             match &result {
-                Ok((value, _)) if value["status"].as_u64().is_some_and(|status| crate::server::core::plugin_host::wasm::conversation::ordinary_http::is_safe_http_rejection(status as u16)) => {
+                Ok((value, _)) if value["status"].as_u64().is_some_and(|status| super::is_safe_http_rejection(status as u16)) => {
                     prep.confirm_unsubmitted_http_rejection();
                 }
+                Ok((value, _)) if super::supports_http_200_rejection_inspection(PROVIDER, value) => {}
                 _ => prep.lock_permanent_replay_block(),
             }
             let result = result?;
@@ -250,7 +255,7 @@ impl SendTicket {
             || request.body().and_then(reqwest::Body::as_bytes) != Some(bytes.as_ref())
             || request.headers().len() != headers.len()
             || headers.iter().any(|(name, value)| request.headers().get(name) != Some(value)) {
-            return Err(invalid());
+            return Err(integrity_mismatch());
         }
         self.binding.headers_deadline.check()?;
         self.binding.with_gate(true, |_| {
@@ -262,75 +267,113 @@ impl SendTicket {
 
 fn route(context: &Context, params: &Value) -> Result<Option<String>, proto::WireError> {
     if context.shared.options.provider != PROVIDER { return Ok(None); }
-    let raw = params["url"].as_str().filter(|url| url.len() <= 8192).ok_or_else(invalid)?;
-    let parsed = url::Url::parse(raw).map_err(|_| invalid())?;
+    route_url(params)
+}
+
+fn route_url(params: &Value) -> Result<Option<String>, proto::WireError> {
+    let raw = params["url"].as_str().filter(|url| url.len() <= 8192).ok_or_else(invalid_endpoint)?;
+    let parsed = url::Url::parse(raw).map_err(|_| invalid_endpoint())?;
     // 识别一次/多次编码及重复斜杠的对话别名后拒绝，不能借普通HTTP绕过固定路线。
     let mut probe = parsed.path().to_string();
     for _ in 0..4 {
-        let decoded = super::decoded_path(&probe).map_err(|_| invalid())?;
+        let decoded = super::decoded_path(&probe).map_err(|_| invalid_endpoint())?;
         if decoded == probe { break; }
         probe = decoded;
     }
-    if probe.contains('%') { return Err(invalid()); }
+    if probe.contains('%') { return Err(invalid_endpoint()); }
     let normalized = format!("/{}", probe.split('/').filter(|part| !part.is_empty())
         .map(|part| part.split(';').next().unwrap_or("")).collect::<Vec<_>>().join("/"));
     if !normalized.trim_end_matches('/').eq_ignore_ascii_case(PATH) { return Ok(None); }
     if params["method"].as_str() != Some("POST") || parsed.scheme() != "https"
         || parsed.query().is_some() || parsed.fragment().is_some() || !parsed.username().is_empty()
         || parsed.password().is_some() || !ORIGINS.iter().any(|origin| raw == format!("{origin}{PATH}")) {
-        return Err(invalid());
+        return Err(invalid_endpoint());
     }
     Ok(Some(raw.to_string()))
 }
 
 fn material(context: &Context, params: &Value, url: String) -> Result<Material, proto::WireError> {
-    let object = params.as_object().ok_or_else(invalid)?;
+    let (id, trace) = validate_envelope(params)?;
+    let (headers, wire_headers) = validate_headers(&params["headers"])?;
+    let bytes = body_bytes(context, params)?;
+    validate_chat_body(&bytes)?;
+    let params = json!({ "method": "POST", "url": url, "headers": wire_headers, "id": id,
+        "provider": PROVIDER, "trace": trace, "max_chunk": 64 * 1024 });
+    Ok(Material { params, bytes, headers, url })
+}
+
+fn validate_envelope(params: &Value) -> Result<(&str, Value), proto::WireError> {
+    let object = params.as_object().ok_or_else(incompatible_params)?;
     if object.keys().any(|key| !matches!(key.as_str(),
         "method" | "url" | "headers" | "body" | "body_resource" | "timeout_ms" | "id" | "provider" | "proxy" | "trace" | "max_chunk")) {
-        return Err(invalid());
+        return Err(incompatible_params());
     }
-    if params["provider"] != PROVIDER || params["max_chunk"].as_u64() != Some(64 * 1024) { return Err(invalid()); }
+    if params["provider"] != PROVIDER || params["max_chunk"].as_u64() != Some(64 * 1024) {
+        return Err(incompatible_params());
+    }
     let id = params["id"].as_str().filter(|id| id.starts_with("wasm-") && id.len() <= 80
-        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))).ok_or_else(invalid)?;
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
+        .ok_or_else(incompatible_params)?;
     let trace = params.get("trace").and_then(Value::as_str)
         .filter(|trace| trace.len() <= 512 && !trace.chars().any(char::is_control))
         .map(|trace| json!(trace)).unwrap_or(Value::Null);
-    let fields = params["headers"].as_object().filter(|headers| headers.len() <= 128).ok_or_else(invalid)?;
+    Ok((id, trace))
+}
+
+fn validate_headers(raw: &Value) -> Result<(HeaderMap, serde_json::Map<String, Value>), proto::WireError> {
+    let fields = raw.as_object().filter(|headers| headers.len() <= 128).ok_or_else(invalid_headers)?;
     let mut headers = HeaderMap::new();
     let mut wire_headers = serde_json::Map::new();
     let mut total = 0usize;
     for (name, value) in fields {
         let lower = name.to_ascii_lowercase();
-        if forbidden_header(&lower) { return Err(invalid()); }
-        let text = value.as_str().ok_or_else(invalid)?;
+        if forbidden_header(&lower) { return Err(invalid_headers()); }
+        let text = value.as_str().ok_or_else(|| {
+            if lower == "authorization" { invalid_token() } else { invalid_headers() }
+        })?;
         total = total.checked_add(name.len()).and_then(|bytes| bytes.checked_add(text.len()))
-            .filter(|bytes| *bytes <= MAX_HEADER_BYTES).ok_or_else(invalid)?;
-        let parsed_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid())?;
-        let mut parsed_value = HeaderValue::from_str(text).map_err(|_| invalid())?;
-        if headers.contains_key(&parsed_name) { return Err(invalid()); }
+            .filter(|bytes| *bytes <= MAX_HEADER_BYTES).ok_or_else(invalid_headers)?;
+        let parsed_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid_header_chars())?;
+        let mut parsed_value = HeaderValue::from_str(text).map_err(|_| {
+            if lower == "authorization" { invalid_token() } else { invalid_header_chars() }
+        })?;
+        if headers.contains_key(&parsed_name) { return Err(invalid_headers()); }
         if lower == "authorization" { parsed_value.set_sensitive(true); }
         headers.insert(parsed_name, parsed_value);
         wire_headers.insert(name.clone(), json!(text));
     }
+    if !headers.get("authorization").and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.strip_prefix("Bearer ").is_some_and(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))) {
+        return Err(invalid_token());
+    }
     let header_is = |name: &str, expected: &str| headers.get(name).and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case(expected));
-    if !header_is("content-type", "application/json") || !header_is("accept", "text/event-stream")
-        || !headers.get("authorization").and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.strip_prefix("Bearer ").is_some_and(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))) {
-        return Err(invalid());
+    if !header_is("content-type", "application/json") || !header_is("accept", "text/event-stream") {
+        return Err(invalid_headers());
     }
-    let bytes = body_bytes(context, params)?;
-    let value: Value = crate::server::core::plugin_host::wasm::managed_task::declaration::parse_object(&bytes, MAX_BODY)
-        .map_err(|_| invalid())?;
+    Ok((headers, wire_headers))
+}
+
+fn validate_chat_body(bytes: &[u8]) -> Result<(), proto::WireError> {
+    let value: Value = declaration::parse_object_detailed(bytes, MAX_BODY)
+        .map_err(|error| match error {
+            ParseObjectError::TooLarge => payload_too_large(),
+            ParseObjectError::DepthExceeded => depth_exceeded(),
+            ParseObjectError::DuplicateKey => duplicate_field(),
+            ParseObjectError::Invalid => invalid_body(),
+        })?;
     let mut nodes = 0;
     shape(&value, 0, &mut nodes)?;
-    if value["stream"] != true || !value["messages"].as_array().is_some_and(|rows| !rows.is_empty())
-        || !value["model"].as_str().is_some_and(|model| !model.trim().is_empty() && model.len() <= 1024 && !model.chars().any(char::is_control)) {
-        return Err(invalid());
+    if value["stream"] != true {
+        return Err(non_stream_request());
     }
-    let params = json!({ "method": "POST", "url": url, "headers": wire_headers, "id": id,
-        "provider": PROVIDER, "trace": trace, "max_chunk": 64 * 1024 });
-    Ok(Material { params, bytes, headers, url })
+    if !value["messages"].as_array().is_some_and(|rows| !rows.is_empty()) {
+        return Err(missing_messages());
+    }
+    if !value["model"].as_str().is_some_and(|model| !model.trim().is_empty() && model.len() <= 1024 && !model.chars().any(char::is_control)) {
+        return Err(invalid_model());
+    }
+    Ok(())
 }
 
 fn body_bytes(context: &Context, params: &Value) -> Result<Bytes, proto::WireError> {
@@ -338,41 +381,48 @@ fn body_bytes(context: &Context, params: &Value) -> Result<Bytes, proto::WireErr
     let resource = params.get("body_resource").filter(|value| !value.is_null());
     match (raw, resource) {
         (Some(raw), None) => {
-            let encoded = raw.as_str().filter(|body| !body.is_empty() && body.len() <= MAX_ENCODED).ok_or_else(invalid)?;
-            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| invalid())?;
-            if bytes.is_empty() || bytes.len() > MAX_BODY || base64::engine::general_purpose::STANDARD.encode(&bytes) != encoded {
-                return Err(invalid());
+            let encoded = raw.as_str().filter(|body| !body.is_empty()).ok_or_else(invalid_body)?;
+            if encoded.len() > MAX_ENCODED {
+                return Err(payload_too_large());
+            }
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| invalid_body())?;
+            if bytes.is_empty() {
+                return Err(invalid_body());
+            }
+            if bytes.len() > MAX_BODY {
+                return Err(payload_too_large());
+            }
+            if base64::engine::general_purpose::STANDARD.encode(&bytes) != encoded {
+                return Err(invalid_body());
             }
             Ok(Bytes::from(bytes))
         }
         (None, Some(resource)) => {
             context.permission("resources.v1")?;
-            let id = resource.as_str().filter(|id| !id.is_empty()).ok_or_else(invalid)?;
-            let bytes = context.blobs.raw(id).map_err(|_| invalid())?;
+            let id = resource.as_str().filter(|id| !id.is_empty()).ok_or_else(invalid_body)?;
+            let bytes = context.blobs.raw(id).map_err(|_| invalid_body())?;
             if bytes.is_empty() {
-                return Err(invalid());
+                return Err(invalid_body());
             }
             if bytes.len() > MAX_BODY {
-                return Err(proto::WireError::with_code(
-                    format!("请求正文超过 {} MiB 的受控上限，请缩小上下文或图片后重试", MAX_BODY / (1024 * 1024)),
-                    "plugin_request_too_large",
-                ));
+                return Err(payload_too_large());
             }
             Ok(bytes)
         }
-        _ => Err(invalid()),
+        _ => Err(invalid_body()),
     }
 }
 
 fn shape(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), proto::WireError> {
-    *nodes = nodes.checked_add(1).filter(|nodes| *nodes <= MAX_NODES).ok_or_else(invalid)?;
-    if depth > 32 { return Err(invalid()); }
+    *nodes = nodes.checked_add(1).filter(|nodes| *nodes <= MAX_NODES).ok_or_else(too_many_nodes)?;
+    if depth > 32 { return Err(depth_exceeded()); }
     match value {
         Value::Array(items) => for item in items { shape(item, depth + 1, nodes)?; },
         Value::Object(fields) => {
             let mut names = BTreeSet::new();
             for (key, item) in fields {
-                if key.len() > 1024 || !names.insert(key) { return Err(invalid()); }
+                if key.len() > 1024 { return Err(field_name_too_long()); }
+                if !names.insert(key) { return Err(duplicate_field()); }
                 shape(item, depth + 1, nodes)?;
             }
         }
@@ -388,10 +438,211 @@ fn forbidden_header(name: &str) -> bool {
         | "x-method-override" | "http-method-override" | "x-original-method") || name.starts_with("x-forwarded-")
 }
 
-fn invalid() -> proto::WireError {
-    proto::WireError::with_code("WorkBuddy国内固定对话材料无效，未换域、读取资源或回退普通HTTP", "bad_params")
+fn bad_params(message: impl Into<String>) -> proto::WireError {
+    proto::WireError::with_code(message, "bad_params")
+}
+
+fn payload_too_large() -> proto::WireError {
+    proto::WireError::with_code(
+        format!("WorkBuddy 国内版请求内容超过 {} MiB 上限，请缩短对话历史或减少图片后重试", MAX_BODY / (1024 * 1024)),
+        "plugin_request_too_large",
+    )
+}
+
+fn too_many_nodes() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求内容过于复杂（数据结构节点超过 65,536 上限），请精简对话历史、减少工具数量或新开会话重试")
+}
+
+fn depth_exceeded() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求内容嵌套过深（超过 32 层上限），请简化请求或新开会话重试")
+}
+
+fn duplicate_field() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求内容包含重复字段，请检查客户端发送的请求格式")
+}
+
+fn field_name_too_long() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求内容包含过长的字段名，请检查客户端发送的请求格式")
+}
+
+fn invalid_body() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求内容为空或格式无效，请重试；若持续出现请检查插件与主程序版本")
+}
+
+fn missing_messages() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求缺少对话消息，请检查客户端发送的内容")
+}
+
+fn invalid_model() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求的模型名称缺失或格式无效")
+}
+
+fn non_stream_request() -> proto::WireError {
+    bad_params("WorkBuddy 国内版对话通道仅支持流式请求，请将 WorkBuddy 插件更新至最新版本")
+}
+
+pub(super) fn invalid_endpoint() -> proto::WireError {
+    bad_params("WorkBuddy 国内版对话地址无效（仅允许官方国内对话端点），请检查账号端点设置或重新登录")
+}
+
+fn invalid_token() -> proto::WireError {
+    bad_params("WorkBuddy 国内版账号登录令牌缺失或格式无效，请重新登录账号")
+}
+
+fn invalid_header_chars() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求头包含无效字符，请检查账号信息（如部门名称）或自定义客户端标识")
+}
+
+fn invalid_headers() -> proto::WireError {
+    bad_params("WorkBuddy 国内版请求头不合规或超出上限，请检查自定义请求头及插件版本")
+}
+
+fn incompatible_params() -> proto::WireError {
+    bad_params("WorkBuddy 国内版插件与当前主程序参数不兼容，请将主程序与 WorkBuddy 插件更新至最新版本")
+}
+
+fn integrity_mismatch() -> proto::WireError {
+    bad_params("WorkBuddy 国内版发送前安全核对未通过，请求已中止")
 }
 
 fn unavailable() -> proto::WireError {
     proto::WireError::with_code("WorkBuddy原对话调用或一次出口不可用，未重新提交、选路或恢复发送资格", "request_replay_blocked")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_headers() -> Value {
+        json!({
+            "Authorization": "Bearer test-token-123",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        })
+    }
+
+    #[test]
+    fn route_url_distinguishes_valid_and_invalid_endpoints() {
+        let ok = route_url(&json!({
+            "method": "POST",
+            "url": "https://www.workbuddy.cn/v2/chat/completions"
+        }));
+        assert_eq!(ok.unwrap().as_deref(), Some("https://www.workbuddy.cn/v2/chat/completions"));
+
+        let non_chat = route_url(&json!({
+            "method": "GET",
+            "url": "https://www.workbuddy.cn/v2/plugin/user"
+        }));
+        assert_eq!(non_chat.unwrap(), None);
+
+        let err = route_url(&json!({
+            "method": "POST",
+            "url": "https://www.codebuddy.cn/v2/chat/completions"
+        }))
+        .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("bad_params"));
+        assert_eq!(err.message, invalid_endpoint().message);
+    }
+
+    #[test]
+    fn validate_envelope_rejects_unknown_fields_with_clear_message() {
+        let valid_params = json!({
+            "method": "POST",
+            "url": "https://www.workbuddy.cn/v2/chat/completions",
+            "headers": valid_headers(),
+            "body": "e30=",
+            "id": "wasm-net-1",
+            "provider": "workbuddy",
+            "max_chunk": 65536
+        });
+        assert!(validate_envelope(&valid_params).is_ok());
+
+        let invalid_params = json!({
+            "method": "POST",
+            "url": "https://www.workbuddy.cn/v2/chat/completions",
+            "headers": valid_headers(),
+            "unexpected_field": true,
+            "id": "wasm-net-1",
+            "provider": "workbuddy",
+            "max_chunk": 65536
+        });
+        let err = validate_envelope(&invalid_params).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("bad_params"));
+        assert_eq!(err.message, incompatible_params().message);
+    }
+
+    #[test]
+    fn validate_headers_distinguishes_token_chars_and_policy_errors() {
+        assert!(validate_headers(&valid_headers()).is_ok());
+
+        let missing_token = validate_headers(&json!({
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }))
+        .unwrap_err();
+        assert_eq!(missing_token.message, invalid_token().message);
+
+        let invalid_chars = validate_headers(&json!({
+            "Authorization": "Bearer test-token-123",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "X-Department-Info": "line1\nline2"
+        }))
+        .unwrap_err();
+        assert_eq!(invalid_chars.message, invalid_header_chars().message);
+
+        let forbidden = validate_headers(&json!({
+            "Authorization": "Bearer test-token-123",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Cookie": "sid=1"
+        }))
+        .unwrap_err();
+        assert_eq!(forbidden.message, invalid_headers().message);
+    }
+
+    #[test]
+    fn validate_chat_body_distinguishes_structure_and_field_errors() {
+        let ok = br#"{"stream":true,"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}"#;
+        assert!(validate_chat_body(ok).is_ok());
+
+        let dup = br#"{"stream":true,"stream":true,"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        assert_eq!(validate_chat_body(dup).unwrap_err().message, duplicate_field().message);
+
+        let mut deep = String::from(r#"{"stream":true,"model":"m","messages":[{"role":"user","content":"hi"}],"extra":"#);
+        for _ in 0..33 { deep.push('['); }
+        deep.push('1');
+        for _ in 0..33 { deep.push(']'); }
+        deep.push('}');
+        assert_eq!(validate_chat_body(deep.as_bytes()).unwrap_err().message, depth_exceeded().message);
+
+        let long_key = format!(
+            r#"{{"stream":true,"model":"m","messages":[{{"role":"user","content":"hi"}}],"{}":1}}"#,
+            "k".repeat(1025)
+        );
+        assert_eq!(validate_chat_body(long_key.as_bytes()).unwrap_err().message, field_name_too_long().message);
+
+        let many = format!(
+            r#"{{"stream":true,"model":"m","messages":[{{"role":"user","content":"hi"}}],"items":[{}]}}"#,
+            vec!["0"; MAX_NODES].join(",")
+        );
+        assert_eq!(validate_chat_body(many.as_bytes()).unwrap_err().message, too_many_nodes().message);
+
+        let non_stream = br#"{"stream":false,"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        assert_eq!(validate_chat_body(non_stream).unwrap_err().message, non_stream_request().message);
+
+        let empty_messages = br#"{"stream":true,"model":"m","messages":[]}"#;
+        assert_eq!(validate_chat_body(empty_messages).unwrap_err().message, missing_messages().message);
+
+        let empty_model = br#"{"stream":true,"model":"   ","messages":[{"role":"user","content":"hi"}]}"#;
+        assert_eq!(validate_chat_body(empty_model).unwrap_err().message, invalid_model().message);
+
+        let invalid_json = b"not-json";
+        assert_eq!(validate_chat_body(invalid_json).unwrap_err().message, invalid_body().message);
+
+        let oversized = vec![b' '; MAX_BODY + 1];
+        let err = validate_chat_body(&oversized).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("plugin_request_too_large"));
+        assert_eq!(err.message, payload_too_large().message);
+    }
 }

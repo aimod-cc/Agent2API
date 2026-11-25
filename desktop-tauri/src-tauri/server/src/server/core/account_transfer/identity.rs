@@ -95,7 +95,7 @@ pub(super) fn is_desktop_item(item: &Map<String, Value>) -> bool {
 /// （见 `custom_providers` 模块头），按注册表判会被整条拒掉 —— 那正是自定义
 /// 账号「导得出、导不回」的根子。这里放行前缀，存在性校验由调用方在合并完
 /// 导入文件里的提供商定义之后做（`custom_providers::get`）。
-pub(super) fn resolve_provider(item: &Map<String, Value>) -> Result<String, String> {
+pub(crate) fn resolve_provider(item: &Map<String, Value>) -> Result<String, String> {
     match item.get("provider") {
         None | Some(Value::Null) => Ok(DEFAULT_PROVIDER_ID.to_string()),
         Some(Value::String(text)) => {

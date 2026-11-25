@@ -28,6 +28,7 @@ pub(crate) fn current_query_deadline() -> Option<tokio::time::Instant> {
 tokio::task_local! {
     static QUERY_ACCOUNT: Option<(String, String)>;
     static QUERY_DEADLINE: Option<tokio::time::Instant>;
+    static QUERY_CANCEL: Option<tokio_util::sync::CancellationToken>;
 }
 
 pub(crate) async fn scope_query_deadline<F: std::future::Future>(deadline: Option<tokio::time::Instant>, work: F) -> F::Output {
@@ -36,6 +37,19 @@ pub(crate) async fn scope_query_deadline<F: std::future::Future>(deadline: Optio
 
 pub(crate) fn account_query_deadline(provider: &str, account: &str) -> Option<tokio::time::Instant> {
     is_account_query(provider, account).then(|| QUERY_DEADLINE.try_with(|deadline| *deadline).ok().flatten()).flatten()
+}
+
+pub(crate) async fn scope_query_cancel<F: std::future::Future>(
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    work: F,
+) -> F::Output {
+    QUERY_CANCEL.scope(cancel, work).await
+}
+
+pub(crate) fn account_query_cancel(provider: &str, account: &str) -> Option<tokio_util::sync::CancellationToken> {
+    is_account_query(provider, account)
+        .then(|| QUERY_CANCEL.try_with(Clone::clone).ok().flatten())
+        .flatten()
 }
 
 pub(crate) async fn scope_account_query<F: std::future::Future>(

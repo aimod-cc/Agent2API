@@ -3,7 +3,7 @@ import { t } from '../i18n'
 import { clearSessions, deleteSession, saveSession, summarizeSession, toast, type AssistantConfig, type ChatMessage, type SessionDetail, type SessionSummary } from './assistant-state'
 import { parseAssistantMessages } from '../../../ui-shared/assistant-history'
 import { equalSavedContent } from '../../../ui-shared/saved-content'
-import type { UiMessage } from './assistant-messages'
+import type { ToolCardItem, UiMessage } from './assistant-messages'
 import type { ImageAsset } from '../../../ui-shared/assistant-image-tools'
 import type { ModelApiKey } from '../../../ui-shared/model-api-key'
 
@@ -27,6 +27,8 @@ export function titleFrom(messages: ChatMessage[]): string {
 
 export function useAssistantSessions(refs: SessionRefs) {
   const [sessions, setSessions] = React.useState<SessionSummary[]>([])
+  const sessionsRef = React.useRef<SessionSummary[]>(sessions)
+  sessionsRef.current = sessions
   const queueRef = React.useRef<Promise<void>>(Promise.resolve())
   const deletedRef = React.useRef(new Set<string>())
   const clearingRef = React.useRef(false)
@@ -36,13 +38,17 @@ export function useAssistantSessions(refs: SessionRefs) {
   const persist = React.useCallback((bump = true, collected: CollectedTool[] = []): Promise<void> => {
     const id = refs.activeId.current
     if (!id || deletedRef.current.has(id) || clearingRef.current) return Promise.resolve()
+    const toolCards = new Map<string, ToolCardItem>()
+    for (const item of refs.ui.current) {
+      if (item.kind === 'tool' && item.call.id) toolCards.set(item.call.id, item)
+    }
     const messages = parseAssistantMessages([...refs.messages.current, ...collected.map(item => ({ role: 'tool' as const, ...item }))]).map(message => {
       if (message.role !== 'tool') return message
-      const card = refs.ui.current.find(item => item.kind === 'tool' && item.call.id === message.toolCallId)
-      if (card?.kind !== 'tool' || card.state === 'running' || card.state === 'confirm') return message
+      const card = toolCards.get(message.toolCallId)
+      if (!card || card.state === 'running' || card.state === 'confirm') return message
       return { ...message, outcome: { state: card.state, summary: card.summary, error: card.error, auto: card.auto } }
     })
-    if (!messages.length && !sessions.some(session => session.id === id)) return Promise.resolve()
+    if (!messages.length && !sessionsRef.current.some(session => session.id === id)) return Promise.resolve()
     const generation = generationRef.current
     const payload = {
       id, messages, title: refs.title.current || titleFrom(messages),
@@ -68,7 +74,7 @@ export function useAssistantSessions(refs: SessionRefs) {
       }
     })
     return queueRef.current
-  }, [refs.activeId, refs.config, refs.messages, refs.title, refs.ui, sessions])
+  }, [refs.activeId, refs.config, refs.messages, refs.title, refs.ui])
 
   const remove = React.useCallback(async (id: string) => {
     deletedRef.current.add(id)

@@ -14,6 +14,17 @@ import {
 import type { MaintenanceDetail, MaintenanceItem, MaintenanceResultStatus, MaintenanceTaskId } from './maintenance-types'
 
 const PAGE_SIZE = 10
+const DETAIL_TABLE_ID = 'maintenance-detail-table'
+const DETAIL_TABLE_COL_ID = 'maintenance-detail'
+const DETAIL_COLS = ['target', 'scope', 'status', 'change', 'reason', 'action'] as const
+const DETAIL_COL_WIDTH: Record<(typeof DETAIL_COLS)[number], string> = {
+  target: 'w-[18%]',
+  scope: 'w-[21%]',
+  status: 'w-[8%]',
+  change: 'w-[13%]',
+  reason: 'w-[30%]',
+  action: 'w-[10%]',
+}
 
 function targetColumnTitle(taskId: MaintenanceTaskId | undefined): string {
   switch (taskId) {
@@ -59,6 +70,14 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
     appliedDefault.current = true
     if (detail.failed) setFilter('failed')
   }, [detail])
+
+  const hasDetail = Boolean(detail)
+  const detailId = detail?.id ?? ''
+  React.useEffect(() => {
+    if (!hasDetail) return
+    const bridge = window as unknown as { wbTableColumns?: { repaint?: (id: string) => void } }
+    bridge.wbTableColumns?.repaint?.(DETAIL_TABLE_COL_ID)
+  }, [hasDetail, detailId])
 
   const taskId = detail?.taskId
   const stalled = !detail || detail.status === 'running' || detail.status === 'interrupted'
@@ -115,27 +134,33 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
               aria-label={targetTitle} className='min-w-[150px] max-w-[260px]' searchPlaceholder={t('搜索名称')}
               options={[{ value: '', label: t('全部项目') }, ...providers.map(([value, label]) => ({ value, label }))]} /> : null}
           </div>
-          <Table containerClassName='maintenance-detail-scroll min-h-0 flex-1' className='maintenance-detail-table'>
+          <Table id={DETAIL_TABLE_ID} containerClassName='maintenance-detail-scroll min-h-0 flex-1' className='maintenance-detail-table table-fixed'>
+            <colgroup>
+              {DETAIL_COLS.map(key => <col key={key} data-col={key} className={DETAIL_COL_WIDTH[key]} />)}
+            </colgroup>
             <TableHeader><TableRow>
-              <TableHead>{targetTitle}</TableHead>
-              <TableHead>{scopeTitle}</TableHead>
-              <TableHead>{t('结果')}</TableHead>
-              <TableHead>{changeColumnTitle(taskId)}</TableHead>
-              <TableHead>{t('原因 / 说明')}</TableHead>
-              <TableHead className='text-right'>{t('操作')}</TableHead>
+              <TableHead data-col='target'><span className='block truncate' title={targetTitle}>{targetTitle}</span></TableHead>
+              <TableHead data-col='scope'><span className='block truncate' title={scopeTitle}>{scopeTitle}</span></TableHead>
+              <TableHead data-col='status'><span className='block truncate' title={t('结果')}>{t('结果')}</span></TableHead>
+              <TableHead data-col='change'><span className='block truncate' title={changeColumnTitle(taskId)}>{changeColumnTitle(taskId)}</span></TableHead>
+              <TableHead data-col='reason'><span className='block truncate' title={t('原因 / 说明')}>{t('原因 / 说明')}</span></TableHead>
+              <TableHead data-col='action' className='text-right'><span className='block truncate' title={t('操作')}>{t('操作')}</span></TableHead>
             </TableRow></TableHeader>
-            <TableBody>{shown.map(item => <TableRow key={item.id}>
-              <TableCell>{item.providerLabel || item.provider || '—'}</TableCell>
-              <TableCell><span title={item.accountId ?? undefined}>{item.accountName || item.accountId || emptyScope}</span></TableCell>
-              <TableCell><ItemStatus status={item.status} /></TableCell>
-              <TableCell>{itemChange(item, detail.taskId)}</TableCell>
-              <TableCell className='maintenance-reason'>{itemMessage(item, detail.taskId)}</TableCell>
-              <TableCell className='text-right'>
-                <Button size='sm' variant='link' className='hover:no-underline' onClick={() => setSelected(item)}>
-                  {item.status === 'failed' ? t('查看原因') : t('查看详情')}
-                </Button>
-              </TableCell>
-            </TableRow>)}{!shown.length ? <TableRow><TableCell colSpan={6}><Empty>{emptyText}</Empty></TableCell></TableRow> : null}</TableBody>
+            <TableBody>{shown.map(item => {
+              const changeText = itemChange(item, detail.taskId)
+              return <TableRow key={item.id}>
+                <TableCell className='whitespace-normal break-words leading-[1.5]'>{item.providerLabel || item.provider || '—'}</TableCell>
+                <TableCell className='whitespace-normal [overflow-wrap:anywhere] leading-[1.5]'><span title={item.accountId ?? undefined}>{item.accountName || item.accountId || emptyScope}</span></TableCell>
+                <TableCell className='overflow-hidden whitespace-nowrap'><ItemStatus status={item.status} /></TableCell>
+                <TableCell className='overflow-hidden text-ellipsis whitespace-nowrap' title={changeText}>{changeText}</TableCell>
+                <TableCell className='maintenance-reason'>{itemMessage(item, detail.taskId)}</TableCell>
+                <TableCell className='overflow-hidden whitespace-nowrap text-right'>
+                  <Button size='sm' variant='link' className='hover:no-underline' onClick={() => setSelected(item)}>
+                    {item.status === 'failed' ? t('查看原因') : t('查看详情')}
+                  </Button>
+                </TableCell>
+              </TableRow>
+            })}{!shown.length ? <TableRow><TableCell colSpan={6}><Empty>{emptyText}</Empty></TableCell></TableRow> : null}</TableBody>
           </Table>
           {detail.metadata ? <div className='maintenance-metadata'>
             <span>{detail.taskId === 'pluginCatalogCheck' ? t('官网社区插件目录') : `${t('模型基础信息')} · models.dev`}</span>

@@ -2,6 +2,7 @@ import { apiCall } from './client'
 import type {
   ActivityRunStatus,
   AutoState,
+  BenefitKind,
   CheckinAccount,
   CheckinCenter,
   CheckinResult,
@@ -27,6 +28,7 @@ import type { PluginTaskRow } from '../../../ui-shared/plugin-task-types'
 export type {
   ActivityRunStatus,
   AutoState,
+  BenefitKind,
   BenefitRedemptionResult,
   CampaignClaimResult,
   CampaignEntry,

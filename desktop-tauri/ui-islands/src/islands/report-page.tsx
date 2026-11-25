@@ -16,8 +16,8 @@ import { RankPanel } from './report/rank-panel'
 import { ActivityPanel } from './report/activity-panel'
 import { CacheWindows, CacheTrendPanel } from './report/cache-panels'
 import { ReportUsageDonuts } from './report/usage-donuts'
+import { applyReportMerge, readMergeRules, saveMergeRules, type MergeRules } from './report/report-merge'
 import { SourceStatsPanel } from './report/source-stats'
-import { ApiKeyUsageDialog } from './report/api-key-detail'
 import { ReportDailyTrend } from './report/daily-trend-panel'
 import { DateRangeFields } from './date-range-fields'
 import { updateCustomRange } from '../../../ui-shared/date-range'
@@ -32,8 +32,8 @@ type IntervalTask = { id?: string; enabled?: boolean; interval?: number; unit?: 
 
 /** 本页用到的壳侧接口（见 bridge.rs 的统计那一段） */
 type StatsBridge = {
-  /** GET /api/stats/summary?range=<档位>[&startDate=&endDate=]（dates 只在自定义区间时给） */
-  getStatsSummary(range: string, dates?: CustomRange): Promise<StatsSummary | null | undefined>
+  /** GET /api/stats/summary?range=<档位>[&startDate=&endDate=&origin=] */
+  getStatsSummary(range: string, dates?: CustomRange, options?: { apiKey?: string; client?: string; origin?: string }): Promise<StatsSummary | null | undefined>
 }
 
 /** 账号行徽章要读的那点账号信息（wbApp 状态里的一条） */
@@ -83,6 +83,12 @@ function errorMessage(error: unknown, depth = 0): string {
 const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(value => ({
   value, label: RANGE_OPTION_LABEL[value],
 }))
+
+const ORIGIN_OPTIONS: readonly SegmentedControlOption<string>[] = [
+  { value: 'all', label: t('全部') },
+  { value: 'gateway', label: t('网关') },
+  { value: 'local_direct', label: t('本机直连') },
+]
 
 /**
  * 各面板头上那枚小问号的说明（原文逐字照抄 index.html 的 data-tip，一条都不能少、
@@ -173,9 +179,11 @@ const EMPTY_DATA: PageData = { summary: null, error: null }
 function ReportPage() {
   const [data, setData] = React.useState<PageData>(EMPTY_DATA)
   const [range, setRange] = React.useState<string>(readRange)
+  const [origin, setOrigin] = React.useState<string>('all')
   /** 自定义区间（起止本地自然日）：只有档位选中「自定义」时随请求发出 */
   const [custom, setCustom] = React.useState<CustomRange>(readCustomRange)
-  const [inspectedKey, setInspectedKey] = React.useState<StatsGroup | null>(null)
+  const [providerMergeRules, setProviderMergeRules] = React.useState<MergeRules>(() => readMergeRules('provider'))
+  const [modelMergeRules, setModelMergeRules] = React.useState<MergeRules>(() => readMergeRules('model'))
   const auto = usePageAutoRefresh('reportAutoRefresh')
   /** 单位口径（中文亿/万 ⇄ 英文 M/k）变了就整页重算：数值一个都没变，变的只是「怎么写成字」，
    *  所以拨一下开关是瞬时的 —— 不必重新拉一次报表 */
@@ -184,6 +192,7 @@ function ReportPage() {
   /** 当前档位：异步回调（loadPanel）必须立刻读到最新值，state 的更新要等下一次渲染，
    *  所以写入时同时落 ref 与 state，读一律走 ref.current */
   const rangeRef = React.useRef(range)
+  const originRef = React.useRef(origin)
   /** 自定义区间同理（见 rangeRef 的说明）：日期一次改一个端，异步回调必须读到配好对的那份 */
   const customRef = React.useRef(custom)
   /**
@@ -224,7 +233,8 @@ function ReportPage() {
     try {
       const api = shared().workbuddyDesktop
       if (!api) throw new Error('后端桥不可用')
-      const payload = await api.getStatsSummary(requested, dates)
+      const originArg = originRef.current !== 'all' ? { origin: originRef.current } : undefined
+      const payload = await api.getStatsSummary(requested, dates, originArg)
       if (token !== seq) return summaryValue
       if (!payload || typeof payload !== 'object') throw new Error('后端未返回报表数据')
       summaryValue = payload
@@ -280,6 +290,14 @@ function ReportPage() {
     try {
       localStorage.setItem(RANGE_KEY, value)
     } catch { /* 存储不可用时只影响下次启动，本次会话照常 */ }
+    void loadPanel()
+  }, [loadPanel])
+
+  const changeOrigin = React.useCallback((next: string): void => {
+    const value = next === 'gateway' || next === 'local_direct' ? next : 'all'
+    if (value === originRef.current) return
+    originRef.current = value
+    setOrigin(value)
     void loadPanel()
   }, [loadPanel])
 
@@ -339,6 +357,14 @@ function ReportPage() {
     return () => { window.clearInterval(timer) }
   }, [auto.enabled, auto.ms, loadPanel])
 
+  const updateProviderMergeRules = React.useCallback((next: MergeRules) => {
+    setProviderMergeRules(saveMergeRules('provider', next))
+  }, [])
+
+  const updateModelMergeRules = React.useCallback((next: MergeRules) => {
+    setModelMergeRules(saveMergeRules('model', next))
+  }, [])
+
   /** 单位口径变了就原地重绘（见 setUnitsTick 的说明） */
   React.useEffect(() => {
     const onChange = () => setUnitsTick(tick => tick + 1)
@@ -346,9 +372,33 @@ function ReportPage() {
     return () => window.removeEventListener('wb-units-changed', onChange)
   }, [])
 
+  /** 同源其他标签页调整了合并规则时自动同步 */
+  React.useEffect(() => {
+    const onStorage = () => {
+      setProviderMergeRules(readMergeRules('provider'))
+      setModelMergeRules(readMergeRules('model'))
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+
   /* ─── 渲染 ─────────────────────────────── */
 
-  const { summary, error } = data
+  const { summary: rawSummary, error } = data
+  const lookupProviderLabel = React.useCallback(
+    (id: string) => shared().wbProviders?.labelOf?.(id),
+    [],
+  )
+  const summary = React.useMemo(
+    () => applyReportMerge(
+      rawSummary,
+      providerMergeRules,
+      modelMergeRules,
+      { unknownProvider: t('未知'), unknownModel: t('未知模型') },
+      lookupProviderLabel,
+    ),
+    [rawSummary, providerMergeRules, modelMergeRules, lookupProviderLabel],
+  )
   // 概览小格的说明文字用后端回显的档位（与这份数据同一轮），后端没回显才退回本地档位
   const rangeKey = summary && RANGES.includes(summary.range ?? '') ? (summary.range as string) : range
 
@@ -356,6 +406,8 @@ function ReportPage() {
   const providerList: StatsGroup[] | null = summary && Array.isArray(summary.providers) ? summary.providers : null
   const accountList: StatsGroup[] | null = summary && Array.isArray(summary.accounts) ? summary.accounts : null
   const modelList: StatsGroup[] | null = summary && Array.isArray(summary.models) ? summary.models : null
+  const rawProviderList: StatsGroup[] | null = rawSummary && Array.isArray(rawSummary.providers) ? rawSummary.providers : null
+  const rawModelList: StatsGroup[] | null = rawSummary && Array.isArray(rawSummary.models) ? rawSummary.models : null
 
   /** 各板块的公共三态：错误态 / 正在加载 / 内容 */
   const errorBlock = error ? placeholder(t('读取报表失败：{error}', { error }), 'empty report-error') : null
@@ -373,6 +425,9 @@ function ReportPage() {
           <div><PageTitle>{t('统计报表')}</PageTitle><PageDescription>{t('查看用量、调用来源与缓存表现')}</PageDescription></div>
           <div className='report-period-control'>
             <div className='report-date-caption' id='report-range-label'>{summary ? `${summary.startDate || '—'} — ${summary.endDate || '—'}` : RANGE_LABEL[rangeKey]} <TipQ text={TIP_RANGE} /></div>
+            {rawSummary?.hasLocalDirect || origin !== 'all' ? (
+              <SegmentedControl options={ORIGIN_OPTIONS} value={origin} onValueChange={changeOrigin} aria-label={t('统计数据来源')} />
+            ) : null}
             <SegmentedControl options={RANGE_OPTIONS} value={range} onValueChange={changeRange} aria-label={t('报表时间范围')} />
             {range === CUSTOM_RANGE ? <DateRangeFields dates={custom} onChange={changeCustomDate} /> : null}
           </div>
@@ -393,18 +448,32 @@ function ReportPage() {
         ) : null}
       </div>
 
-      <ReportUsageDonuts models={modelList} providers={providerList} />
+      <ReportUsageDonuts
+        models={modelList}
+        providers={providerList}
+        rawModels={rawModelList}
+        rawProviders={rawProviderList}
+        modelMergeRules={modelMergeRules}
+        providerMergeRules={providerMergeRules}
+        onModelMergeRulesChange={updateModelMergeRules}
+        onProviderMergeRulesChange={updateProviderMergeRules}
+        lookupProviderLabel={lookupProviderLabel}
+      />
 
       <ActivityPanel summary={summary} loading={loading} />
       <CacheWindows summary={summary} loading={loading} />
       <ReportDailyTrend summary={summary} loading={loading} />
       <CacheTrendPanel summary={summary} loading={loading} colors={modelColors} />
 
-      {summary?.clients ? <SourceStatsPanel kind='clients' rows={summary.clients} summary={summary} /> : null}
-      {summary?.apiKeys ? <SourceStatsPanel kind='apiKeys' rows={summary.apiKeys} summary={summary} onInspect={setInspectedKey} /> : null}
+      {(summary?.clients || summary?.apiKeys) ? (
+        <SourceStatsPanel
+          summary={summary}
+          range={range}
+          dates={range === CUSTOM_RANGE ? custom : undefined}
+          origin={origin}
+        />
+      ) : null}
       </div>
-      {inspectedKey ? <ApiKeyUsageDialog target={inspectedKey} range={range}
-        dates={range === CUSTOM_RANGE ? custom : undefined} onClose={() => setInspectedKey(null)} /> : null}
     </>
   )
 }

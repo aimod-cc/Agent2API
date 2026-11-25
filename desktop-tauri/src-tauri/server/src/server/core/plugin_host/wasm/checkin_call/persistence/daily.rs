@@ -84,17 +84,6 @@ impl PersistenceSlot {
         };
         let (selected, binding) = selected.bind_snapshot(snapshot).map_err(|_| unavailable())?;
         let observation = selected.query_once().await;
-        let (observation, binding) = match observation {
-            ObservationOutcome::ObservedFalse(observed) => {
-                let run = observed.claim_once(binding, call, snapshot).await;
-                collector.submitted = run.submitted;
-                collector.claimed = run.claimed;
-                collector.rollback_pending = run.rollback_pending;
-                collector.rejection = run.rejection;
-                (run.outcome, run.binding)
-            }
-            observation => (observation, binding),
-        };
         match observation {
             ObservationOutcome::OfficialConfirmation(official) => {
                 let fact = binding.consume_official(official, call, snapshot).map_err(|_| unavailable())?;
@@ -102,10 +91,13 @@ impl PersistenceSlot {
                 collector.official = Some(fact);
                 collector.summary = Some(summary);
             }
+            ObservationOutcome::ObservedFalse(_) => {
+                // 豆包工作每日签到已锁定官方桌面端安全校验，接口提交会触发 710010702 并消耗当日领取资格，此处只读观测不提交。
+                collector.failure = Some(doubao_daily::DailyError::DesktopOnly);
+            }
             ObservationOutcome::NotEntered(error) | ObservationOutcome::Unknown(error) => {
                 collector.failure = Some(error);
             }
-            ObservationOutcome::ObservedFalse(_) => {}
         }
         Ok(())
     }

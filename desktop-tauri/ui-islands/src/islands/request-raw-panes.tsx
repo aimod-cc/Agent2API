@@ -50,7 +50,7 @@ export function RequestDebugSwitch() {
 
 export type RawBody = Record<string, unknown>
 export type DebugTraffic = Record<string, unknown>
-export type RawState = null | 'gone' | { body: RawBody; truncated: boolean }
+export type RawState = null | 'gone' | { error: string } | { body: RawBody; truncated: boolean }
 export type DebugState = null | 'gone' | { data: DebugTraffic }
 
 function jsonText(value: unknown): string {
@@ -80,17 +80,39 @@ export function RequestEmpty({ text, loading = false }: { text: string; loading?
   )
 }
 
-export function PreviewPane({ state }: { state: RawState }) {
+export function PreviewPane({ state, localDirect = false }: { state: RawState; localDirect?: boolean }) {
   if (!state) return <RequestEmpty text={t('正在读取…')} loading />
+  if (state !== 'gone' && 'error' in state) {
+    return <RequestEmpty text={state.error} />
+  }
   const body = state === 'gone' ? null : state.body
   const bridge = window as unknown as {
     wbConversationPreview?: { render?: (request: unknown, response: unknown) => string }
   }
   const html = body ? bridge.wbConversationPreview?.render?.(body.requestBody, body.responseBody) || '' : ''
-  if (!html) return <RequestEmpty text={t('无报文原文（未开启「调试模式」，或已被清理）')} />
+  if (!html) {
+    return (
+      <RequestEmpty
+        text={localDirect
+          ? t('未找到可展示的本机对话内容（可能原文件已删除或该版本仅记录了用量）')
+          : t('无报文原文（未开启「调试模式」，或已被清理）')}
+      />
+    )
+  }
+  const sourceFile = typeof body?.sourceFile === 'string' ? body.sourceFile : ''
   return (
     <div>
-      {state !== 'gone' && state.truncated && (
+      {body?.liveLocal === true ? (
+        <div className='mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-[11.5px] text-subtle'>
+          <span>{t('实时读取自本机对话文件（不存入数据库）')}</span>
+          {sourceFile ? (
+            <span className='max-w-[55%] truncate font-mono text-[11px] text-muted-foreground' title={sourceFile}>
+              {sourceFile}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {state !== 'gone' && !('error' in state) && state.truncated && (
         <div className='mb-2 text-[11.5px] text-warning'>{t('旧版本保存的正文可能已截断，无法恢复缺失内容')}</div>
       )}
       <HtmlContent html={html} />

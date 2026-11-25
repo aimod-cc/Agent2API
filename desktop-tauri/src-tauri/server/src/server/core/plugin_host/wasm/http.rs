@@ -133,9 +133,13 @@ pub(super) fn deadline(context: &Context, params: &Value, started: tokio::time::
 
 impl Context {
     pub(super) fn keep_http(&mut self, result: Value, handle: HttpHandle, deadline: HttpDeadline) -> Result<Value, proto::WireError> {
-        deadline.check()?;
         let id = handle.id().to_string();
+        if let Err(error) = deadline.check() {
+            self.lock_http_rejection_for(&id);
+            return Err(error);
+        }
         if self.resources.len() >= 8 || self.resources.contains_key(&id) || self.http_handles.contains_key(&id) {
+            self.lock_http_rejection_for(&id);
             return Err(super::error("单次插件调用连接数超限或请求标识重复"));
         }
         let sse = result["headers"].as_object().into_iter().flatten().any(|(name, value)| {
@@ -154,6 +158,7 @@ impl Context {
         self.http_handles.remove(id);
         self.resources.remove(id);
         self.progress.http_close(id);
+        self.close_http_rejection(id);
     }
 }
 

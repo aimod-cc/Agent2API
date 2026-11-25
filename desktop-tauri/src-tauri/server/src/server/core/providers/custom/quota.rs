@@ -41,6 +41,42 @@ pub(super) fn sources(provider: &str, scheme: Scheme, report: &Value) -> Vec<Val
                 }
             }
         }
+        Scheme::NewApi => {
+            if let Some(sub) = report.get("subscriptionQuota").filter(|value| value.is_object()) {
+                let unit = text(report, "unit");
+                let plan_name = report
+                    .pointer("/subscription/planName")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("订阅额度");
+                sources.push(json!({
+                    "id": "subscription",
+                    "provider": provider,
+                    "label": plan_name,
+                    "planName": plan_name,
+                    "unit": unit,
+                    "remaining": number_of(sub.get("remaining")),
+                    "total": number_of(sub.get("total")),
+                    "used": number_of(sub.get("used")),
+                    "unlimited": sub.get("unlimited").and_then(Value::as_bool).unwrap_or(false),
+                    "resetsAt": sub.get("nextResetAt").and_then(Value::as_i64).unwrap_or(0),
+                }));
+                if let Some(wallet_row) = report
+                    .get("wallets")
+                    .and_then(Value::as_array)
+                    .and_then(|rows| rows.iter().find(|row| text(row, "type") == "wallet"))
+                {
+                    sources.push(json!({
+                        "id": "wallet",
+                        "provider": provider,
+                        "label": "钱包余额",
+                        "unit": unit,
+                        "remaining": number_of(wallet_row.get("balance")),
+                    }));
+                }
+            }
+        }
         _ => {}
     }
     sources

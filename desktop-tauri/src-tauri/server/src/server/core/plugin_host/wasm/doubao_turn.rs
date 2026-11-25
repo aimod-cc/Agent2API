@@ -14,6 +14,7 @@ pub(super) struct Turn {
     client: FrozenHttpClient,
     row: Arc<RowSource>,
     credentials: Arc<Credentials>,
+    runtime_device: Option<String>,
     state: Arc<Mutex<receipt::State>>,
     readers: BTreeMap<String, receipt::Reader>,
     finished: bool,
@@ -46,18 +47,18 @@ impl Context {
             let id = self.account()?.to_string();
             let row = Arc::new(blocking::run(move ||store.prepare_row_source(RowProvider::DoubaoWork,&id)).await.map_err(|_|invalid())?.map_err(|_|invalid())?);
             let credentials = Arc::new(credentials::from_original(&row,crate::server::logging::now_ms()).map_err(|_|invalid())?);
-            credentials.matches_turn_request(&url, &params["headers"]).map_err(|_| invalid())?;
+            let runtime_device = credentials.matches_turn_request(&url, &params["headers"]).map_err(|_| invalid())?;
             let client = FrozenHttpClient::from_path(path).await.map_err(|_|invalid())?;
             call.validate_context(&self.shared,&self.account)?;
             local_gate::check(&row,self.call_deadline).await?;
             let local = body["messages"][0]["local_message_id"].as_str().filter(|value|identifier(value)).ok_or_else(invalid)?.to_string();
             self.guard_http_submission(params)?;
-            self.doubao_turn = Some(Turn {client,row,credentials,state:Arc::new(Mutex::new(receipt::State::new(local))),readers:BTreeMap::new(),finished:false});
+            self.doubao_turn = Some(Turn {client,row,credentials,runtime_device:Some(runtime_device),state:Arc::new(Mutex::new(receipt::State::new(local))),readers:BTreeMap::new(),finished:false});
         } else {
             self.conversation.as_ref().ok_or_else(invalid)?.validate_context(&self.shared,&self.account)?;
             let task = body["task_id"].as_str().filter(|id|identifier(id)).ok_or_else(invalid)?;
             let turn = self.doubao_turn.as_mut().ok_or_else(invalid)?;
-            turn.credentials.matches_turn_request(&url, &params["headers"]).map_err(|_| invalid())?;
+            let _ = turn.credentials.matches_turn_request(&url, &params["headers"]).map_err(|_| invalid())?;
             {
                 let mut state = turn.state.lock().map_err(|_|invalid())?;
                 if !state.tasks.contains_key(task) || !state.opened_tasks.insert(task.to_string()) {return Err(invalid());}
@@ -74,7 +75,6 @@ impl Context {
         }
         let (result,handle) = opened?;
         if result["status"] == 200 && result["headers"]["content-type"].as_str().is_some_and(|value| value.starts_with("text/event-stream")) {
-            self.confirm_stream_started();
             if let Some(turn) = self.doubao_turn.as_mut() {
                 turn.readers.insert(handle.id().to_string(),receipt::Reader::new(task));
             }
@@ -102,21 +102,68 @@ pub(super) async fn invoke(context: &mut Context,method: &str,params: &Value) ->
         if !turn.state.lock().map_err(|_|invalid())?.complete() {return Err(invalid());}
         local_gate::check(&turn.row,context.call_deadline).await?;
         turn.finished=true;
+        spawn_delete_temp_conversation(
+            turn.client.clone(),
+            turn.row.clone(),
+            turn.credentials.clone(),
+            turn.runtime_device.clone(),
+            value.clone(),
+        );
     }
     Ok(value)
+}
+
+fn spawn_delete_temp_conversation(
+    client: FrozenHttpClient,
+    row: Arc<RowSource>,
+    credentials: Arc<Credentials>,
+    runtime_device: Option<String>,
+    receipt: Value,
+) {
+    let Some(cid) = receipt["conversation_id"].as_str().filter(|id| identifier(id)).map(str::to_string) else {
+        return;
+    };
+    let conv_type = receipt["conversation_type"].as_i64().unwrap_or(3);
+    crate::spawn_task(async move {
+        if local_gate::check(&row, tokio::time::Instant::now() + Duration::from_secs(2)).await.is_err() {
+            return;
+        }
+        let work = async {
+            let url = credentials.url_with_device("/im/conversation/batch_del_user_conv", runtime_device.as_deref());
+            let request = client.client().map_err(|_| invalid())?.post(url)
+                .headers(credentials.headers(false).map_err(|_| invalid())?)
+                .json(&json!({
+                    "cmd": 4171,
+                    "uplink_body": {
+                        "batch_delete_user_conversation_uplink_body": {
+                            "conversation_id": [cid],
+                            "delete_all": false,
+                            "conversation_type": conv_type
+                        }
+                    },
+                    "sequence_id": crate::server::core::protocol::random_id("del"),
+                    "channel": 2,
+                    "version": "1"
+                })).build().map_err(|_| invalid())?;
+            let _ = send(&client, request).await;
+            Ok::<(), proto::WireError>(())
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(10), work).await;
+    });
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
         if self.finished {return;}
         let client=self.client.clone();let row=self.row.clone();let credentials=self.credentials.clone();
+        let runtime_device=self.runtime_device.clone();
         let state=self.state.clone();
         crate::spawn_task(async move {
             let receipt=match state.lock(){Ok(state)=>state.view(),Err(_)=>return};
             if receipt["conversation_id"].as_str().is_none_or(|id|id.is_empty()) {return;}
             if local_gate::check(&row,tokio::time::Instant::now()+Duration::from_secs(2)).await.is_err() {return;}
             let stop=async {
-                let request=client.client().map_err(|_|invalid())?.post(credentials.url("/im/message/break_stream_msg"))
+                let request=client.client().map_err(|_|invalid())?.post(credentials.url_with_device("/im/message/break_stream_msg", runtime_device.as_deref()))
                     .headers(credentials.headers(false).map_err(|_|invalid())?)
                     .json(&json!({"cmd":2240,"uplink_body":{"break_stream_msg_uplink_body":{"reply_msg_id":receipt["question_id"],"message_id":"","conversation_id":receipt["conversation_id"],"conversation_type":receipt["conversation_type"],"break_reason":7}},
                         "sequence_id":crate::server::core::protocol::random_id("stop"),"channel":2,"version":"1"})).build().map_err(|_|invalid())?;
@@ -125,9 +172,28 @@ impl Drop for Turn {
                     .filter(|id|id.bytes().all(|byte|byte.is_ascii_digit()) && id.len()>=12 && id.len()<=24).map(str::to_string).collect();
                 for thread in threads {
                     if local_gate::check(&row,tokio::time::Instant::now()+Duration::from_secs(2)).await.is_err(){break;}
-                    let request=client.client().map_err(|_|invalid())?.post(credentials.url("/alice/generaltask/terminate"))
+                    let request=client.client().map_err(|_|invalid())?.post(credentials.url_with_device("/alice/generaltask/terminate", runtime_device.as_deref()))
                         .headers(credentials.headers(false).map_err(|_|invalid())?).body(format!("{{\"thread_id\":{thread}}}")).build().map_err(|_|invalid())?;
                     let _=send(&client,request).await;
+                }
+                if let Some(cid) = receipt["conversation_id"].as_str().filter(|id| identifier(id)) {
+                    let conv_type = receipt["conversation_type"].as_i64().unwrap_or(3);
+                    let request = client.client().map_err(|_| invalid())?.post(credentials.url_with_device("/im/conversation/batch_del_user_conv", runtime_device.as_deref()))
+                        .headers(credentials.headers(false).map_err(|_| invalid())?)
+                        .json(&json!({
+                            "cmd": 4171,
+                            "uplink_body": {
+                                "batch_delete_user_conversation_uplink_body": {
+                                    "conversation_id": [cid],
+                                    "delete_all": false,
+                                    "conversation_type": conv_type
+                                }
+                            },
+                            "sequence_id": crate::server::core::protocol::random_id("del"),
+                            "channel": 2,
+                            "version": "1"
+                        })).build().map_err(|_| invalid())?;
+                    let _ = send(&client, request).await;
                 }
                 Ok::<(),proto::WireError>(())
             };

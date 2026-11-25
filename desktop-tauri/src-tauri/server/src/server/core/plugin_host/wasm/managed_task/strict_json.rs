@@ -16,12 +16,21 @@ pub(super) enum JsonError {
     Invalid,
 }
 
-struct Shape {
-    // 标量不增加深度；根对象/数组算第一层，最多 32 层容器。
-    containers: usize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StrictJsonError {
+    TooLarge,
+    DepthExceeded,
+    DuplicateKey,
+    Invalid,
 }
 
-impl<'de> DeserializeSeed<'de> for Shape {
+struct Shape<'a> {
+    // 标量不增加深度；根对象/数组算第一层，最多 32 层容器。
+    containers: usize,
+    cause: &'a mut Option<StrictJsonError>,
+}
+
+impl<'de> DeserializeSeed<'de> for Shape<'_> {
     type Value = ();
 
     fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
@@ -29,7 +38,7 @@ impl<'de> DeserializeSeed<'de> for Shape {
     }
 }
 
-impl<'de> Visitor<'de> for Shape {
+impl<'de> Visitor<'de> for Shape<'_> {
     type Value = ();
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,11 +69,13 @@ impl<'de> Visitor<'de> for Shape {
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
         if self.containers >= MAX_JSON_DEPTH {
+            *self.cause = Some(StrictJsonError::DepthExceeded);
             return Err(de::Error::custom("JSON depth exceeded"));
         }
         while sequence
             .next_element_seed(Shape {
                 containers: self.containers + 1,
+                cause: &mut *self.cause,
             })?
             .is_some()
         {}
@@ -73,33 +84,52 @@ impl<'de> Visitor<'de> for Shape {
 
     fn visit_map<A: MapAccess<'de>>(self, mut object: A) -> Result<(), A::Error> {
         if self.containers >= MAX_JSON_DEPTH {
+            *self.cause = Some(StrictJsonError::DepthExceeded);
             return Err(de::Error::custom("JSON depth exceeded"));
         }
         let mut keys = BTreeSet::new();
         while let Some(key) = object.next_key::<String>()? {
             if !keys.insert(key) {
+                *self.cause = Some(StrictJsonError::DuplicateKey);
                 return Err(de::Error::custom("duplicate JSON field"));
             }
             object.next_value_seed(Shape {
                 containers: self.containers + 1,
+                cause: &mut *self.cause,
             })?;
         }
         Ok(())
     }
 }
 
-pub(super) fn validate(bytes: &[u8], limit: usize) -> Result<(), JsonError> {
+pub(super) fn validate_detailed(bytes: &[u8], limit: usize) -> Result<(), StrictJsonError> {
     if bytes.len() > limit {
-        return Err(JsonError::TooLarge);
+        return Err(StrictJsonError::TooLarge);
     }
     if std::str::from_utf8(bytes).is_err() {
-        return Err(JsonError::Invalid);
+        return Err(StrictJsonError::Invalid);
     }
+    let mut cause = None;
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    Shape { containers: 0 }
-        .deserialize(&mut deserializer)
-        .map_err(|_| JsonError::Invalid)?;
-    deserializer.end().map_err(|_| JsonError::Invalid)
+    if (Shape {
+        containers: 0,
+        cause: &mut cause,
+    })
+    .deserialize(&mut deserializer)
+    .is_err()
+    {
+        return Err(cause.unwrap_or(StrictJsonError::Invalid));
+    }
+    deserializer.end().map_err(|_| StrictJsonError::Invalid)
+}
+
+pub(super) fn validate(bytes: &[u8], limit: usize) -> Result<(), JsonError> {
+    validate_detailed(bytes, limit).map_err(|error| match error {
+        StrictJsonError::TooLarge => JsonError::TooLarge,
+        StrictJsonError::DepthExceeded
+        | StrictJsonError::DuplicateKey
+        | StrictJsonError::Invalid => JsonError::Invalid,
+    })
 }
 
 /// 只接受 JSON 对象，防止 serde 结构体默认也从数组按字段顺序反序列化。

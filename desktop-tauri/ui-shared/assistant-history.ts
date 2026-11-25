@@ -10,8 +10,8 @@ export type ToolOutcome = {
 }
 
 export type ChatMessage = { id?: string } & (
-  | { role: 'user'; content: string; images?: string[]; files?: AssistantTextFile[] }
-  | { role: 'assistant'; content: string; model?: string; toolCalls?: ToolCall[] }
+  | { role: 'user'; content: string; images?: string[]; files?: AssistantTextFile[]; createdAt?: number }
+  | { role: 'assistant'; content: string; model?: string; toolCalls?: ToolCall[]; createdAt?: number }
   | { role: 'tool'; toolCallId: string; content: string; images?: ImageAsset[]; outcome?: ToolOutcome }
 )
 
@@ -25,6 +25,8 @@ export function parseAssistantMessages(raw: unknown): ChatMessage[] {
     if (!value || typeof value !== 'object') return []
     const row = value as Record<string, unknown>
     const id = text(row.id) || `message-${index}`
+    const rawCreatedAt = Number(row.createdAt)
+    const createdAt = Number.isFinite(rawCreatedAt) && rawCreatedAt > 0 ? rawCreatedAt : undefined
     if (row.role === 'user') {
       const parts = Array.isArray(row.content) ? row.content as Record<string, unknown>[] : []
       const images = parts.length ? parts.flatMap(part => {
@@ -34,7 +36,7 @@ export function parseAssistantMessages(raw: unknown): ChatMessage[] {
       }) : Array.isArray(row.images) ? row.images.filter((url): url is string => typeof url === 'string' && Boolean(url)) : []
       const content = parts.length ? parts.filter(part => part?.type === 'text').map(part => text(part.text)).join('\n') : text(row.content)
       const files = assistantFiles(row.files)
-      return [{ id, role: 'user', content, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) }]
+      return [{ id, role: 'user', content, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}), ...(createdAt ? { createdAt } : {}) }]
     }
     if (row.role === 'assistant') {
       const calls = Array.isArray(row.toolCalls) ? row.toolCalls : Array.isArray(row.tool_calls) ? row.tool_calls : []
@@ -46,7 +48,7 @@ export function parseAssistantMessages(raw: unknown): ChatMessage[] {
         if (!name) return []
         return [{ id: text(call.id), name, arguments: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}) }]
       })
-      return [{ id, role: 'assistant', content: text(row.content), model: text(row.model) || undefined, ...(toolCalls.length ? { toolCalls } : {}) }]
+      return [{ id, role: 'assistant', content: text(row.content), model: text(row.model) || undefined, ...(toolCalls.length ? { toolCalls } : {}), ...(createdAt ? { createdAt } : {}) }]
     }
     if (row.role !== 'tool') return []
     const images = imageAssets(row.images)

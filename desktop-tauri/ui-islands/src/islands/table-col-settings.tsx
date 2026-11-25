@@ -109,8 +109,12 @@ type ColConfigItem = { key: string; visible: boolean; align: Align }
 type ColumnDecl = {
   key: string
   label?: string
-  /** 默认是否显示（不声明即显示）；五张表当前都没用到，作为契约的一部分保留 */
+  /** 列说明（副标题，显示在列名下方，帮助理解隐藏时的行为） */
+  desc?: string
+  /** 默认是否显示（不声明即显示） */
   visible?: boolean
+  /** 是否锁定始终显示（不可在面板关闭） */
+  locked?: boolean
   align?: Align
   /** 上一版的默认对齐：只给 normalize 分辨旧存盘里那一档是「用户挑的」还是「旧默认值」 */
   legacyAlign?: Align
@@ -120,6 +124,8 @@ type ColumnDecl = {
 type TableSpec = {
   id: string
   label?: string
+  /** 列结构版本号：递增时说明列集合发生了结构性合并/重设计，自动迁移到新默认配置 */
+  schemaVersion?: number
   columns: ColumnDecl[]
   mount?: string | (() => Element | null)
   /** 改动落地后的回调：各表拿它重画自己（表头重排 + 数据行） */
@@ -132,8 +138,8 @@ type TableSpec = {
 /** 登记项 = 声明 + 当前配置（配置是运行期被面板改写的那一份，五张表也读它） */
 type TableEntry = TableSpec & { config: ColConfigItem[] }
 
-/** 存盘形态 v2：`{ v, defaults, items }`；v1 是裸数组（见 normalize） */
-type SavedV2 = { v?: number; defaults?: Record<string, string>; items?: unknown[] }
+/** 存盘形态 v2：`{ v, sv, defaults, items }`；v1 是裸数组（见 normalize） */
+type SavedV2 = { v?: number; sv?: number; defaults?: Record<string, string>; items?: unknown[] }
 
 /**
  * window 上由其它脚本 / 其它岛挂载的共享桥。
@@ -161,38 +167,18 @@ const registry = new Map<string, TableEntry>()
 function defaultsOf(spec: TableSpec): ColConfigItem[] {
   return spec.columns.map(column => ({
     key: column.key,
-    visible: column.visible !== false,
+    visible: column.locked ? true : column.visible !== false,
     align: column.align || 'left',
   }))
 }
 
-/**
- * 存盘的配置 → 当前可用的配置。
- *
- * 归一的三条（都是为了让「改过列定义之后旧的本地配置还能用」）：
- *   1. 存盘里已经不存在的 key 丢掉（那一列被删了）；
- *   2. spec 里新增的 key 按默认值插到它在 spec 里的**相对位置**
- *      （紧跟在 spec 中排在它前面、且用户配置里也存在的那一列之后）；
- *   3. align 只认三档，脏值退回该列默认。
- * 顺序以存盘为准 —— 顺序正是用户拖出来的东西。
- *
- * 新增列插到声明位置而不是追加到末尾：列的位置有时是语义的（账号表的代理列声明在
- * 「账号」与「连接数」之间），追加到末尾会让已存过配置的老用户看到的默认位置与预期不符。
- * 插入只发生在「存盘里根本没有这个 key」时，用户拖过的顺序完全不受影响。
- *
- * 对齐要能分辨「存的是用户挑的」与「存的是当时的默认值」：**默认值本身会随版本调整**，
- * 一律以存盘为准的话老用户永远看不到新默认值。判据是「存盘值 ≠ 当时那份默认值」即视为
- * 用户挑过，于是需要知道**当时**的默认值，两种存盘形态各有一个来源：
- *   · v2 `{ v, defaults, items }`：defaults 是上次写盘时各列的默认对齐快照（精确）；
- *   · v1 裸数组（本次改造前的形态，没有快照）：用列上声明的 `legacyAlign`（= 上一版的
- *     默认对齐），它只对那些默认值改过的列有必要。
- * 两种形态都只在「值恰好等于旧默认」时改判成新默认，除这一种歧义（用户主动选了与旧默认
- * 相同的值）外不会覆盖用户的选择；顺序与显隐完全不受这套判定影响。
- */
 function normalize(spec: TableSpec, saved: unknown): ColConfigItem[] {
-  // v1 是裸数组，v2 是 { v, defaults, items }。两种都当「列表 + 可选快照」读
+  // v1 是裸数组，v2 是 { v, sv, defaults, items }。两种都当「列表 + 可选快照」读
   const legacy = Array.isArray(saved)
   const savedObject = !legacy && saved && typeof saved === 'object' ? (saved as SavedV2) : null
+  if (spec.schemaVersion && (savedObject?.sv ?? 1) < spec.schemaVersion) {
+    return defaultsOf(spec)
+  }
   const items: unknown[] = legacy ? (saved as unknown[]) : Array.isArray(savedObject?.items) ? savedObject.items : []
   const snapshot = savedObject?.defaults && typeof savedObject.defaults === 'object' ? savedObject.defaults : null
 
@@ -212,7 +198,7 @@ function normalize(spec: TableSpec, saved: unknown): ColConfigItem[] {
     const stored = isAlign(item.align) ? item.align : null
     out.push({
       key,
-      visible: item.visible !== false,
+      visible: column.locked ? true : item.visible !== false,
       // 存盘值等于旧默认 → 用户没动过这一列 → 让新默认生效
       align: stored && stored !== before ? stored : fallback,
     })
@@ -266,10 +252,9 @@ function persist(spec: TableEntry): void {
   try {
     const defaults: Record<string, string> = {}
     for (const column of spec.columns) defaults[column.key] = column.align || 'left'
-    localStorage.setItem(
-      STORE_PREFIX + spec.id,
-      JSON.stringify({ v: 2, defaults, items: spec.config }),
-    )
+    const payload: SavedV2 = { v: 2, defaults, items: spec.config }
+    if (spec.schemaVersion) payload.sv = spec.schemaVersion
+    localStorage.setItem(STORE_PREFIX + spec.id, JSON.stringify(payload))
   } catch {
     /* 隐私模式等存不了就算了：本次会话内仍然生效 */
   }
@@ -284,9 +269,6 @@ type ColSettingsHandle = {
 }
 
 const configOf = (id: string): ColConfigItem[] | null => registry.get(id)?.config || null
-
-const labelOf = (spec: TableSpec, key: string): string =>
-  spec.columns.find(column => column.key === key)?.label || key
 
 /**
  * 把一份「按渲染顺序排好的列数组」投影成用户配置的顺序与显隐，并带上对齐。
@@ -471,10 +453,8 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
   /** 显隐开关 */
   function setVisible(key: string, next: boolean): void {
     const item = spec.config.find(entry => entry.key === key)
-    if (!item) return
-    // 最后一列不许关：全隐藏之后表格只剩空壳，用户得先想起「是我自己关的」才能从面板里找
-    // 回来。关不掉比关得掉再懊恼一次好。旧实现是静默拒绝（把开关状态改回去），这里同样是
-    // 静默不改 —— 受控开关不回跳，视觉上等价。
+    const decl = spec.columns.find(column => column.key === key)
+    if (!item || decl?.locked) return
     if (!next && spec.config.filter(entry => entry.visible).length <= 1) return
     item.visible = next
     commit(spec)
@@ -579,7 +559,9 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
         {/* 行区滚动：列多时面板不跟着长，最大高度由外层（组件库）的 max-h 兜底 */}
         <div ref={rowsRef} className='min-h-0 flex-1 overflow-y-auto px-3 py-1'>
           {spec.config.map(item => {
-            const label = labelOf(spec, item.key)
+            const decl = spec.columns.find(column => column.key === item.key)
+            const label = decl?.label || item.key
+            const locked = Boolean(decl?.locked)
             const dragging = draggingKey === item.key
             return (
               <div
@@ -588,8 +570,6 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
                 className={cn(
                   ROW_GRID,
                   'rounded-sm py-[5px] hover:bg-nav-hover',
-                  // 被拖动的那一行压淡：让下面的落点更醒目。节点本身不参与重排
-                  //（重排是数据层的事 + repaint，见 startDrag）
                   dragging && 'opacity-50',
                 )}
               >
@@ -600,15 +580,19 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
                 >
                   {GRIP_ICON}
                 </span>
-                <span className='min-w-0 truncate text-xs text-foreground' title={label}>
-                  {label}
-                </span>
+                <div className='min-w-0'>
+                  <div className='truncate text-xs text-foreground' title={label}>{label}</div>
+                  {decl?.desc ? (
+                    <div className='truncate text-[10.5px] text-muted-foreground' title={decl.desc}>{decl.desc}</div>
+                  ) : null}
+                </div>
                 <Switch
                   className='justify-self-center'
                   checked={item.visible}
+                  disabled={locked}
                   onCheckedChange={next => setVisible(item.key, next)}
                   aria-label={t('显示「{label}」列', { label })}
-                  title={item.visible ? t('这一列正在显示') : t('这一列已隐藏')}
+                  title={locked ? t('此列始终显示') : item.visible ? t('这一列正在显示') : t('这一列已隐藏')}
                 />
                 <SegmentedControl
                   className='w-full justify-center'

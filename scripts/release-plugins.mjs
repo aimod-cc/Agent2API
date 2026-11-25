@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * Agent2Providers（普通插件）与 Agent2WebProviders（网页插件）单包 WASM 发版助手。
+ * Agent2Providers（普通插件）、Agent2WebProviders（网页插件）与 Agent2TaskPlugins（定时任务插件）单包发版助手。
  *
  * 解决发版中的四个核心痛点：
- *   1. 自动扫描两个插件仓，识别真正改过源码/共享依赖/跨插件引用的包；
+ *   1. 自动扫描各插件仓，识别真正改过源码/共享依赖/跨插件引用的包；
  *   2. 对比宿主机稳定版能力清单，提示依赖新版主程序宿主能力的插件；
- *   3. 同步更新 pack.json + Cargo.toml，并自动刷新与校验 wasm/Cargo.lock；
+ *   3. 同步更新 pack.json + Cargo.toml（或 script.js 头部声明）并执行编译/格式校验；
  *   4. 推送标签时按「每批最多 3 个」自动分批推送（避开 GitHub 超 3 个标签跳过触发 CI 的限制）。
  *
  * 用法：
- *   node scripts/release-plugins.mjs [status] [--all] [--repo=standard|web|all]
- *   node scripts/release-plugins.mjs bump antigravity=next-beta deepseek-web=0.1.0-beta.4 [--dry-run] [--skip-check]
- *   node scripts/release-plugins.mjs push-tags [--repo=standard|web|all] [--batch-size=3] [--yes]
+ *   node scripts/release-plugins.mjs [status] [--all] [--repo=standard|web|task|all]
+ *   node scripts/release-plugins.mjs bump antigravity=next-beta newapi-login-checkin=1.0.0-beta.1 [--dry-run] [--skip-check]
+ *   node scripts/release-plugins.mjs push-tags [--repo=standard|web|task|all] [--batch-size=3] [--yes]
  *   node scripts/release-plugins.mjs push-tags wasm-antigravity-v0.1.0-beta.3 --yes
- *   node scripts/release-plugins.mjs verify [agent2api-wasm-antigravity ...]
+ *   node scripts/release-plugins.mjs verify [agent2api-wasm-antigravity agent2api-task-newapi-login-checkin ...]
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -26,32 +26,52 @@ import {
   gitAuthHeaderArgs,
   parseCliArgs,
   readCargoPackageVersion,
+  readTextPreserveEol,
   resolveGitProxy,
   resolveTargetVersion,
   runSpawn,
   updateCargoPackageVersion,
   updateJsonTopVersion,
+  writeTextPreserveEol,
 } from './lib/release-utils.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const MAX_GITHUB_TAG_BATCH = 3
+const TASK_HEADER_RE = /\/\*\s*@agent2api-task-plugin\s*([\s\S]*?)\*\//
 
 const PLUGIN_REPOS = [
   {
     key: 'standard',
+    kind: 'wasm',
     label: '普通插件仓（Agent2Providers）',
     dir: path.join(ROOT, 'plugin', 'Agent2Providers'),
     github: 'ProvidersPlugin/Agent2Providers',
     pushUser: 'aimodcc',
     expectedCategory: 'agent',
+    tagPrefix: 'wasm',
+    idPrefix: 'agent2api-wasm',
   },
   {
     key: 'web',
+    kind: 'wasm',
     label: '网页插件仓（Agent2WebProviders）',
     dir: path.join(ROOT, 'plugin', 'Agent2WebProviders'),
     github: 'ProvidersPlugin/Agent2WebProviders',
     pushUser: 'aimodcc',
     expectedCategory: 'web',
+    tagPrefix: 'wasm',
+    idPrefix: 'agent2api-wasm',
+  },
+  {
+    key: 'task',
+    kind: 'task',
+    label: '定时任务插件仓（Agent2TaskPlugins）',
+    dir: path.join(ROOT, 'plugin', 'Agent2TaskPlugins'),
+    github: 'ProvidersPlugin/Agent2TaskPlugins',
+    pushUser: 'aimodcc',
+    expectedCategory: 'scheduled_task',
+    tagPrefix: 'task',
+    idPrefix: 'agent2api-task',
   },
 ]
 
@@ -67,8 +87,37 @@ function gitOut(cwd, args) {
 function repoRepoSelect(repoFlag) {
   if (!repoFlag || repoFlag === 'all') return PLUGIN_REPOS
   const found = PLUGIN_REPOS.filter(r => r.key === repoFlag)
-  if (found.length === 0) throw new Error(`未知插件仓库过滤值：${repoFlag}（可用：standard / web / all）`)
+  if (found.length === 0) throw new Error(`未知插件仓库过滤值：${repoFlag}（可用：standard / web / task / all）`)
   return found
+}
+
+function parseTaskScriptHeader(scriptPath) {
+  if (!existsSync(scriptPath)) return { error: '缺少 script.js' }
+  try {
+    const raw = readFileSync(scriptPath, 'utf8')
+    const m = TASK_HEADER_RE.exec(raw)
+    if (!m) return { error: 'script.js 缺少 @agent2api-task-plugin 头部声明' }
+    return { meta: JSON.parse(m[1]) }
+  } catch (error) {
+    return { error: `解析 script.js 头部失败：${error.message}` }
+  }
+}
+
+function updateTaskScriptHeaderVersion(scriptPath, nextVersion) {
+  const { normalized, eol, trailingNewline } = readTextPreserveEol(scriptPath)
+  const m = TASK_HEADER_RE.exec(normalized)
+  if (!m) throw new Error(`${scriptPath} 缺少 @agent2api-task-plugin 头部声明`)
+  const headerBlock = m[1]
+  const parsed = JSON.parse(headerBlock)
+  const updatedBlock = headerBlock.replace(/^(\s*"version"\s*:\s*)"([^"]+)"(,?\s*)$/m, `$1"${nextVersion}"$3`)
+  if (updatedBlock === headerBlock && parsed.version !== nextVersion) {
+    throw new Error(`未能在 ${scriptPath} 头部声明中定位 "version" 字段`)
+  }
+  if (JSON.parse(updatedBlock).version !== nextVersion) {
+    throw new Error(`更新 ${scriptPath} 头部声明后版本号校验失败`)
+  }
+  const replaced = normalized.slice(0, m.index) + m[0].replace(headerBlock, updatedBlock) + normalized.slice(m.index + m[0].length)
+  writeTextPreserveEol(scriptPath, replaced, eol, trailingNewline)
 }
 
 function extractCapabilitiesFromRust(text) {
@@ -145,6 +194,33 @@ function collectSharedPaths(repoDir, pluginDir) {
 }
 
 function discoverPackages(repo) {
+  if (repo.kind === 'task') {
+    const pluginsDir = path.join(repo.dir, 'plugins')
+    if (!existsSync(pluginsDir)) return []
+    const list = []
+    for (const entry of readdirSync(pluginsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const pluginDir = path.join(pluginsDir, entry.name)
+      const packPath = path.join(pluginDir, 'pack.json')
+      const scriptPath = path.join(pluginDir, 'script.js')
+      if (!existsSync(packPath)) continue
+      const pack = JSON.parse(readFileSync(packPath, 'utf8'))
+      const header = parseTaskScriptHeader(scriptPath)
+      list.push({
+        id: entry.name,
+        repo,
+        dir: pluginDir,
+        packPath,
+        scriptPath,
+        pack,
+        scriptMeta: header.meta || null,
+        scriptError: header.error || '',
+        version: pack.version,
+      })
+    }
+    return list.sort((a, b) => a.id.localeCompare(b.id))
+  }
+
   const wasmDir = path.join(repo.dir, 'wasm')
   if (!existsSync(wasmDir)) return []
   const list = []
@@ -188,9 +264,9 @@ function latestBatchTag(repoDir) {
   return tags[tags.length - 1] || ''
 }
 
-function resolveBaselineTag(repoDir, pluginId, fallbackBatchTag) {
-  const prefix = `wasm-${pluginId}-v`
-  const raw = gitOut(repoDir, ['tag', '--list', `${prefix}*`])
+function resolveBaselineTag(repo, pluginId, fallbackBatchTag) {
+  const prefix = `${repo.tagPrefix}-${pluginId}-v`
+  const raw = gitOut(repo.dir, ['tag', '--list', `${prefix}*`])
   const tags = (raw ? raw.split(/\r?\n/) : [])
     .map(s => s.trim())
     .filter(s => s.startsWith(prefix))
@@ -198,9 +274,9 @@ function resolveBaselineTag(repoDir, pluginId, fallbackBatchTag) {
   if (tags.length > 0) {
     return { tag: tags[tags.length - 1], kind: 'single' }
   }
-  if (fallbackBatchTag) {
+  if (repo.kind === 'wasm' && fallbackBatchTag) {
     const existsInBatch = runSpawn('git', ['cat-file', '-e', `${fallbackBatchTag}:wasm/${pluginId}/pack.json`], {
-      cwd: repoDir,
+      cwd: repo.dir,
       capture: true,
     })
     if (existsInBatch.status === 0) {
@@ -213,20 +289,36 @@ function resolveBaselineTag(repoDir, pluginId, fallbackBatchTag) {
 function inspectPackageState(pkg, hostCtx, stdRepoDir, fallbackBatchTag) {
   const { id, repo } = pkg
   const issues = []
-  if (pkg.pack.id !== `agent2api-wasm-${id}`) issues.push(`pack.json id=${pkg.pack.id}`)
-  if (pkg.pack.version !== pkg.cargoVer) issues.push(`版本不一致（pack=${pkg.pack.version}, Cargo=${pkg.cargoVer}）`)
-  const cat = pkg.pack.provider_category || 'agent'
-  if (cat !== repo.expectedCategory) issues.push(`provider_category=${cat} 与仓库不符`)
-  for (const reqCap of pkg.requires) {
-    if (hostCtx.unreleasedCaps.has(reqCap)) {
-      issues.push(`依赖主程序未发布的新宿主能力 ${reqCap}（${hostCtx.latestTag || '上版'} 尚不支持，需随新版主程序一并发）`)
-    } else if (hostCtx.recentCaps.has(reqCap)) {
-      issues.push(`使用近期新增宿主能力 ${reqCap}（${hostCtx.latestTag} 起支持，旧版客户端无法加载）`)
+  const expectedId = `${repo.idPrefix}-${id}`
+  if (pkg.pack.id !== expectedId) issues.push(`pack.json id=${pkg.pack.id}`)
+
+  let ownRel = `wasm/${id}`
+  if (repo.kind === 'task') {
+    ownRel = `plugins/${id}`
+    if (pkg.pack.category !== repo.expectedCategory) issues.push(`category=${pkg.pack.category} 与仓库不符`)
+    if (pkg.pack.target !== 'task-script') issues.push(`target=${pkg.pack.target} 应为 task-script`)
+    if (pkg.pack.entry !== 'script.js') issues.push(`entry=${pkg.pack.entry} 应为 script.js`)
+    if (pkg.scriptError) issues.push(pkg.scriptError)
+    else {
+      if (pkg.scriptMeta?.id !== expectedId) issues.push(`script.js id=${pkg.scriptMeta?.id}`)
+      if (pkg.scriptMeta?.version !== pkg.version) {
+        issues.push(`版本不一致（pack=${pkg.version}, script=${pkg.scriptMeta?.version}）`)
+      }
+    }
+  } else {
+    if (pkg.pack.version !== pkg.cargoVer) issues.push(`版本不一致（pack=${pkg.pack.version}, Cargo=${pkg.cargoVer}）`)
+    const cat = pkg.pack.provider_category || 'agent'
+    if (cat !== repo.expectedCategory) issues.push(`provider_category=${cat} 与仓库不符`)
+    for (const reqCap of pkg.requires) {
+      if (hostCtx.unreleasedCaps.has(reqCap)) {
+        issues.push(`依赖主程序未发布的新宿主能力 ${reqCap}（${hostCtx.latestTag || '上版'} 尚不支持，需随新版主程序一并发）`)
+      } else if (hostCtx.recentCaps.has(reqCap)) {
+        issues.push(`使用近期新增宿主能力 ${reqCap}（${hostCtx.latestTag} 起支持，旧版客户端无法加载）`)
+      }
     }
   }
 
-  const baseline = resolveBaselineTag(repo.dir, id, fallbackBatchTag)
-  const ownRel = `wasm/${id}`
+  const baseline = resolveBaselineTag(repo, id, fallbackBatchTag)
   const dirtyLines = gitOut(repo.dir, ['status', '--porcelain', '--', ownRel])
     .split(/\r?\n/)
     .filter(Boolean)
@@ -238,15 +330,17 @@ function inspectPackageState(pkg, hostCtx, stdRepoDir, fallbackBatchTag) {
   if (baseline.tag) {
     const rawDiff = gitOut(repo.dir, ['diff', '--name-only', `${baseline.tag}..HEAD`, '--', ownRel])
     ownChanged = rawDiff ? rawDiff.split(/\r?\n/).filter(Boolean) : []
-    const tagTime = Number(gitOut(repo.dir, ['log', '-1', '--format=%ct', baseline.tag]) || 0)
-    for (const ref of pkg.sharedRefs) {
-      if (ref.crossRepo) {
-        if (tagTime > 0 && stdRepoDir) {
-          sdkChanged = Boolean(gitOut(stdRepoDir, ['log', `--after=${tagTime}`, '--oneline', '-n', '1', '--', 'wasm/sdk']))
+    if (repo.kind === 'wasm') {
+      const tagTime = Number(gitOut(repo.dir, ['log', '-1', '--format=%ct', baseline.tag]) || 0)
+      for (const ref of pkg.sharedRefs) {
+        if (ref.crossRepo) {
+          if (tagTime > 0 && stdRepoDir) {
+            sdkChanged = Boolean(gitOut(stdRepoDir, ['log', `--after=${tagTime}`, '--oneline', '-n', '1', '--', 'wasm/sdk']))
+          }
+        } else {
+          const hit = gitOut(repo.dir, ['diff', '--name-only', `${baseline.tag}..HEAD`, '--', ref.path])
+          if (hit) sharedLocalChanged.push(ref.path)
         }
-      } else {
-        const hit = gitOut(repo.dir, ['diff', '--name-only', `${baseline.tag}..HEAD`, '--', ref.path])
-        if (hit) sharedLocalChanged.push(ref.path)
       }
     }
   }
@@ -267,7 +361,7 @@ function runStatus(flags) {
     const branch = gitOut(repo.dir, ['rev-parse', '--abbrev-ref', 'HEAD'])
     const dirtyAll = gitOut(repo.dir, ['status', '--porcelain']).split(/\r?\n/).filter(Boolean)
     const ahead = Number(gitOut(repo.dir, ['rev-list', '--count', `origin/${branch}..HEAD`]) || 0)
-    const batchFallback = latestBatchTag(repo.dir)
+    const batchFallback = repo.kind === 'wasm' ? latestBatchTag(repo.dir) : ''
     console.log(`\n=== ${repo.label}（分支：${branch}，领先远端 ${ahead} 提交，未提交项 ${dirtyAll.length}）===`)
     if (repo.key === 'web' && stdAhead > 0) {
       console.log(`⚠️  注意：普通插件仓（${stdBranch}）尚有 ${stdAhead} 个本地提交未推到远端；网页插件依赖其 SDK 时请先推普通插件仓！`)
@@ -291,7 +385,7 @@ function runStatus(flags) {
       if (st.issues.length > 0) notes.push(`⚠️ ${st.issues.join('；')}`)
       const baseLabel = st.baseline.kind === 'batch' ? `批量 ${st.baseline.tag}` : (st.baseline.tag || '无')
       const statusText = notes.length > 0 ? notes.join(' | ') : '✓ 自上次发版 tag 后无改动'
-      console.log(`  - ${pkg.id.padEnd(16, ' ')} v${pkg.version.padEnd(13, ' ')} (基准: ${baseLabel}) → ${statusText}`)
+      console.log(`  - ${pkg.id.padEnd(22, ' ')} v${pkg.version.padEnd(13, ' ')} (基准: ${baseLabel}) → ${statusText}`)
     }
     if (!showAll && cleanCount > 0) {
       console.log(`  （另有 ${cleanCount} 个插件自上次发版 tag 后无改动，加 --all 可全部列出）`)
@@ -302,12 +396,17 @@ function runStatus(flags) {
 function runBump(positional, flags) {
   const specs = positional.slice(1)
   if (specs.length === 0) {
-    throw new Error('请指定至少一个插件版本目标，例如：antigravity=next-beta 或 deepseek-web=0.1.0-beta.4')
+    throw new Error('请指定至少一个插件版本目标，例如：antigravity=next-beta 或 newapi-login-checkin=1.0.0-beta.1')
   }
   const repos = repoRepoSelect(flags.get('repo'))
   const byId = new Map()
   for (const repo of repos) {
-    for (const pkg of discoverPackages(repo)) byId.set(pkg.id, pkg)
+    for (const pkg of discoverPackages(repo)) {
+      if (byId.has(pkg.id)) {
+        throw new Error(`发现同名插件目录 ${pkg.id}（请通过 --repo=${repo.key} 明确指定仓库）`)
+      }
+      byId.set(pkg.id, pkg)
+    }
   }
 
   const dryRun = Boolean(flags.get('dry-run'))
@@ -321,17 +420,28 @@ function runBump(positional, flags) {
     if (!pkg) throw new Error(`找不到插件：${id}`)
     const nextVer = resolveTargetVersion(pkg.version, spec)
     if (dryRun) {
-      console.log(`  [预演] ${pkg.repo.key}/${id}：${pkg.version} → ${nextVer}（tag: wasm-${id}-v${nextVer}）`)
+      console.log(`  [预演] ${pkg.repo.key}/${id}：${pkg.version} → ${nextVer}（tag: ${pkg.repo.tagPrefix}-${id}-v${nextVer}）`)
       continue
     }
     updateJsonTopVersion(pkg.packPath, nextVer)
-    updateCargoPackageVersion(pkg.cargoPath, nextVer)
+    if (pkg.repo.kind === 'task') {
+      updateTaskScriptHeaderVersion(pkg.scriptPath, nextVer)
+      console.log(`  ✓ ${pkg.repo.key}/${id}：${pkg.version} → ${nextVer}（同步改好 pack.json 与 script.js）`)
+    } else {
+      updateCargoPackageVersion(pkg.cargoPath, nextVer)
+      console.log(`  ✓ ${pkg.repo.key}/${id}：${pkg.version} → ${nextVer}（同步改好 pack.json 与 Cargo.toml）`)
+    }
     touchedRepos.add(pkg.repo)
-    console.log(`  ✓ ${pkg.repo.key}/${id}：${pkg.version} → ${nextVer}（同步改好 pack.json 与 Cargo.toml）`)
   }
 
   if (dryRun || flags.has('skip-check')) return
   for (const repo of touchedRepos) {
+    if (repo.kind === 'task') {
+      console.log(`\n→ 在 ${repo.label} 校验定时任务插件格式与语法…`)
+      const checkRes = runSpawn('node', ['scripts/pack.mjs', '--check-only'], { cwd: repo.dir })
+      if (checkRes.status !== 0) throw new Error(`${repo.label} pack.mjs 校验失败`)
+      continue
+    }
     console.log(`\n→ 在 ${repo.label} 刷新 wasm/Cargo.lock 并校验编译…`)
     const refresh = runSpawn(
       'cargo',
@@ -346,7 +456,7 @@ function runBump(positional, flags) {
     )
     if (locked.status !== 0) throw new Error(`${repo.label} --locked 校验失败`)
   }
-  console.log('\n✅ 插件版本号与 Cargo.lock 更新完毕！请在各自目录提交更新日志、打 tag 并使用 push-tags 分批推送。')
+  console.log('\n✅ 插件版本号与校验更新完毕！请在各自目录提交更新日志、打 tag 并使用 push-tags 分批推送。')
 }
 
 function remoteTagsSet(repo, authEnv) {
@@ -355,7 +465,7 @@ function remoteTagsSet(repo, authEnv) {
     'ls-remote',
     '--tags',
     `https://github.com/${repo.github}.git`,
-    'refs/tags/wasm-*-v*',
+    `refs/tags/${repo.tagPrefix}-*-v*`,
   ]
   const res = runSpawn('git', args, { cwd: repo.dir, env: authEnv, capture: true })
   if (res.status !== 0) throw new Error(`读取 ${repo.github} 远端标签失败：${res.stderr}`)
@@ -378,18 +488,18 @@ function runPushTags(positional, flags) {
 
   for (const repo of repos) {
     const branch = gitOut(repo.dir, ['rev-parse', '--abbrev-ref', 'HEAD'])
-    const localWasmTags = gitOut(repo.dir, ['tag', '--merged', 'HEAD', '--list', 'wasm-*-v*'])
+    const localPluginTags = gitOut(repo.dir, ['tag', '--merged', 'HEAD', '--list', `${repo.tagPrefix}-*-v*`])
       .split(/\r?\n/)
       .map(s => s.trim())
       .filter(Boolean)
 
     let targetTags
     if (explicitTags.length > 0) {
-      const localSet = new Set(localWasmTags)
+      const localSet = new Set(localPluginTags)
       targetTags = explicitTags.filter(t => localSet.has(t))
     } else {
       const remoteSet = remoteTagsSet(repo, authEnv)
-      targetTags = localWasmTags.filter(t => !remoteSet.has(t))
+      targetTags = localPluginTags.filter(t => !remoteSet.has(t))
     }
 
     const aheadCount = Number(gitOut(repo.dir, ['rev-list', '--count', `origin/${branch}..HEAD`]) || 0)
@@ -455,9 +565,16 @@ function runVerify(positional) {
   }
 
   const freshById = new Map((freshCat.plugins || []).map(p => [p.id, p]))
+  const resolveVerifyId = rawTarget => {
+    if (rawTarget.startsWith('agent2api-wasm-') || rawTarget.startsWith('agent2api-task-')) return rawTarget
+    if (freshById.has(`agent2api-wasm-${rawTarget}`)) return `agent2api-wasm-${rawTarget}`
+    if (freshById.has(`agent2api-task-${rawTarget}`)) return `agent2api-task-${rawTarget}`
+    return `agent2api-wasm-${rawTarget}`
+  }
+
   const targets = filters.length > 0 ? filters : [...freshById.keys()].slice(0, 12)
   for (const rawTarget of targets) {
-    const id = rawTarget.startsWith('agent2api-wasm-') ? rawTarget : `agent2api-wasm-${rawTarget}`
+    const id = resolveVerifyId(rawTarget)
     const plugin = freshById.get(id)
     if (!plugin) {
       console.log(`  - ${id}：⚠️ 未出现在目录中`)

@@ -1,9 +1,10 @@
+import * as React from 'react'
 import { Badge, Button, Progress, Switch } from '@ui'
 import { errorMessage, formatSize, formatTime, pluginDescription, pluginName } from './plugins-shared'
 import { summarizeNetworkError } from '../../../ui-shared/updates'
 import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
-import { PluginInstallButton, PluginSettingsButton, PluginStoreCard, type PluginCardSelection } from '../../../ui-shared/plugins-store'
+import { PluginInstallButton, PluginSettingsButton, PluginStoreItem, type PluginCardSelection, type PluginViewMode } from '../../../ui-shared/plugins-store'
 import { requestPluginDiagnostics, usePluginLoadStatus } from '../../../ui-shared/plugin-startup-view'
 import { pluginFailed } from '../../../ui-shared/plugin-startup'
 
@@ -69,34 +70,58 @@ function BetaBadge() {
   return <Badge variant='warning' shape='tag' className='font-normal'>{t('beta 版')}</Badge>
 }
 
-export function StorePluginCard({ item, target, operation, disabled, selection, onInstall, onNotes, onDetails }: {
+export const StorePluginCard = React.memo(function StorePluginCard({
+  item, target: _target, operation, disabled, selection, selecting, selected, selectionDisabled, selectionKey,
+  onToggleSelect, viewMode = 'cards', onInstall, onNotes, onDetails,
+}: {
   item: StorePlugin
   target: string
   operation?: PluginOperation
   disabled: boolean
   selection?: PluginCardSelection
-  onInstall: () => void
-  onNotes: () => void
-  onDetails: () => void
+  selecting?: boolean
+  selected?: boolean
+  selectionDisabled?: boolean
+  selectionKey?: string
+  onToggleSelect?: (key: string, checked: boolean) => void
+  viewMode?: PluginViewMode
+  onInstall: (id: string) => void
+  onNotes: (item: StorePlugin) => void
+  onDetails: (item: StorePlugin) => void
 }) {
   const platform = item.platforms.find(platform => platform.target === 'wasm32-unknown-unknown')
   const installable = Boolean(item.version && platform && !item.error)
-  return <PluginStoreCard t={t} name={pluginName(item.id, item.name)} description={pluginDescription(item.id, item.description)}
+  const resolvedSelection = React.useMemo<PluginCardSelection | undefined>(() => {
+    if (selection) return selection
+    if (!selecting || !selectionKey || !onToggleSelect) return undefined
+    return {
+      checked: Boolean(selected),
+      disabled: selectionDisabled,
+      onChange: checked => onToggleSelect(selectionKey, checked),
+    }
+  }, [selection, selecting, selectionKey, selected, selectionDisabled, onToggleSelect])
+  const handleInstall = React.useCallback(() => onInstall(item.id), [onInstall, item.id])
+  const handleNotes = React.useCallback(() => onNotes(item), [onNotes, item])
+  const handleDetails = React.useCallback(() => onDetails(item), [onDetails, item])
+  return <PluginStoreItem viewMode={viewMode} t={t} name={pluginName(item.id, item.name)} description={pluginDescription(item.id, item.description)}
     version={item.version} icon={item.icon} artwork={item.id === 'agent2api-web-providers' ? 'web' : 'providers'}
-    status='missing' selection={selection} onDetails={onDetails}
+    status='missing' selection={resolvedSelection} onDetails={handleDetails}
     badges={<>{item.prerelease ? <BetaBadge /> : null}
       {!item.version ? <Badge variant='outline' shape='tag'>{t('暂未发布')}</Badge> : null}</>}
-    actions={<PluginInstallButton t={t} disabled={disabled || operation?.active === true || !installable} onClick={onInstall} />}
-    footerAction={item.version ? <Button variant='link' size='xs' onClick={onNotes}>{t('更新日志')}</Button> : null}
+    actions={<PluginInstallButton size={viewMode === 'list' ? 'xs' : 'sm'} t={t} disabled={disabled || operation?.active === true || !installable} onClick={handleInstall} />}
+    footerAction={item.version ? <Button variant='link' size='xs' onClick={handleNotes}>{t('更新日志')}</Button> : null}
     feedback={<>
       {item.version && !platform ? <p className='m-0 text-[12px] text-warning'>{t('当前平台暂无包')}</p> : null}
       {item.error ? <div className='text-[12px] text-destructive'>{summarizeNetworkError(item.reason, t).summary}</div> : null}
       {operation?.error ? <p className='m-0 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
       {operation?.active ? <OperationProgress operation={operation} /> : null}
     </>} />
-}
+})
 
-export function InstalledPluginCard({ pack, store, host, update, operation, disabled, selection, onEnabled, onSettings, onDetails }: {
+export const InstalledPluginCard = React.memo(function InstalledPluginCard({
+  pack, store, host, update, operation, disabled, selection, selecting, selected, selectionDisabled, selectionKey,
+  onToggleSelect, viewMode = 'cards', onEnabled, onSettings, onDetails,
+}: {
   pack: PackSummary
   store?: StorePlugin
   host: HostState
@@ -104,9 +129,15 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
   operation?: PluginOperation
   disabled: boolean
   selection?: PluginCardSelection
-  onEnabled: (enabled: boolean) => void
-  onSettings: () => void
-  onDetails: () => void
+  selecting?: boolean
+  selected?: boolean
+  selectionDisabled?: boolean
+  selectionKey?: string
+  onToggleSelect?: (key: string, checked: boolean) => void
+  viewMode?: PluginViewMode
+  onEnabled: (id: string, enabled: boolean) => void
+  onSettings: (id: string) => void
+  onDetails: (id: string) => void
 }) {
   const startup = usePluginLoadStatus(pack.id, pack.startup)
   const packHost = pack.host === undefined ? host : pack.host
@@ -115,10 +146,22 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
   const name = pluginName(pack.id, store?.name || pack.name)
   const singleOverridden = !legacy && pack.providers.length === 1 && Boolean(pack.providers[0]?.overriddenBy)
   const multiProvider = pack.providers.length > 1
-  return <PluginStoreCard t={t} name={name} description={pluginDescription(pack.id, store?.description || pack.description)}
+  const resolvedSelection = React.useMemo<PluginCardSelection | undefined>(() => {
+    if (selection) return selection
+    if (!selecting || !selectionKey || !onToggleSelect) return undefined
+    return {
+      checked: Boolean(selected),
+      disabled: selectionDisabled,
+      onChange: checked => onToggleSelect(selectionKey, checked),
+    }
+  }, [selection, selecting, selectionKey, selected, selectionDisabled, onToggleSelect])
+  const handleEnabled = React.useCallback((enabled: boolean) => onEnabled(pack.id, enabled), [onEnabled, pack.id])
+  const handleSettings = React.useCallback(() => onSettings(pack.id), [onSettings, pack.id])
+  const handleDetails = React.useCallback(() => onDetails(pack.id), [onDetails, pack.id])
+  return <PluginStoreItem viewMode={viewMode} t={t} name={name} description={pluginDescription(pack.id, store?.description || pack.description)}
     version={pack.version} icon={pack.icon || store?.icon} artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'}
-    status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'} startup={startup} selection={selection}
-    onDetails={onDetails}
+    status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'} startup={startup} selection={resolvedSelection}
+    onDetails={handleDetails}
     footerAction={pack.enabled && (pluginFailed(startup) || startup?.phase === 'blocked' || (!startup && packHost?.lastError))
       ? <Button variant='link' size='xs' onClick={() => requestPluginDiagnostics(pack.id)}>{t('加载诊断')}</Button> : null}
     providerCount={multiProvider ? pack.providers.length : undefined}
@@ -132,14 +175,14 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
       {!pack.entryPresent ? <Badge variant='destructive' shape='tag'>{t('文件缺失')}</Badge> : null}
     </>}
     actions={<>
-      <PluginSettingsButton t={t} name={name} onClick={onSettings} />
-      <Switch checked={!legacy && pack.enabled} disabled={disabled || Boolean(pack.unavailableReason)} aria-label={`${t('启用')} ${name}`} onCheckedChange={onEnabled} />
+      <PluginSettingsButton t={t} name={name} onClick={handleSettings} />
+      <Switch checked={!legacy && pack.enabled} disabled={disabled || Boolean(pack.unavailableReason)} aria-label={`${t('启用')} ${name}`} onCheckedChange={handleEnabled} />
     </>}
     feedback={<>
       {pack.unavailableReason ? <p className='m-0 text-[12px] leading-relaxed text-muted-foreground'>{t(pack.unavailableReason)}</p> : null}
       {pack.updateRequired ? <p className='m-0 text-[12px] leading-relaxed text-destructive'>
         {pack.compatibilityError || t('插件与当前网关的公共接口不兼容，暂未加载。')}
-        <Button variant='link' size='xs' onClick={onSettings}>{t('查看详情')}</Button>
+        <Button variant='link' size='xs' onClick={handleSettings}>{t('查看详情')}</Button>
       </p> : null}
       {update?.error && !update.catalogError && !pack.updateRequired ? <div className='text-[12px] text-destructive'>{summarizeNetworkError(update.reason, t).summary}</div> : null}
       {operation?.error ? <p className='m-0 break-words text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
@@ -148,4 +191,4 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
       {operation?.hostError ? <p className='m-0 break-words text-[12px] text-warning'>{operation.hostError}</p> : null}
       {operation?.active ? <OperationProgress operation={operation} /> : null}
     </>} />
-}
+})

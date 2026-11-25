@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 
@@ -40,15 +40,22 @@ pub async fn export_account_files(app: AppHandle, selection: Value) -> Result<Va
     let target = if group {
         app.dialog()
             .file()
-            .set_title("导出本组账号：选择保存文件夹")
+            .set_title(crate::native_ui::text(
+                crate::native_ui::TextKey::ExportAccountGroup,
+            ))
             .blocking_pick_folder()
     } else {
         app.dialog()
             .file()
-            .set_title("导出账号")
+            .set_title(crate::native_ui::text(
+                crate::native_ui::TextKey::ExportAccounts,
+            ))
             .set_file_name(&data.files[0].file_name)
             .add_filter("JSON", &["json"])
-            .add_filter("全部文件", &["*"])
+            .add_filter(
+                crate::native_ui::text(crate::native_ui::TextKey::AllFiles),
+                &["*"],
+            )
             .blocking_save_file()
     };
     let Some(target) = target else {

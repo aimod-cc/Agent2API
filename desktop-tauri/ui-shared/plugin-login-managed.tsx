@@ -1,6 +1,8 @@
 import * as React from 'react'
 import { Alert, Button, Input, Label, Spinner } from '@ui'
 import type { LoginRequest } from './plugin-login-interaction'
+import { useLoginNoAutoOpen } from './login-browser-prefs'
+import { PluginLoginExternalLink } from './plugin-login-external-link'
 
 export type ManagedInteraction = {
   type: 'managed'
@@ -240,6 +242,8 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
 }) {
   const [busy, setBusy] = React.useState('')
   const [opening, setOpening] = React.useState(false)
+  const [noAutoOpen] = useLoginNoAutoOpen()
+  const [externalOpened, setExternalOpened] = React.useState<boolean | undefined>(undefined)
   const [attempted, setAttempted] = React.useState(attemptedBefore)
   const [expired, setExpired] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -256,8 +260,8 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   const sourceGeneration = React.useRef(managedLoginSourceGeneration())
   const alive = React.useRef(true)
   const used = React.useRef(attemptedBefore)
-  const latest = React.useRef({ step, deadline, scope, request, refresh, accept, onSubmitting, openExternal, openEmbedded })
-  latest.current = { step, deadline, scope, request, refresh, accept, onSubmitting, openExternal, openEmbedded }
+  const latest = React.useRef({ step, deadline, scope, request, refresh, accept, onSubmitting, openExternal, openEmbedded, noAutoOpen })
+  latest.current = { step, deadline, scope, request, refresh, accept, onSubmitting, openExternal, openEmbedded, noAutoOpen }
   const current = () => alive.current && sourceGeneration.current === managedLoginSourceGeneration()
     && latest.current.scope.current() && performance.now() < latest.current.deadline
   const scopeKey = scope.key
@@ -314,6 +318,11 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
     browserOpened.current = true
     markBrowserOpened?.()
+    if (step.browser.browserMode === 'external' && latest.current.noAutoOpen) {
+      setExternalOpened(false)
+      setNotice(t('已生成授权链接（未自动打开浏览器），请复制链接到目标浏览器完成登录。'))
+      return
+    }
     void open(true)
   }, [scopeKey, stepKey, step.status, scopeAlive, busy, expired, callbackSent])
 
@@ -426,15 +435,19 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       if (step.browser.browserMode === 'embedded') {
         if (!latest.current.openEmbedded) throw new Error('embedded_login_unavailable')
         await latest.current.openEmbedded(step.flow, step.id)
-      } else { await latest.current.openExternal(step.browser.url) }
+      } else {
+        await latest.current.openExternal(step.browser.url)
+        if (current()) setExternalOpened(true)
+      }
       if (!current()) return
       setNotice(step.browser.browserMode === 'embedded'
         ? t('已打开官方授权窗口，请在弹出的窗口中完成登录；如果未看到窗口，可点击下方按钮重新打开。')
-        : t('已打开系统浏览器授权页，请在浏览器中完成登录；如果页面未切换到前台，可切到浏览器查看或点击下方按钮重新打开。'))
+        : t('已打开系统浏览器授权页，请在浏览器中完成登录；如果页面未切换到前台，可切到浏览器查看或复制上方链接。'))
     }
     catch {
       if (!current()) return
-      if (auto) setAutoOpenNotice(t('未能自动打开官方授权页，请点击下方按钮手动打开。'))
+      if (step.browser.browserMode === 'external') setExternalOpened(false)
+      if (auto) setAutoOpenNotice(t('未能自动打开官方授权页，请复制上方链接或手动打开。'))
       else setError(t('打开授权页失败，请刷新当前步骤后重试。'))
     } finally {
       if (alive.current) setOpening(false)
@@ -454,9 +467,22 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
     </Button> : null}
     {step.browser ? <>
       {autoOpenNotice ? <p role='status' className='text-xs text-muted-foreground'>{autoOpenNotice}</p> : null}
-      <Button variant='outline' disabled={disabled || callbackSent} onClick={() => void open()}>
-        {opening ? <Spinner /> : null}{autoOpenNotice ? t('打开官方授权页') : t('重新打开官方授权页')}
-      </Button>
+      {step.browser.browserMode === 'external' ? (
+        <PluginLoginExternalLink
+          id={`managed-auth-url-${step.id}`}
+          url={step.browser.url}
+          browserOpened={externalOpened}
+          opening={opening || disabled || callbackSent}
+          showNoAutoOpen={false}
+          onOpenExternal={disabled || callbackSent ? undefined : () => void open(false)}
+          onCopied={ok => setNotice(ok ? t('授权链接已复制，请粘贴到目标浏览器完成登录。') : t('请手动复制选中的链接'))}
+          t={t}
+        />
+      ) : (
+        <Button variant='outline' disabled={disabled || callbackSent} onClick={() => void open()}>
+          {opening ? <Spinner /> : null}{autoOpenNotice ? t('打开官方授权页') : t('重新打开官方授权页')}
+        </Button>
+      )}
       {step.browser.manualCallback ? <>
         <p className='text-xs text-muted-foreground'>{t('授权完成后如未自动返回，请粘贴本次完整回调地址。打开浏览器不代表登录成功。')}</p>
         <Label>{t('完整回调地址（原样提交）')}

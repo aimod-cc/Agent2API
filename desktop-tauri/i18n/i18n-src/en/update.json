@@ -170,7 +170,7 @@
   "有新版本": "New version",
   "服务正在重启，页面会在恢复后自动刷新…（{seconds}s）": "The service is restarting; this page will refresh automatically once it is back… ({seconds}s)",
   "服务端压缩包": "Server archive",
-  "服务重启耗时较长，请稍后手动刷新页面确认新版本状态。": "",
+  "服务重启耗时较长，请稍后手动刷新页面确认新版本状态。": "The service is taking a while to restart, so please refresh this page manually in a moment to confirm the new version status.",
   "未找到适用的更新包": "No suitable update package",
   "未找到适用的更新包。需要：{wanted}；发布页包含的文件类型：{seen}。": "No suitable update package was found. Required: {wanted}. File types on the release page: {seen}.",
   "未检查": "Not checked",

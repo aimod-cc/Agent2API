@@ -406,6 +406,7 @@ impl ServerState {
         // 与任务状态同为「kv 固定键 + 整份读写」的形态，把同一个 `Db` 传进去。
         // 它不参与启动预热，位置只要求早于任何一次 `/api/proxies/pool*` 请求。
         core::proxy_pool::install(db.clone());
+        core::task_plugins::install(db.clone());
         core::proxy_settings::install(db.clone());
         // 先装云同步设置；自动同步须等账号迁移完成后启动，不能上传半份启动状态。
         core::cloud_sync::install(db.clone());
@@ -773,6 +774,7 @@ impl ServerState {
         // 服务器停机时进程会结束，任务随之消失。用 crate::spawn_task
         // （与 auto_checkin 同一理由）保证从非 tokio 上下文调用也能进入全局运行时。
         core::scheduled_tasks::spawn(state.store.clone(), state.update.clone());
+        core::task_plugins::spawn_scheduler();
         core::upstream_versions::spawn();
         // 配置更新和插件热加载会唤醒排程，关闭时保持等待而不是省掉调度循环。
         core::growth_scheduler::spawn(state.store.clone());
@@ -784,6 +786,9 @@ impl ServerState {
         // 一个循环，到点判定全在「记录 + 配置」上），只是排期按账号各自算，
         // 不再是全局任务（见 `core::usage_query` 的模块头）。
         core::usage_query::spawn_sweeper(state.store.clone());
+
+        // 本机直连 Agent 采集器（Antigravity 等不走网关的本地请求）：后台增量采集与去重合并。
+        core::local_direct::spawn(state.request_stats());
 
         // ── 提供商插件（用户安装的包）─────────────────────────────
         // 后台启动：握手要 spawn 子进程，可能要等几秒。这里不 await ——

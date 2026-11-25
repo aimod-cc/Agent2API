@@ -33,7 +33,7 @@ export type LaunchResult = {
   canRestore: boolean
   canRetryStart: boolean
 }
-export type LaunchSettings = { provider: string; client: string; path: string; detected: string | null; error: string | null; revision: string }
+export type LaunchSettings = { provider: string; client: string; path: string; args: string; detected: string | null; error: string | null; revision: string }
 export type LaunchPendingRecovery = { backup: string; provider: string; account: string; client: string; label: string; executable: string }
 export type LaunchRequest = <T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, options?: { retry: 'never' }) => Promise<T>
 export type LaunchTranslate = (key: string, vars?: Record<string, string | number>) => string
@@ -69,6 +69,7 @@ export function readLaunchResult(raw: unknown): LaunchResult {
 
 export function readLaunchSettings(raw: unknown, selection: LaunchSelection): LaunchSettings {
   if (!object(raw) || raw.provider !== selection.provider || raw.client !== selection.client || !string(raw.path, 2048)
+    || !string(raw.args, 1024)
     || raw.detected !== null && !string(raw.detected, 2048) || raw.error !== null && !string(raw.error)
     || !string(raw.revision, 64) || !/^[a-f0-9]{64}$/.test(raw.revision)) throw new Error('本机客户端设置返回格式无效')
   return raw as unknown as LaunchSettings

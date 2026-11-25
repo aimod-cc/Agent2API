@@ -130,7 +130,7 @@ export function RoutingGroupPanel({ editor, accounts, lastUsed, reserved, baseUr
             <div className='routing-rule-field'><Label>{t('路由策略')}</Label><RoutingSelect label={t('路由策略')} value={group.strategy} disabled={locked}
               options={[[ 'order', t('顺序优先') ], ['rotate', t('负载均衡')], ['provider', t('成员内轮询')]]} onChange={value => update(next => { next.strategy = value })} /></div>
             <div className='routing-rule-field'><Label>{t('会话粘滞')}</Label><RoutingSelect label={t('会话粘滞')} value={group.sticky} disabled={locked}
-              options={[[ 'auto', t('自动') ], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('关闭')]]} onChange={value => update(next => { next.sticky = value })} /></div>
+              options={[[ 'auto', t('自动') ], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('已停用')]]} onChange={value => update(next => { next.sticky = value })} /></div>
           </div>
           <p className='routing-config-note'>{group.sticky === 'auto' || group.sticky === 'session' ? t('同一会话优先保持模型与账号，不可用时才顺延。') : t('每轮重新选路，不保留跨请求的账号绑定。')}</p>
           <Button variant='link' size='sm' className='routing-group-example' onClick={() => setDialog('example')}>{t('调用示例')}</Button>

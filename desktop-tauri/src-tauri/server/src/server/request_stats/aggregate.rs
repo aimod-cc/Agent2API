@@ -222,7 +222,45 @@ pub(super) fn remap_model_days(conn: &mut rusqlite::Connection) -> rusqlite::Res
 /// `day` 是本地自然日，区间按 `[当天零点, 次日零点)` 取 —— 与 `date_key(day_of(ts))`
 /// 的归档口径同源（都用 `clock` 的本地时区工具），所以「某条明细属于哪一天」
 /// 与「重算时按哪个区间取它」不可能对不上。
-fn rebuild_day(conn: &rusqlite::Connection, day: NaiveDate) -> rusqlite::Result<()> {
+pub(super) fn normalize_origin_filter(raw: Option<&str>) -> Option<&'static str> {
+    match raw.map(str::trim).map(str::to_lowercase).as_deref() {
+        Some("gateway") => Some(super::record::ORIGIN_GATEWAY),
+        Some("local_direct") | Some("local-direct") | Some("localdirect") => {
+            Some(super::record::ORIGIN_LOCAL_DIRECT)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn select_daily_for_origin(
+    conn: &rusqlite::Connection,
+    origin: &str,
+    range: &str,
+    custom: Option<(NaiveDate, NaiveDate)>,
+) -> rusqlite::Result<BTreeMap<String, DailyEntry>> {
+    let normalized_range = normalize_range(range);
+    let from_ms = if normalized_range == "all" {
+        None
+    } else {
+        let today = super::clock::today();
+        let heatmap_start = today - ChronoDuration::days(super::report::HEATMAP_DAYS - 1);
+        let custom_start = custom.map(|(start, end)| start.min(end)).unwrap_or(today);
+        Some(local_midnight_ms(heatmap_start.min(custom_start)))
+    };
+    let entries = super::local_direct::select_reprice_for_origin(conn, origin, from_ms)?;
+    let mut map: BTreeMap<String, DailyEntry> = BTreeMap::new();
+    for item in &entries {
+        if item.status == 0 || item.is_test {
+            continue;
+        }
+        let key = date_key(day_of(item.ts));
+        let day = map.entry(key.clone()).or_insert_with(|| DailyEntry::new(key));
+        fold_into_daily(day, item);
+    }
+    Ok(map)
+}
+
+pub(super) fn rebuild_day(conn: &rusqlite::Connection, day: NaiveDate) -> rusqlite::Result<()> {
     let key = date_key(day);
     let start = local_midnight_ms(day);
     // 开区间上界减 1 毫秒，等价于 `[start, next_start)`；用 1ms 而不是直接取

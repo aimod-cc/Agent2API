@@ -37,7 +37,22 @@ export function t(key: string, params?: TParams): string {
   const api = typeof window !== 'undefined' ? window.wbI18n : undefined
   if (api && typeof api.t === 'function') return api.t(key, params)
   const dict = typeof window !== 'undefined' ? window.wbI18nDict : undefined
-  const hit = dict?.[key]
+  let hit: string | undefined
+  if (params) {
+    const count = typeof params.n === 'number' && Number.isFinite(params.n)
+      ? params.n
+      : (typeof params.count === 'number' && Number.isFinite(params.count) ? params.count : undefined)
+    if (count !== undefined) {
+      try {
+        const category = new Intl.PluralRules(locale()).select(count)
+        const variant = dict?.[`${key}#${category}`]
+        if (typeof variant === 'string' && variant) hit = variant
+      } catch {
+        // Intl 不可用时保持原有查表行为。
+      }
+    }
+  }
+  if (!hit) hit = dict?.[key]
   let text = typeof hit === 'string' && hit ? hit : key
   if (params) {
     for (const [k, v] of Object.entries(params)) {

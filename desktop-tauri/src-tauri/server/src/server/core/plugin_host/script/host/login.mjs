@@ -90,7 +90,10 @@ function run(flow, code) {
   flow.running = true
   void scope.run(flow.context, async () => {
     try {
-      const result = await untilCancelled(flow.authorization.callback(code, { signal: flow.controller.signal }), flow.controller.signal)
+      const callbackPromise = flow.authorization.method === "auto"
+        ? flow.authorization.callback(code, { signal: flow.controller.signal }, flow.controller.signal)
+        : flow.authorization.callback(code, { signal: flow.controller.signal })
+      const result = await untilCancelled(callbackPromise, flow.controller.signal)
       flow.controller.signal.throwIfAborted()
       if (result?.type !== "success") throw new Error(result?.error || "Sign-in was not completed")
       const account = normalized(flow.provider, result, flow.name, flow.single)

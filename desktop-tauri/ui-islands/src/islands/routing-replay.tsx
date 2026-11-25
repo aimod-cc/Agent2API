@@ -86,7 +86,7 @@ export function RoutingReplayDialog({ model, initialRow, onClose }: { model: str
           const success = row.status >= 200 && row.status < 300 && !row.error
           return <Button key={`${row.id}-${index}`} variant='ghost' className={cn('routing-replay-row', row.id === selected?.id && 'is-selected')} onClick={() => setSelected(row)}>
             <div><b>{row.clientModel || row.model}</b><Badge shape='tag' variant={row.status === 0 ? 'info' : success ? 'success' : 'destructive'}>{row.status === 0 ? t('进行中') : row.status}</Badge></div>
-            <span>{row.accountName || row.providerLabel || '—'}</span><span>{new Date(row.ts).toLocaleTimeString()} · {formatDuration(row.durationMs)}{row.route?.stickyHit ? ` · ${t('会话粘住')}` : ''}</span>
+            <span>{row.accountName || row.providerLabel || '—'}</span><span>{new Date(row.ts).toLocaleTimeString(document.documentElement.lang || undefined)} · {formatDuration(row.durationMs)}{row.route?.stickyHit ? ` · ${t('会话粘住')}` : ''}</span>
           </Button>
         })}
           {!entries.length ? <Empty>{loading ? t('正在读取…') : t('当前视图没有路由回放记录')}</Empty> : null}

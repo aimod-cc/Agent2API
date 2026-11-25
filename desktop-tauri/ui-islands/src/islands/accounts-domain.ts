@@ -40,7 +40,8 @@ import { t } from '../i18n'
 import { limiterHit, limiterStatesOf } from './accounts-limiter-model'
 import { accountReloginText } from './accounts-authorization'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
-import { accountSortBalanceOf, balanceSortStateOf, comparableBalance } from '../../../ui-shared/account-sorting'
+import { accountSortBalanceOf, balanceSortStateOf, comparableBalance, creditExpiryReadingOf, hasCreditExpiryReading } from '../../../ui-shared/account-sorting'
+export { hasCreditExpiryReading }
 
 // 能力表与插件申报的读取在 accounts-features.ts（那边的模块头说明了查询顺序）。
 // 这里转出去，是因为域层的既有调用点（`providerFeatures` 被 app.js / report.js /
@@ -695,22 +696,7 @@ export function supportsCreditDetail(account: AccountRecord | null | undefined):
  * 两处问的是同一件事：这份包现在还值不值得关心。
  */
 export function creditExpiryOf(entry: UsageEntry, now = Date.now()): number | null {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
-  const data = entry as Record<string, unknown>
-  const packs = Array.isArray(data.credits) ? data.credits as Array<Record<string, unknown>> : []
-  let best: number | null = null
-  for (const pack of packs) {
-    if (!pack || typeof pack !== 'object') continue
-    if (pack.snapshot === true || pack.record === true || pack.daily === true || pack.unlimited === true) continue
-    const expire = Number(pack.expireAt)
-    if (!Number.isFinite(expire) || expire <= 0 || expire <= now) continue
-    const remain = pack.remain
-    // 剩余读到 0 就是花完了；读不到（缺键）时不猜 —— 与 creditRowsOf 的 exhausted
-    // 判据同一取向：两侧都读不到就不下结论，宁可让它参与排序
-    if (remain !== null && remain !== undefined && remain !== '' && Number(remain) <= 0) continue
-    if (best === null || expire < best) best = expire
-  }
-  return best
+  return creditExpiryReadingOf(entry, now)
 }
 
 /**
@@ -1207,7 +1193,7 @@ export function formatResetText(resetAt: unknown): string {
   const time = Number(resetAt)
   if (!Number.isFinite(time) || time <= 0 || time <= Date.now()) return RESET_UNKNOWN
   const date = new Date(time)
-  const clock = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+  const clock = date.toLocaleTimeString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
   // 按自然日求差而不是按 24 小时：今晚 23:50 到明天 00:10 只差 20 分钟，但用户嘴里
   // 它就是「明天」，按毫秒差算会显示成「今天」，与直觉相反
   const days = Math.round((startOfDay(date) - startOfDay(new Date())) / 86400e3)

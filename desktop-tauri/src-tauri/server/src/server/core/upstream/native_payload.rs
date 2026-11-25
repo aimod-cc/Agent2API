@@ -74,7 +74,7 @@ pub(super) fn prepare(
     provider: &str,
     account: Option<&Value>,
     degraded: bool,
-) -> super::payload::SendBody<'static> {
+) -> Result<super::payload::SendBody<'static>, GatewayError> {
     let mut body = native.routed(ctx.body);
     if ctx.compact_routed || ctx.title_routed {
         crate::server::core::compact_routing::parameters::clear_source_reasoning(&mut body);
@@ -136,6 +136,30 @@ pub(super) fn prepare(
             }
         }
     }
+    if ctx.privacy.applies_to(provider) {
+        match crate::server::core::privacy::mask_native_body(
+            &body,
+            native.protocol,
+            &ctx.privacy,
+            crate::server::core::privacy::PrivacyVault::global(),
+        ) {
+            crate::server::core::privacy::PrivacyBodyOutcome::Unchanged => {}
+            crate::server::core::privacy::PrivacyBodyOutcome::Warned { hits } => {
+                ctx.telemetry.note_privacy_hits(&hits);
+            }
+            crate::server::core::privacy::PrivacyBodyOutcome::Masked { body: masked, hits } => {
+                ctx.telemetry.note_privacy_hits(&hits);
+                if ctx.privacy.settings.reversible {
+                    ctx.telemetry.mark_privacy_reversible();
+                }
+                body = masked;
+            }
+            crate::server::core::privacy::PrivacyBodyOutcome::Blocked { message, hits } => {
+                ctx.telemetry.note_privacy_hits(&hits);
+                return Err(GatewayError::bad_request(message).with_code("privacy_blocked"));
+            }
+        }
+    }
     let requested = ctx.body.get("model").and_then(Value::as_str).unwrap_or("");
     let wire_model = ctx
         .direct_model
@@ -170,11 +194,11 @@ pub(super) fn prepare(
             }
         }
     }
-    super::payload::SendBody {
+    Ok(super::payload::SendBody {
         body: std::borrow::Cow::Owned(body),
         wire_model,
         wire_reasoning: None,
-    }
+    })
 }
 
 fn apply_prompt(

@@ -721,6 +721,10 @@ pub(super) fn list_entry_json(
         object.insert("visionMode".into(), Value::String(row.vision_mode.clone()));
     }
     object.insert("hasSensitiveHits".into(), Value::Bool(row.has_sensitive_hits));
+    object.insert("hasPrivacyHits".into(), Value::Bool(row.has_privacy_hits));
+    if !row.privacy_action.is_empty() {
+        object.insert("privacyAction".into(), Value::String(row.privacy_action.clone()));
+    }
     object.insert("hasProcessFacts".into(), Value::Bool(row.has_process_facts));
     if row.internal_retries > 0 {
         object.insert("internalRetries".into(), json!(row.internal_retries));
@@ -729,6 +733,7 @@ pub(super) fn list_entry_json(
     if !row.client_user_agent.is_empty() {
         object.insert("clientUserAgent".into(), Value::String(row.client_user_agent.clone()));
     }
+    object.insert("origin".into(), json!(row.origin));
     Value::Object(object)
 }
 

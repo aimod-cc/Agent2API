@@ -252,8 +252,7 @@ export function WorkBuddyBlock({ active, footerHost, initialEdition }: {
   // 三处偏好的初值来自模块级 loginPrefs：旧实现里它们住在静态 DOM 上，
   // 关掉弹窗再打开仍是上次的选择（resetAddStep 只复位提供商与步骤）
   const [edition, setEdition] = React.useState<Edition>(initialEdition ?? loginPrefs.edition)
-  const [loginMode, setLoginMode] = React.useState<LoginMode>(initialEdition
-    ? initialEdition === 'intl' ? 'external' : 'embedded' : loginPrefs.loginMode)
+  const [loginMode, setLoginMode] = React.useState<LoginMode>('embedded')
   const [socialRestore, setSocialRestore] = React.useState(loginPrefs.socialRestore)
   // 网页端没有「内嵌窗口 / 系统浏览器」之分：桥接层一律在新标签页里打开，
   // mode 收下即弃（见 web_shim.rs 的 startLogin）。整行打开方式与第三方入口
@@ -275,7 +274,7 @@ export function WorkBuddyBlock({ active, footerHost, initialEdition }: {
   React.useEffect(() => {
     if (!initialEdition) return
     setEdition(initialEdition)
-    setLoginMode(initialEdition === 'intl' ? 'external' : 'embedded')
+    setLoginMode('embedded')
   }, [initialEdition])
   editionRef.current = edition
   modeRef.current = loginMode
@@ -333,13 +332,12 @@ export function WorkBuddyBlock({ active, footerHost, initialEdition }: {
     controllerRef.current?.syncTexts()
   }, [edition, loginMode])
 
-  /** 切版本要联动打开方式：国际版默认系统浏览器、国内版默认内嵌窗口（沿用改造前的联动） */
+  /** 切版本后打开方式统一默认停留在内嵌窗口 */
   function pickEdition(next: Edition): void {
-    const mode: LoginMode = next === 'intl' ? 'external' : 'embedded'
     setEdition(next)
     loginPrefs.edition = next
-    setLoginMode(mode)
-    loginPrefs.loginMode = mode
+    setLoginMode('embedded')
+    loginPrefs.loginMode = 'embedded'
   }
 
   function pickLoginMode(next: string): void {

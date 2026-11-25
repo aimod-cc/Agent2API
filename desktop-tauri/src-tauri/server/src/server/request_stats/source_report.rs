@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params_from_iter, Connection};
 use serde_json::{json, Value};
 
 use super::record::{DailyEntry, ModelAccum, RequestEntry};
@@ -96,6 +98,7 @@ pub(super) fn key_label(identity: &ApiKeyIdentity) -> String {
     match identity.source.as_str() {
         "none" => "免鉴权调用".to_string(),
         "env" => "环境变量 Key".to_string(),
+        "local_direct" => "本机直连".to_string(),
         "key" if !identity.name.is_empty() => identity.name.clone(),
         "key" => identity.id.clone(),
         _ => "历史未记录 Key".to_string(),
@@ -191,8 +194,96 @@ pub(super) fn source_totals(
     (clients, keys)
 }
 
+pub(super) fn select_client_models(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    client: &str,
+    origin_filter: Option<&str>,
+) -> rusqlite::Result<Vec<ModelAccum>> {
+    let mut binds: Vec<SqlValue> = vec![
+        SqlValue::Integer(start_ms),
+        SqlValue::Integer(end_ms),
+        SqlValue::Text(client.to_string()),
+    ];
+    let origin_clause = if let Some(origin) = origin_filter {
+        binds.push(SqlValue::Text(origin.to_string()));
+        " AND origin = ?4"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT CASE WHEN upstream_model <> '' THEN upstream_model ELSE model END AS model_key, \
+         COUNT(*) AS reqs, COALESCE(SUM(total_tokens), 0) AS toks, \
+         COALESCE(SUM(CASE WHEN cost_usd >= 0 THEN cost_usd ELSE 0.0 END), 0.0) AS cost_usd, \
+         COALESCE(SUM(CASE WHEN total_tokens > 0 AND cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced \
+         FROM requests \
+         WHERE ts >= ?1 AND ts < ?2 AND status <> 0 AND is_test = 0 AND client = ?3{origin_clause} \
+         GROUP BY model_key ORDER BY toks DESC, reqs DESC, model_key ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params_from_iter(binds.iter()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(ModelAccum {
+            model: row.get(0)?,
+            requests: row.get(1)?,
+            tokens: row.get(2)?,
+            cost_usd: row.get(3)?,
+            unpriced_requests: row.get(4)?,
+        });
+    }
+    Ok(out)
+}
+
+fn build_client_api_keys(keys: &[ApiKeyAccum], client_id: &str) -> Vec<Value> {
+    struct KeySlice<'a> {
+        identity: &'a ApiKeyIdentity,
+        usage: UsageAccum,
+    }
+    let mut rows: Vec<KeySlice<'_>> = keys
+        .iter()
+        .filter_map(|key| {
+            let mut usage = UsageAccum::default();
+            for c in key.clients.iter().filter(|c| c.client == client_id) {
+                usage.merge(&c.usage);
+            }
+            if usage.requests > 0 || usage.tokens > 0 {
+                Some(KeySlice { identity: &key.identity, usage })
+            } else {
+                None
+            }
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .usage
+            .tokens
+            .cmp(&left.usage.tokens)
+            .then(right.usage.requests.cmp(&left.usage.requests))
+            .then(left.identity.filter_value().cmp(&right.identity.filter_value()))
+    });
+    rows.into_iter()
+        .map(|item| {
+            let mut row = usage_json(&item.usage);
+            if let Some(object) = row.as_object_mut() {
+                object.insert("id".to_string(), json!(item.identity.id));
+                object.insert("label".to_string(), json!(key_label(item.identity)));
+                object.insert("source".to_string(), json!(item.identity.source));
+                object.insert("filterValue".to_string(), json!(item.identity.filter_value()));
+            }
+            row
+        })
+        .collect()
+}
+
 pub(super) fn source_summary(
-    daily: &BTreeMap<String, DailyEntry>, start: &str, end: &str, key: Option<&str>,
+    daily: &BTreeMap<String, DailyEntry>,
+    start: &str,
+    end: &str,
+    key: Option<&str>,
+    client: Option<&str>,
+    client_models: Option<&[ModelAccum]>,
 ) -> Value {
     let (clients, keys) = source_totals(daily, start, end);
     let detail = key.and_then(|filter| keys.iter().find(|item| item.identity.filter_value() == filter))
@@ -208,7 +299,40 @@ pub(super) fn source_summary(
             "models": model_rows(&item.models),
         }))
         .or_else(|| key.map(|filter| json!({ "filterValue": filter, "requests": 0, "totalTokens": 0, "detailsComplete": true, "clients": [], "models": [] })));
-    json!({ "clients": build_clients(&clients), "apiKeys": build_keys(&keys), "apiKeyDetail": detail })
+    let client_detail = client.map(|client_id| {
+        let matched = clients.iter().find(|item| item.client == client_id);
+        let label = matched
+            .map(|item| {
+                crate::server::core::client::display_name(
+                    &item.client,
+                    if item.label.is_empty() { client_label(&item.client) } else { &item.label },
+                )
+            })
+            .unwrap_or_else(|| crate::server::core::client::display_name(client_id, client_label(client_id)));
+        let total_reqs = matched.map(|item| item.usage.requests).unwrap_or(0);
+        let api_keys = build_client_api_keys(&keys, client_id);
+        let api_keys_reqs: i64 = api_keys.iter().filter_map(|row| row["requests"].as_i64()).sum();
+        let models_slice = client_models.unwrap_or(&[]);
+        let models_reqs: i64 = models_slice.iter().map(|row| row.requests).sum();
+        json!({
+            "id": client_id,
+            "label": label,
+            "requests": total_reqs,
+            "totalTokens": matched.map(|item| item.usage.tokens).unwrap_or(0),
+            "costUsd": matched.map(|item| item.usage.cost_usd).unwrap_or(0.0),
+            "unpricedRequests": matched.map(|item| item.usage.unpriced_requests).unwrap_or(0),
+            "apiKeysComplete": api_keys_reqs >= total_reqs,
+            "modelsComplete": models_reqs >= total_reqs,
+            "apiKeys": api_keys,
+            "models": model_rows(models_slice),
+        })
+    });
+    json!({
+        "clients": build_clients(&clients),
+        "apiKeys": build_keys(&keys),
+        "apiKeyDetail": detail,
+        "clientDetail": client_detail,
+    })
 }
 
 fn model_rows(models: &[ModelAccum]) -> Vec<Value> {

@@ -85,6 +85,8 @@ pub(crate) fn optional<'de, D: Deserializer<'de>>(
     Declaration::deserialize(deserializer).map(Some)
 }
 
+pub(crate) use super::strict_json::StrictJsonError as ParseObjectError;
+
 /// 必须在转成 Value 前检查重复键，且顶层只能是对象。
 pub(crate) fn parse_object<T: DeserializeOwned>(
     bytes: &[u8],
@@ -94,6 +96,17 @@ pub(crate) fn parse_object<T: DeserializeOwned>(
     serde_json::from_slice::<Object<T>>(bytes)
         .map(|object| object.0)
         .map_err(|_| "JSON 对象字段无效")
+}
+
+/// 与 `parse_object` 校验规则一致，额外区分超体积、嵌套过深、重复字段与普通格式错误。
+pub(crate) fn parse_object_detailed<T: DeserializeOwned>(
+    bytes: &[u8],
+    limit: usize,
+) -> Result<T, ParseObjectError> {
+    strict_json::validate_detailed(bytes, limit)?;
+    serde_json::from_slice::<Object<T>>(bytes)
+        .map(|object| object.0)
+        .map_err(|_| ParseObjectError::Invalid)
 }
 
 impl Declaration {

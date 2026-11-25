@@ -42,7 +42,7 @@ export function SanitizeRuleEditor({ rule, isNew, limits, roleScopeEditable, onA
   return (
     <Dialog open onOpenChange={open => { if (!open) onClose() }}>
       <DialogContent overlayForceRender className='w-[min(760px,calc(100vw-48px))]'>
-        <DialogHeader><DialogTitle>{isNew ? t('新增脱敏规则') : t('编辑脱敏规则')}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{isNew ? t('新增替换规则') : t('编辑替换规则')}</DialogTitle></DialogHeader>
         <DialogBody>
           <div className='flex flex-col gap-1.5'>
             <Label htmlFor='sanitize-rule-name'>{t('规则名称')}</Label>
@@ -172,7 +172,7 @@ export function SanitizeRulesTable({ rules, defaults, disabled, onChange, onEdit
           </TableCell>
         </TableRow>
       )) : <TableRow><TableCell colSpan={6} className='py-5 text-center text-muted-foreground'>
-        {t('词表为空，不会改写任何指纹。可以新增规则或恢复默认词表。')}
+        {t('词表为空，不会改写任何关键词。可以新增规则或恢复默认词表。')}
       </TableCell></TableRow>}</TableBody>
     </Table>
   )

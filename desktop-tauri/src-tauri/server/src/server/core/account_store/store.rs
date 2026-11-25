@@ -195,7 +195,7 @@ impl AccountStore {
         &self.inner.validation
     }
 
-    pub(super) fn database(&self) -> Option<&Db> {
+    pub(crate) fn database(&self) -> Option<&Db> {
         self.inner.db.as_ref()
     }
 

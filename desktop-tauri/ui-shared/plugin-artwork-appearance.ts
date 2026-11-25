@@ -5,21 +5,67 @@ export type PluginArtworkAppearance = {
 }
 
 export const EMPTY_PLUGIN_ARTWORK: PluginArtworkAppearance = { native: false, tone: 'empty' }
+const MAX_RAW_KEY_LENGTH = 256
+const MAX_APPEARANCE_CACHE = 1024
+const INSPECT_SIZE = 32
 const appearances = new Map<string, PluginArtworkAppearance>()
 
+let sharedCanvas: HTMLCanvasElement | null = null
+let sharedContext: CanvasRenderingContext2D | null = null
+
+export function artworkCacheKey(source: string): string {
+  if (!source) return ''
+  if (source.length <= MAX_RAW_KEY_LENGTH) return source
+  let h1 = 0x811c9dc5
+  let h2 = 0x9e3779b9
+  for (let index = 0; index < source.length; index++) {
+    const code = source.charCodeAt(index)
+    h1 = Math.imul(h1 ^ code, 0x01000193)
+    h2 = Math.imul(h2 ^ (code + (index & 255)), 0x85ebca6b)
+  }
+  return `${source.length}:${(h1 >>> 0).toString(36)}:${(h2 >>> 0).toString(36)}`
+}
+
+function getCached(key: string): PluginArtworkAppearance | undefined {
+  const entry = appearances.get(key)
+  if (!entry) return undefined
+  appearances.delete(key)
+  appearances.set(key, entry)
+  return entry
+}
+
 function remember(source: string, appearance: PluginArtworkAppearance): PluginArtworkAppearance {
-  if (source.length <= 2048) {
-    if (appearances.size >= 128) {
+  const key = artworkCacheKey(source)
+  if (key) {
+    if (appearances.has(key)) appearances.delete(key)
+    else if (appearances.size >= MAX_APPEARANCE_CACHE) {
       const oldest = appearances.keys().next().value
       if (oldest !== undefined) appearances.delete(oldest)
     }
-    appearances.set(source, appearance)
+    appearances.set(key, appearance)
   }
   return appearance
 }
 
+export function hasCachedPluginArtwork(source: string): boolean {
+  const key = artworkCacheKey(source)
+  return key ? appearances.has(key) : false
+}
+
 export function cachedPluginArtwork(source: string): PluginArtworkAppearance {
-  return appearances.get(source) ?? EMPTY_PLUGIN_ARTWORK
+  const key = artworkCacheKey(source)
+  return (key && getCached(key)) || EMPTY_PLUGIN_ARTWORK
+}
+
+function getInspectContext(): CanvasRenderingContext2D | null {
+  if (typeof document === 'undefined') return null
+  if (!sharedCanvas) {
+    sharedCanvas = document.createElement('canvas')
+    sharedCanvas.width = INSPECT_SIZE
+    sharedCanvas.height = INSPECT_SIZE
+    sharedContext = sharedCanvas.getContext('2d', { willReadFrequently: true })
+  }
+  return sharedContext
 }
 
 function hueOf(red: number, green: number, blue: number): number {
@@ -33,18 +79,18 @@ function hueOf(red: number, green: number, blue: number): number {
 }
 
 export function inspectPluginArtwork(image: HTMLImageElement, source: string): PluginArtworkAppearance {
-  const cached = appearances.get(source)
+  const key = artworkCacheKey(source)
+  const cached = key ? getCached(key) : undefined
   if (cached) return cached
   if (!image.naturalWidth || !image.naturalHeight) return EMPTY_PLUGIN_ARTWORK
   try {
-    const size = 32
-    const canvas = document.createElement('canvas')
-    canvas.width = canvas.height = size
-    const context = canvas.getContext('2d')
+    const size = INSPECT_SIZE
+    const context = getInspectContext()
     if (!context) return { native: false, tone: 'neutral' }
     const scale = Math.min(size / image.naturalWidth, size / image.naturalHeight)
     const width = image.naturalWidth * scale
     const height = image.naturalHeight * scale
+    context.clearRect(0, 0, size, size)
     context.drawImage(image, (size - width) / 2, (size - height) / 2, width, height)
     const pixels = context.getImageData(0, 0, size, size).data
     const alphaAt = (x: number, y: number) => pixels[(y * size + x) * 4 + 3]
@@ -91,5 +137,59 @@ export function inspectPluginArtwork(image: HTMLImageElement, source: string): P
   } catch {
     // 跨域图标可能禁止像素读取，仍以原图配安全浅底展示。
     return remember(source, { native: false, tone: 'neutral' })
+  }
+}
+
+type PendingInspectTask = {
+  image: HTMLImageElement
+  source: string
+  onDone: (appearance: PluginArtworkAppearance) => void
+  canceled: boolean
+}
+
+const inspectQueue: PendingInspectTask[] = []
+let inspectScheduled = false
+
+function scheduleQueueFlush(): void {
+  if (inspectScheduled || inspectQueue.length === 0) return
+  inspectScheduled = true
+  const runSlice = (deadline?: { timeRemaining(): number }) => {
+    inspectScheduled = false
+    const started = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    while (inspectQueue.length > 0) {
+      const task = inspectQueue.shift()!
+      if (task.canceled) continue
+      if (task.image.naturalWidth > 0) {
+        task.onDone(inspectPluginArtwork(task.image, task.source))
+      }
+      const elapsed = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - started
+      if (deadline ? deadline.timeRemaining() <= 1 : elapsed >= 4) break
+      if (elapsed >= 6) break
+    }
+    if (inspectQueue.length > 0) scheduleQueueFlush()
+  }
+  if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(runSlice, { timeout: 120 })
+  } else {
+    setTimeout(() => runSlice(), 16)
+  }
+}
+
+export function scheduleInspectPluginArtwork(
+  image: HTMLImageElement,
+  source: string,
+  onDone: (appearance: PluginArtworkAppearance) => void,
+): () => void {
+  const key = artworkCacheKey(source)
+  const cached = key ? getCached(key) : undefined
+  if (cached) {
+    onDone(cached)
+    return () => {}
+  }
+  const task: PendingInspectTask = { image, source, onDone, canceled: false }
+  inspectQueue.push(task)
+  scheduleQueueFlush()
+  return () => {
+    task.canceled = true
   }
 }

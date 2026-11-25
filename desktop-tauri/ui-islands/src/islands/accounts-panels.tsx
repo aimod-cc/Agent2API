@@ -231,7 +231,7 @@ export function GroupBandRow({ group, collapsed, colSpan, pageCount, virtualInde
     if (String(window.getSelection?.() || '').length > 0) return
     toggleGroupCollapsed(group.provider)
   }
-  const sortSummary = groupSortSummary(groupSortRules(group.provider))
+  const sortSummary = groupSortSummary(activeGroupSortRules(group.provider, groupSortRules(group.provider)))
   return (
     <TableRow className='grp-band' data-provider={group.provider} data-index={virtualIndex} ref={measure}>
       <TableCell colSpan={colSpan} onClick={onBandClick}
@@ -1133,7 +1133,7 @@ function UsageReadingCell({ account, entry }: { account: AccountRecord; entry: U
       <CreditDetailButton variant='sum' {...creditDetail}>{t('积分明细')}</CreditDetailButton>
     ) : null
     return (
-      <UsageWindowsCell entry={entry} rows={windows} updatedAt={usageUpdatedAtOf(account)} creditDetail={detail}>
+      <UsageWindowsCell entry={entry} rows={windows} updatedAt={usageUpdatedAtOf(account)} now={now} creditDetail={detail}>
         {blockedBadge}
         {pendingBadge}
         {tokenSub}
@@ -1505,7 +1505,7 @@ export function ActionsCell({ account, atFront }: { account: AccountRecord; atFr
 export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront: boolean }) {
   const [open, setOpen] = React.useState(false)
   const enabled = isEnabled(account)
-  const sortActive = groupSortRules(providerOf(account)).some(rule => rule.on)
+  const sortActive = activeGroupSortRules(providerOf(account), groupSortRules(providerOf(account))).length > 0
   const maxConcurrent = Number(account.maxConcurrent) || 0
   const itemClass = 'w-full justify-start px-2 font-normal'
   const dangerClass = `${itemClass} text-destructive hover:text-destructive`

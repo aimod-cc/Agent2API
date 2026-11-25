@@ -917,9 +917,83 @@ body.queue-dragging * { cursor: grabbing; }
 .usage-pop-view.bad { color: var(--danger); }
 .usage-pop-view.muted { color: var(--text-3); font-weight: 500; }
 
-.usage-toggle:has(.usage-toggle-soon) { padding-right: 18px; gap: 4px; }
-.usage-toggle:has(.usage-toggle-soon) .val { padding: 0 2px; text-align: left; }
-.usage-toggle-soon,
+/* ─── 快到期积分：底部双色占比细条（左绿安全余额 · 右暖快到期）───
+   不再在按钮内部右侧硬套一颗胶囊（宽列下左右分家、中间拉出大片空洞）；
+   改为上行左主读数 + 右无框快到期文案，下方嵌一条 3px 双色占比线把左右
+   视觉连成一体。拿不到真比例（如不限额度或上游缺剩余数）时不画假条，
+   退回单行居中聚合排布。 */
+.usage-toggle.usage-toggle-has-soon {
+  padding: 0 18px;
+  gap: 0;
+}
+.usage-toggle.usage-toggle-has-soon.has-ratio {
+  height: auto;
+  min-height: 38px;
+  padding: 5px 22px 6px 10px;
+}
+.usage-soon-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  gap: 5px;
+}
+.usage-soon-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  line-height: 1.25;
+}
+.usage-toggle.usage-toggle-has-soon.has-ratio .usage-soon-head {
+  justify-content: space-between;
+}
+.usage-toggle.usage-toggle-has-soon .val {
+  flex: 0 1 auto;
+  padding: 0;
+  text-align: left;
+}
+.usage-toggle-soon {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--warn);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.usage-toggle-soon.is-today { color: var(--danger); }
+
+.usage-soon-track {
+  display: flex;
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--hairline);
+  gap: 1.5px;
+}
+.usage-soon-safe {
+  height: 100%;
+  border-radius: 999px 0 0 999px;
+  background: color-mix(in srgb, var(--ok) 65%, transparent);
+  transition: width 220ms ease;
+}
+.usage-toggle.warn .usage-soon-safe { background: color-mix(in srgb, var(--warn) 45%, transparent); }
+.usage-toggle.bad .usage-soon-safe { background: color-mix(in srgb, var(--danger) 45%, transparent); }
+.usage-toggle.muted .usage-soon-safe { background: color-mix(in srgb, var(--text-3) 45%, transparent); }
+.usage-soon-risk {
+  height: 100%;
+  border-radius: 0 999px 999px 0;
+  background: var(--warn);
+  transition: width 220ms ease;
+}
+.usage-soon-risk.is-today { background: var(--danger); }
+.usage-soon-risk.is-full { border-radius: 999px; }
+
 .usage-pop-soon-tag {
   flex: 0 1 auto;
   min-width: 0;
@@ -933,7 +1007,7 @@ body.queue-dragging * { cursor: grabbing; }
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.usage-toggle-soon { max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
+.usage-pop-soon-tag.is-today { background: var(--danger-soft); color: var(--danger); }
 .usage-toggle.usage-pool-line:has(.usage-pool-soon) { height: auto; }
 .usage-pool-soon { display: block; margin-top: 3px; color: var(--warn); font-size: 10.5px; }
 .usage-pop-soon {

@@ -4,7 +4,7 @@ const number = value => typeof value === "number" && Number.isFinite(value) ? va
 export function timestamp(value) {
   const raw = typeof value === "string" ? Date.parse(value) : number(value)
   const time = typeof value === "number" && raw > 0 && raw < 1e11 ? raw * 1000 : raw
-  return Number.isFinite(time) && time > 0 && time <= 8.64e15 ? time : null
+  return Number.isFinite(time) && time > 0 && time <= 8.64e15 ? Math.round(time) : null
 }
 const text = value => typeof value === "string" ? safeMessage(value).slice(0, 2000) : ""
 
@@ -87,6 +87,8 @@ function buildQuotaSources(windows, providerId) {
         models: row.models,
       }
       if (Number.isInteger(row.resetsAt) && row.resetsAt > 0) source.resetsAt = row.resetsAt
+      if (Number.isInteger(row.expiresAt) && row.expiresAt > 0) source.expiresAt = row.expiresAt
+      if (row.expiresAmount !== null && row.expiresAmount >= 0) source.expiresAmount = row.expiresAmount
       return source
     })
 }

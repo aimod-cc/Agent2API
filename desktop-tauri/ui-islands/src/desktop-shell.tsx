@@ -118,7 +118,7 @@ function Frame() {
         <div id='page-refresh-actions' />
       </PageHeader>
       <div className='content'><div className='content-inner'>
-        {['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'plugins', 'settings'].map(key =>
+        {['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'scheduled', 'tasks', 'requests', 'plugins', 'settings'].map(key =>
           <section key={key} className={`page${page === key ? ' active' : ''}`} data-page={key} />)}
         <section className={`page${page.startsWith('plugin:') ? ' active' : ''}`} data-page='__plugin__' id='plugin-page-host' />
       </div></div>

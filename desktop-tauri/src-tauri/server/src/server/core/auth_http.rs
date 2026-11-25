@@ -78,6 +78,46 @@ pub struct ApiResponse {
     pub status: u16,
     pub ok: bool,
     pub payload: Option<Value>,
+    pub content_type: String,
+    pub raw_preview: String,
+}
+
+/// 响应是否看起来像 HTML 页面（常见于 Base URL 少/多 `/v1` 落到前端 SPA，或被防护页拦截）。
+pub fn looks_like_html(content_type: &str, body: &str) -> bool {
+    let ct = content_type.trim().to_ascii_lowercase();
+    if ct.contains("text/html") || ct.contains("application/xhtml") {
+        return true;
+    }
+    let trimmed = body.trim_start();
+    if !trimmed.starts_with('<') {
+        return false;
+    }
+    let head: String = trimmed.chars().take(32).collect::<String>().to_ascii_lowercase();
+    [
+        "<!doctype html",
+        "<html",
+        "<head",
+        "<body",
+        "<meta",
+        "<title",
+        "<script",
+        "<div",
+        "<!--",
+    ]
+    .iter()
+    .any(|prefix| head.starts_with(prefix))
+}
+
+fn preview_excerpt(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        trimmed.to_string()
+    } else {
+        trimmed.chars().take(max_chars).collect()
+    }
 }
 
 /// 发一次上游请求，返回原始状态码与解析出的 payload。
@@ -127,6 +167,12 @@ pub async fn send_raw(
     })?;
     let status = response.status().as_u16();
     let ok = response.status().is_success();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     if let Some(trace) = &trace { trace.response(status); }
     let text = response.text().await.map_err(|error| {
         if let (Some(trace), Some(kind)) = (&trace, network::classify(&error, true)) {
@@ -140,5 +186,10 @@ pub async fn send_raw(
     } else {
         serde_json::from_str::<Value>(&text).ok()
     };
-    Ok(ApiResponse { status, ok, payload })
+    let raw_preview = if payload.is_none() {
+        preview_excerpt(&text, 512)
+    } else {
+        String::new()
+    };
+    Ok(ApiResponse { status, ok, payload, content_type, raw_preview })
 }

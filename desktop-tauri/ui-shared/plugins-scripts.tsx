@@ -15,7 +15,7 @@ import { getPluginStartup, pluginFailed, pluginPending, refreshPluginStartup, st
 import { requestPluginDiagnostics } from './plugin-startup-view'
 import { isRecommendationInstalled, matchesRecommendedPlugin, matchesScriptPlugin, recommendationKey, recommendedDescription, reinstallRequest, scriptOfficialBadge, scriptPluginDescription, scriptPluginName, scriptRecommendations, scriptSourceLabel, scriptUpdate, updateLabel } from './plugins-script-display'
 import { ScriptCatalogStatus, ScriptRepository, scriptUnavailableReason, type PluginOpenExternal } from './plugins-script-catalog'
-import { ScriptPaginationFooter, useScriptPagination } from './plugins-script-pagination'
+import { PluginStreamFooter, usePluginStream } from './plugins-stream-footer'
 import { scriptSelectionKey } from './plugins-batch-items'
 import type { PluginCardSelection } from './plugins-store'
 
@@ -64,6 +64,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   const [operationTarget, setOperationTarget] = React.useState<ScriptOperation['target']>()
   const pending = React.useRef(false)
   const lastInstallRequest = React.useRef(0)
+  const sectionRef = React.useRef<HTMLElement>(null)
   const prefix = React.useId()
   const locked = disabled || busy || state.operation.active
   const recommended = scriptRecommendations(state)
@@ -91,13 +92,14 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   gallery.sort((left, right) => publisherRank[scriptPublisher(left.value)] - publisherRank[scriptPublisher(right.value)]
     || (right.value.stars ?? -1) - (left.value.stars ?? -1))
   const count = gallery.length
-  const page = useScriptPagination(count, JSON.stringify([publisher, status, query.trim().toLocaleLowerCase(), galleryVisible]), galleryVisible)
-  const visibleGallery = gallery.filter((entry, index) => index < page.visible || scriptOperationMatches(operation, entry.value))
+  const stream = usePluginStream(count, JSON.stringify([publisher, status, query.trim().toLocaleLowerCase(), galleryVisible]))
+  const visibleGallery = stream.slice(gallery)
   const catalogPending = Boolean(state.catalog && (state.catalog.refreshing
     || (!state.catalog.marketCheckedAt && !state.catalog.marketError)
     || (!state.catalog.githubCheckedAt && !state.catalog.githubError)))
   const catalogFailed = Boolean(state.catalog?.marketError || state.catalog?.githubError)
-  const unmatchedOperation = operation.active && !gallery.some(entry => scriptOperationMatches(operation, entry.value))
+  const operationInGallery = gallery.some(entry => scriptOperationMatches(operation, entry.value))
+  const unmatchedOperation = operation.active && !visibleGallery.some(entry => scriptOperationMatches(operation, entry.value))
   const iconUrl = (value?: string | null) => {
     const path = cachedPluginIconPath(value)
     return path ? resolveIcon(path) : undefined
@@ -163,8 +165,8 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
 
   return <>
     {failure ? <Alert variant='destructive' className='whitespace-pre-wrap break-words'>{failure}</Alert> : null}
-    {galleryVisible || count > 0 || unmatchedOperation ? <section className='@container/plugin-gallery min-w-0' aria-label={t('Magpie 插件')}>
-      <PluginSectionHeading t={t} title={t('Magpie 插件')} count={count + Number(unmatchedOperation)}
+    {galleryVisible || count > 0 || unmatchedOperation ? <section ref={sectionRef} className='@container/plugin-gallery min-w-0' aria-label={t('Magpie 插件')}>
+      <PluginSectionHeading t={t} title={t('Magpie 插件')} count={count + Number(operation.active && !operationInGallery)}
         filters={galleryVisible ? <SegmentedControl<ScriptPublisherFilter> value={publisher} onValueChange={changePublisher}
           aria-label={`${t('Magpie 插件')} · ${t('来源')}`} className='max-w-full flex-wrap' options={[
             { value: 'all', label: t('全部'), count: publisherCount('all') },
@@ -228,7 +230,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
             </>} />
         })}
       </div>
-      {galleryVisible ? <ScriptPaginationFooter page={page} total={count} t={t} /> : null}
+      {galleryVisible ? <PluginStreamFooter stream={stream} t={t} /> : null}
       {galleryVisible && count === 0 && !unmatchedOperation ? <Card><Empty>
         <EmptyTitle>{catalogPending ? t('正在读取插件清单…') : catalogFailed ? t('插件清单暂未完整读取')
           : !recommended.length && !state.packages.length ? t('暂无可安装的插件') : t('没有符合筛选条件的插件')}</EmptyTitle>

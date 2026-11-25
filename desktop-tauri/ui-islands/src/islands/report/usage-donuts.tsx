@@ -6,6 +6,8 @@ import {
 import { DEFAULT_DONUT_SETTINGS, DONUT_THRESHOLDS, donutView, formatInt, type DonutSettings, type DonutView, type StatsGroup } from '../report-charts'
 import { UsageDonut } from './report-recharts'
 import { t } from '../../i18n'
+import { buildMergeOptionItems, type MergeKind, type MergeRules } from './report-merge'
+import { ReportMergeDialog } from './merge-dialog'
 
 const SETTINGS_KEY = 'workbuddy-desktop-report-donut-settings'
 const TIP_GROUPING = t('合并只作用于饼图。低于阈值的扇区归入“其他”，右侧列表完整保留每个项目，总量和占比不变。')
@@ -24,13 +26,21 @@ function readSettings(): DonutSettings {
   } catch { return DEFAULT_DONUT_SETTINGS }
 }
 
-function DonutPanel({ panelId, listId, title, tip, view, ariaLabel, itemLabel, countText, emptyText }: {
+function MergeIcon() {
+  return <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+    <path d='M3 4h4l3 4-3 4H3M10 8h4' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' />
+  </svg>
+}
+
+function DonutPanel({ panelId, listId, title, tip, view, ariaLabel, itemLabel, countText, emptyText, action }: {
   panelId: string; listId: string; title: string; tip: string; ariaLabel: string; itemLabel: string
   view: DonutView | null; countText: string; emptyText: string
+  action?: React.ReactNode
 }) {
   return <Card render={<section />} className='report-card report-donut-card' id={panelId}>
     <CardHeader className='report-card-header'>
       <CardTitle>{title}</CardTitle><span className='tip-q' data-tip={`${tip}\n\n${TIP_GROUPING}`} />
+      {action}
       <span className='report-card-meta ml-auto'>{countText}</span>
     </CardHeader>
     <CardContent className='report-donut-content'><div id={listId}>
@@ -39,8 +49,29 @@ function DonutPanel({ panelId, listId, title, tip, view, ariaLabel, itemLabel, c
   </Card>
 }
 
-export function ReportUsageDonuts({ models, providers }: { models: StatsGroup[] | null; providers: StatsGroup[] | null }) {
+export function ReportUsageDonuts({
+  models,
+  providers,
+  rawModels,
+  rawProviders,
+  modelMergeRules,
+  providerMergeRules,
+  onModelMergeRulesChange,
+  onProviderMergeRulesChange,
+  lookupProviderLabel,
+}: {
+  models: StatsGroup[] | null
+  providers: StatsGroup[] | null
+  rawModels: StatsGroup[] | null
+  rawProviders: StatsGroup[] | null
+  modelMergeRules: MergeRules
+  providerMergeRules: MergeRules
+  onModelMergeRulesChange: (next: MergeRules) => void
+  onProviderMergeRulesChange: (next: MergeRules) => void
+  lookupProviderLabel?: (id: string) => string | undefined
+}) {
   const [settings, setSettings] = React.useState<DonutSettings>(readSettings)
+  const [mergeDialogKind, setMergeDialogKind] = React.useState<MergeKind | null>(null)
   const switchId = React.useId()
   const thresholdId = React.useId()
   const changeSettings = (patch: Partial<DonutSettings>) => {
@@ -52,6 +83,19 @@ export function ReportUsageDonuts({ models, providers }: { models: StatsGroup[] 
   }
   const modelView = donutView(models || undefined, t('未知模型'), settings)
   const providerView = donutView(providers || undefined, t('未知'), settings)
+  const modelRuleCount = Object.keys(modelMergeRules).length
+  const providerRuleCount = Object.keys(providerMergeRules).length
+
+  const mergeItems = React.useMemo(() => {
+    if (mergeDialogKind === 'model') {
+      return buildMergeOptionItems('model', rawModels, modelMergeRules, t('未知模型'))
+    }
+    if (mergeDialogKind === 'provider') {
+      return buildMergeOptionItems('provider', rawProviders, providerMergeRules, t('未知'), lookupProviderLabel)
+    }
+    return []
+  }, [mergeDialogKind, rawModels, rawProviders, modelMergeRules, providerMergeRules, lookupProviderLabel])
+
   if (!models && !providers) return null
   return <section className='report-donut-section' aria-label={t('用量分布')}>
     <div className='report-section-heading'>
@@ -78,11 +122,30 @@ export function ReportUsageDonuts({ models, providers }: { models: StatsGroup[] 
     <div className='report-donut-grid'>
       {models ? <DonutPanel panelId='report-models-panel' listId='report-models-donut'
         title={t('模型用量')} tip={TIP_MODELS} ariaLabel={t('模型用量占比')} itemLabel={t('模型')} view={modelView}
+        action={<Button type='button' variant='ghost' size='xs' className='report-merge-trigger' onClick={() => setMergeDialogKind('model')}>
+          <MergeIcon />
+          {modelRuleCount > 0 ? t('合并管理（{n}）', { n: formatInt(modelRuleCount) }) : t('合并管理')}
+        </Button>}
         countText={t('{n} 个模型', { n: formatInt(modelView?.count || 0) })} emptyText={t('所选范围内还没有模型用量')} /> : null}
       {providers ? <DonutPanel panelId='report-providers-pie-panel' listId='report-providers-donut'
         title={t('提供商用量')} tip={TIP_PROVIDERS} ariaLabel={t('提供商用量占比')} itemLabel={t('提供商')} view={providerView}
+        action={<Button type='button' variant='ghost' size='xs' className='report-merge-trigger' onClick={() => setMergeDialogKind('provider')}>
+          <MergeIcon />
+          {providerRuleCount > 0 ? t('合并管理（{n}）', { n: formatInt(providerRuleCount) }) : t('合并管理')}
+        </Button>}
         countText={t('{n} 家提供商', { n: formatInt(providerView?.count || 0) })} emptyText={t('所选范围内还没有提供商用量')} /> : null}
     </div>
     <p className='report-distribution-note'>{TIP_GROUPING}</p>
+    <ReportMergeDialog
+      open={mergeDialogKind !== null}
+      onOpenChange={open => { if (!open) setMergeDialogKind(null) }}
+      kind={mergeDialogKind || 'provider'}
+      items={mergeItems}
+      rules={mergeDialogKind === 'model' ? modelMergeRules : providerMergeRules}
+      onRulesChange={next => {
+        if (mergeDialogKind === 'model') onModelMergeRulesChange(next)
+        else onProviderMergeRulesChange(next)
+      }}
+    />
   </section>
 }

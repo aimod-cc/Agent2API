@@ -95,7 +95,7 @@ export function RoutingSpecialHits({ kind, refreshToken, onOpenReplay }: {
           <span className='routing-hits-to' title={rewrite.to}>{rewrite.to}</span>
         </span>
         <span className='routing-hits-meta'>
-          <span>{new Date(row.ts).toLocaleTimeString()}</span>
+          <span>{new Date(row.ts).toLocaleTimeString(document.documentElement.lang || undefined)}</span>
           <span className='routing-hits-account' title={row.accountName || row.providerLabel || ''}>
             {row.accountName || row.providerLabel || '—'}
           </span>

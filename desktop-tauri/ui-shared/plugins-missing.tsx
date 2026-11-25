@@ -2,7 +2,7 @@ import * as React from 'react'
 import { Alert, Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Label } from '@ui'
 import { PluginArtwork } from './plugin-artwork'
 import type { HiddenAccountProvider } from './plugins'
-import type { PluginBatchItem } from './plugins-batch-items'
+import type { PluginAliasBinding, PluginBatchItem } from './plugins-batch-items'
 import type { PluginTranslate } from './plugins-store'
 
 type MissingStep = 'pick' | 'confirm'
@@ -32,11 +32,15 @@ function PluginMissingRows({ items, selected, disabled, onToggle, t }: {
   </div>)}</div>
 }
 
-export function PluginMissingDialog({ required, unresolved, disabled, onClose, onInstall, t }: {
-  required: PluginBatchItem[]; unresolved: HiddenAccountProvider[]; disabled: boolean
-  onClose(): void; onInstall(items: PluginBatchItem[]): void; t: PluginTranslate
+export function PluginMissingDialog({ required, bindable = [], unresolved, disabled, onClose, onInstall, onBindAlias, t }: {
+  required: PluginBatchItem[]; bindable?: PluginAliasBinding[]; unresolved: HiddenAccountProvider[]; disabled: boolean
+  onClose(): void; onInstall(items: PluginBatchItem[]): void
+  onBindAlias?(binding: { packageId: string; original: string; alias: string }): Promise<void>
+  t: PluginTranslate
 }) {
   const [selected, setSelected] = React.useState(() => new Set(required.filter(item => item.installable && !item.active).map(item => item.key)))
+  const [bindingKey, setBindingKey] = React.useState('')
+  const [bindError, setBindError] = React.useState('')
   const knownKeys = React.useRef(new Set(required.map(item => item.key)))
   React.useEffect(() => {
     const valid = new Set(required.map(item => item.key))
@@ -63,11 +67,20 @@ export function PluginMissingDialog({ required, unresolved, disabled, onClose, o
   const activeStep: MissingStep = step === 'confirm' && scripts ? 'confirm' : 'pick'
   const toggle = (key: string, checked: boolean) => { setTrusted(false); setSelected(previous => { const next = new Set(previous); checked ? next.add(key) : next.delete(key); return next }) }
   const resetBodyScroll = () => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }
+  const handleBind = async (packageId: string, original: string, alias: string) => {
+    if (!onBindAlias || bindingKey) return
+    const key = `${packageId}:${alias}`
+    setBindingKey(key)
+    setBindError('')
+    try { await onBindAlias({ packageId, original, alias }) }
+    catch (cause) { setBindError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setBindingKey('') }
+  }
   const unresolvedAlert = unresolved.length
     ? <Alert variant='warning' className='shrink-0'><p>{t('以下提供商暂未找到对应的可安装插件：{names}', { names: unresolved.map(item => item.label).join(t('、')) })}</p></Alert>
     : null
 
-  return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
+  return <Dialog open onOpenChange={open => { if (!open && !bindingKey) onClose() }}>
     <DialogContent className='w-[min(840px,calc(100vw-48px))] max-sm:w-[calc(100vw-24px)]'>
       <DialogHeader className='shrink-0'><div>
         <DialogTitle>{activeStep === 'confirm' ? t('脚本插件安全确认') : t('补全缺失的插件')}</DialogTitle>
@@ -78,8 +91,28 @@ export function PluginMissingDialog({ required, unresolved, disabled, onClose, o
       <DialogBody ref={bodyRef} className='min-h-0 gap-4'>
         {activeStep === 'pick' ? <>
           {unresolvedAlert}
-          {required.length ? <PluginMissingRows items={required} selected={selected} disabled={disabled} onToggle={toggle} t={t} /> : null}
-          {!required.length && !unresolved.length ? <p className='text-sm text-muted-foreground'>{t('没有缺失的插件')}</p> : null}
+          {bindError ? <Alert variant='destructive' className='shrink-0'>{bindError}</Alert> : null}
+          {bindable.length ? <div className='space-y-2.5'>
+            <p className='m-0 text-xs text-muted-foreground'>{t('以下同步账号的提供商标识与本机已安装插件不一致，确认属于同一插件后可直接关联恢复：')}</p>
+            <div className='plugins-repair-rows'>{bindable.map(entry => entry.candidates.map(candidate => {
+              const key = `${candidate.packageId}:${entry.provider.id}`
+              const busy = bindingKey === key
+              return <div key={key} className='plugins-repair-row'>
+                <PluginArtwork src={candidate.icon} />
+                <div className='min-w-0 flex-1'>
+                  <p className='m-0 text-sm'>{candidate.name}</p>
+                  <p className='m-0 mt-1 text-xs text-muted-foreground'>{candidate.sourceLabel} · {entry.provider.label}</p>
+                  <p className='m-0 mt-1.5 text-xs text-warning'>{t('{count} 个账号等待插件恢复', { count: entry.provider.count })}</p>
+                </div>
+                {onBindAlias ? <Button size='sm' variant='secondary' disabled={disabled || Boolean(bindingKey) || candidate.active}
+                  onClick={() => void handleBind(candidate.packageId, candidate.original, entry.provider.id)}>
+                  {busy ? t('正在关联…') : t('关联到此插件')}
+                </Button> : null}
+              </div>
+            }))}</div>
+          </div> : null}
+          {required.length ? <PluginMissingRows items={required} selected={selected} disabled={disabled || Boolean(bindingKey)} onToggle={toggle} t={t} /> : null}
+          {!required.length && !bindable.length && !unresolved.length ? <p className='text-sm text-muted-foreground'>{t('没有缺失的插件')}</p> : null}
         </> : <>
           <ul className='plugins-confirm-list min-h-0 max-h-[min(220px,30vh)] overflow-y-auto'>{scriptPicked.map(item => <li key={item.key}>
             <PluginArtwork src={item.icon} />
@@ -107,8 +140,8 @@ export function PluginMissingDialog({ required, unresolved, disabled, onClose, o
           {accounts ? <p className='mt-1'>{t('{count} 个账号等待恢复', { count: accounts })}</p> : null}
         </div>
         {activeStep === 'pick' ? <>
-          <Button variant='outline' onClick={onClose}>{t('稍后')}</Button>
-          <Button disabled={disabled || !picked.length} onClick={() => {
+          <Button variant='outline' disabled={Boolean(bindingKey)} onClick={onClose}>{t('稍后')}</Button>
+          <Button disabled={disabled || Boolean(bindingKey) || !picked.length} onClick={() => {
             if (scripts) { setTrusted(false); setStep('confirm'); resetBodyScroll() }
             else onInstall(picked)
           }}>{scripts ? t('下一步（{count}）', { count: picked.length }) : t('补全所选（{count}）', { count: picked.length })}</Button>

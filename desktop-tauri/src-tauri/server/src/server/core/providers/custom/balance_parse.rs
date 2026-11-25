@@ -350,121 +350,12 @@ fn percent_text(value: f64) -> String {
 /// 重置时刻 → 本地时区 `MM-DD HH:MM`（与 `zcode::monitor::reset_text` 同口径：
 /// 上游给的是绝对时刻，按操作者本机时区渲染；时间戳越界给 None ——
 /// 宁可不写这一段，也不编一个时刻）
-fn reset_text(ms: Option<i64>) -> Option<String> {
+pub(super) fn reset_text(ms: Option<i64>) -> Option<String> {
     let ms = ms.filter(|value| *value > 0)?;
     chrono::Local
         .timestamp_millis_opt(ms)
         .single()
         .map(|at| at.format("%m-%d %H:%M").to_string())
-}
-
-/// NewAPI `/api/status` 里的配额显示口径（`data.quota_per_unit` 等）。
-pub(super) struct QuotaDisplay {
-    pub display_type: String,
-    pub quota_per_unit: f64,
-    pub usd_exchange_rate: f64,
-    pub custom_currency_symbol: String,
-    pub custom_currency_exchange_rate: f64,
-}
-
-/// 解析 `/api/status` 的显示口径（读不出 / 汇率缺失时给 None —— 与源实现
-/// 同口径：**宁可退回原始配额，也不用默认汇率算出一个错的金额**）。
-pub(super) fn new_api_display(payload: &Value) -> Option<QuotaDisplay> {
-    let data = payload.get("data").and_then(map_of)?;
-    let quota_per_unit = number_at(data, "quota_per_unit").filter(|value| *value > 0.0)?;
-    let mut display_type = data
-        .get("quota_display_type")
-        .and_then(Value::as_str)
-        .map(|text| text.trim().to_ascii_uppercase())
-        .unwrap_or_default();
-    if !["USD", "CNY", "TOKENS", "CUSTOM"].contains(&display_type.as_str()) {
-        display_type = if data.get("display_in_currency").and_then(Value::as_bool) == Some(false) {
-            "TOKENS".to_string()
-        } else {
-            "USD".to_string()
-        };
-    }
-    let usd_exchange_rate = number_at(data, "usd_exchange_rate").unwrap_or(1.0);
-    let custom_currency_exchange_rate = number_at(data, "custom_currency_exchange_rate").unwrap_or(1.0);
-    if display_type == "CNY" && !(usd_exchange_rate > 0.0) {
-        return None;
-    }
-    if display_type == "CUSTOM" && !(custom_currency_exchange_rate > 0.0) {
-        return None;
-    }
-    Some(QuotaDisplay {
-        display_type,
-        quota_per_unit,
-        usd_exchange_rate,
-        custom_currency_symbol: data
-            .get("custom_currency_symbol")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or("")
-            .to_string(),
-        custom_currency_exchange_rate,
-    })
-}
-
-/// 原始配额 → 展示口径（源实现 `displayedAmountRemaining` 的同一条换算链）
-pub(super) fn new_api_display_amount(quota: f64, display: Option<&QuotaDisplay>) -> (f64, String) {
-    let Some(display) = display else { return (quota, "quota".to_string()) };
-    if display.quota_per_unit <= 0.0 {
-        return (quota, "quota".to_string());
-    }
-    let amount_usd = quota / display.quota_per_unit;
-    match display.display_type.as_str() {
-        "CNY" if display.usd_exchange_rate > 0.0 => (amount_usd * display.usd_exchange_rate, "CNY".to_string()),
-        "CUSTOM" if display.custom_currency_exchange_rate > 0.0 => (
-            amount_usd * display.custom_currency_exchange_rate,
-            if display.custom_currency_symbol.is_empty() {
-                "CUSTOM".to_string()
-            } else {
-                display.custom_currency_symbol.clone()
-            },
-        ),
-        "TOKENS" => (quota, "quota".to_string()),
-        // USD 与认不出的取值（后者已被 new_api_display 归一成 USD/TOKENS）
-        _ => (amount_usd, "USD".to_string()),
-    }
-}
-
-/// NewAPI `/api/user/self`：`data.quota`（剩余配额）/ `data.used_quota`（已用）。
-pub(super) fn parse_new_api_account(payload: &Value) -> Option<(f64, Option<f64>)> {
-    let data = payload.get("data").and_then(map_of)?;
-    let remaining = number_at(data, "quota")?;
-    Some((remaining, number_at(data, "used_quota")))
-}
-
-/// NewAPI 整套读数组装：主读数按展示口径换算（`/api/status` 没读到就用原始配额）。
-pub(super) fn new_api_document(
-    remaining_raw: f64,
-    used_raw: Option<f64>,
-    display: Option<&QuotaDisplay>,
-    account_payload: &Value,
-    status_payload: Option<&Value>,
-) -> Value {
-    let (remaining, unit) = new_api_display_amount(remaining_raw, display);
-    let used = used_raw.map(|used| new_api_display_amount(used, display).0);
-    let wallets = vec![
-        wallet("remaining", "剩余配额", Some(remaining), &unit),
-        wallet("used", "已用配额", used, &unit),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let mut document = document(Some(remaining), &unit, wallets, account_payload);
-    if let Some(object) = document.as_object_mut() {
-        // 状态接口读到了什么、原始配额是多少：排障时这两样最有用
-        object.insert("quota".to_string(), json!(remaining_raw));
-        if let Some(used_raw) = used_raw {
-            object.insert("usedQuota".to_string(), json!(used_raw));
-        }
-        if let Some(status) = status_payload {
-            object.insert("status".to_string(), status.clone());
-        }
-    }
-    document
 }
 
 /// 智谱 `query-customer-account-report`（两站同一条接口、同一个信封）：

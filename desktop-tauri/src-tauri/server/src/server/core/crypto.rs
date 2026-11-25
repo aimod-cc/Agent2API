@@ -112,6 +112,8 @@ pub enum SecretScope {
     PanelCaptcha,
     /// 本机客户端恢复材料不能随账号密钥的云同步或恢复而失效。
     DesktopLaunch,
+    /// 定时任务类插件的敏感表单字段与每任务专属加密仓库。
+    TaskPlugins,
 }
 
 impl SecretScope {
@@ -127,6 +129,7 @@ impl SecretScope {
             SecretScope::CodingSessions => "coding-sessions.key",
             SecretScope::PanelCaptcha => "panel-captcha.key",
             SecretScope::DesktopLaunch => "desktop-client.key",
+            SecretScope::TaskPlugins => "task-plugins.key",
         }
     }
 
@@ -142,6 +145,7 @@ impl SecretScope {
             SecretScope::CodingSessions => "在 AI 助手的编程会话连接设置里重新输入密钥即可自愈",
             SecretScope::PanelCaptcha => "在机器人校验设置中重新保存 Turnstile 服务端密钥即可恢复",
             SecretScope::DesktopLaunch => "本机凭证备份密钥缺失或不匹配，请保留备份并恢复原 desktop-client.key",
+            SecretScope::TaskPlugins => "在「定时任务」里重新填写密码或重新登录即可自愈",
         }
     }
 }
@@ -169,6 +173,8 @@ fn cache_slot(
         std::sync::OnceLock::new();
     static DESKTOP_LAUNCH: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
         std::sync::OnceLock::new();
+    static TASK_PLUGINS: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
+        std::sync::OnceLock::new();
     match scope {
         SecretScope::UpdateToken => &UPDATE_TOKEN,
         SecretScope::Accounts => &ACCOUNTS,
@@ -176,6 +182,7 @@ fn cache_slot(
         SecretScope::CodingSessions => &CODING_SESSIONS,
         SecretScope::PanelCaptcha => &PANEL_CAPTCHA,
         SecretScope::DesktopLaunch => &DESKTOP_LAUNCH,
+        SecretScope::TaskPlugins => &TASK_PLUGINS,
     }
 }
 

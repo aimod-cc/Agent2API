@@ -233,6 +233,7 @@
 @media (max-width: 767px) {
   .log-list { overflow-x: hidden; }
   #req-list { overflow-x: hidden; }
+  #req-list > .req-row-wrap { min-width: 0 !important; }
   .req-head { display: none; }
   .req-row {
     display: grid;
@@ -250,7 +251,7 @@
   }
   .req-row > span::before {
     content: attr(data-col);
-    flex: 0 0 40px;
+    flex: 0 0 56px;
     font-size: 10.5px;
     font-weight: 600;
     letter-spacing: .03em;
@@ -259,29 +260,27 @@
   .req-row > .req-none,
   .req-row > span:empty { display: none; }
   .req-row > .req-time,
-  .req-row > .req-model,
   .req-row > .req-status,
-  .req-row > .req-retry,
+  .req-row > .req-source,
   .req-row > .req-target,
+  .req-row > .req-model,
   .req-row > .req-dur,
-  .req-row > .req-api-key,
   .req-row > .req-speed,
-  .req-row > .req-credit,
-  .req-row > .req-cost,
   .req-row > .req-usage,
-  .req-row > .req-client,
+  .req-row > .req-billing,
   .req-row > .req-error-cell,
   .req-row > .req-detail {
     grid-row: auto;
     grid-column: auto;
     justify-self: stretch;
+    flex-direction: row;
+    align-items: center;
+    text-align: left;
   }
-  .req-row > .req-detail { justify-self: stretch; justify-content: flex-end; }
-  .req-row > .req-usage { flex-direction: column; align-items: flex-start; gap: 2px; }
-  .req-row > .req-usage::before { flex: 0 0 auto; }
-  .req-row > .req-usage > * { flex: 0 0 auto; width: 100%; }
-  .req-row > .req-error-cell { word-break: break-word; }
+  .req-row .req-sub-indent { padding-left: 0; }
+  .req-row > .req-error-cell { word-break: break-word; white-space: normal; }
   .req-row > .req-detail { justify-content: flex-end; }
+  .req-inline-error { margin: 0 12px 10px; }
 }
 @media (max-width: 767px) {
   .log-row {
@@ -506,14 +505,14 @@
     word-break: break-word;
     overflow-wrap: anywhere;
   }
-  .asst-top { flex-wrap: wrap; row-gap: 6px; }
-  .asst-title { flex: 1 1 100%; order: -1; }
+  .asst-top { gap: 6px; }
   .asst-msg .md-table, .asst-msg .asst-mini-table {
     display: block;
     overflow-x: auto;
     max-width: 100%;
   }
-  .asst-msg.bot .md pre {
+  .asst-msg.bot .md pre,
+  .asst-code-pre {
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
@@ -774,15 +773,12 @@
 }
 
 @media (max-width: 767.98px) {
-  .asst-composer {
-    padding-bottom: max(8px, env(safe-area-inset-bottom));
+  .asst-composer-wrap {
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
   }
   .asst-scroll { padding-bottom: 8px; }
   .asst-composer textarea { max-height: 96px; }
-  .asst-footline { display: none; }
-  .asst-top .asst-top-hint { display: none; }
-  .asst-suggests { width: 100%; }
-  .asst-suggests > * { width: 100%; }
+  .asst-quick-row { width: 100%; }
 }
 @media (max-width: 767.98px) {
   .models-table tr:not(.tr-group) {

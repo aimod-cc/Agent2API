@@ -458,6 +458,9 @@ pub fn executable_provider_ids() -> Vec<String> {
 /// `match id { "catpaw" => "CatPaw", ... }`：那种表漏一家不会报错，
 /// 只会让界面上少一个名字。
 pub fn label_of(id: &str) -> String {
+    if id == "local-direct" {
+        return "本机直连".to_string();
+    }
     if id.starts_with(crate::server::core::custom_providers::ID_PREFIX) {
         if let Some(label) = crate::server::core::custom_providers::label_of(id) {
             return label;

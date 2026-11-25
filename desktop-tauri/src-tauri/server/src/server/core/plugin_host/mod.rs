@@ -37,6 +37,7 @@ pub(crate) mod error_rules;
 mod errors;
 mod gemini_signatures;
 mod install;
+pub(crate) use install::OFFICIAL_PUBKEYS;
 mod leased_stream;
 mod lifecycle;
 mod logs;
@@ -212,11 +213,35 @@ pub fn checkin_of(provider: &str) -> Option<proto::CheckinInfo> {
 }
 
 /// 领取能力未归入新手福利或套餐时，作为独立的手动活动福利展示。
+///
+/// 排除仅支持分档日活保活（`keepalive`/`claim`/`full`，无普通签到）或仅支持按需领套餐
+/// （`daily: false` + `capabilities.checkin` + `CheckinMode::Checkin`）的提供商，
+/// 它们不返回 `{ campaigns: [...] }` 结构。
+fn is_campaign_provider(info: &proto::ProviderInfo) -> bool {
+    info.capabilities.claims
+        && info.checkin.as_ref().is_some_and(|checkin| {
+            if checkin.onboarding || checkin.plans || checkin.growth {
+                return false;
+            }
+            let daily_activity_only = checkin.daily
+                && !info.capabilities.checkin
+                && checkin.modes.iter().any(|mode| {
+                    matches!(
+                        mode,
+                        proto::CheckinMode::Keepalive
+                            | proto::CheckinMode::Claim
+                            | proto::CheckinMode::Full
+                    )
+                });
+            let on_demand_checkin_only = !checkin.daily
+                && info.capabilities.checkin
+                && checkin.modes.contains(&proto::CheckinMode::Checkin);
+            !daily_activity_only && !on_demand_checkin_only
+        })
+}
+
 pub fn has_campaign_rewards(provider: &str) -> bool {
-    provider_info(provider).is_some_and(|info| {
-        info.capabilities.claims
-            && info.checkin.is_some_and(|checkin| !checkin.onboarding && !checkin.plans)
-    })
+    provider_info(provider).is_some_and(|info| is_campaign_provider(&info))
 }
 
 /// 全部申报的签到能力（`provider id → 申报`）。
@@ -256,8 +281,9 @@ pub fn checkin_provider_metadata() -> CheckinProviderMetadata {
     let mut campaign_providers = std::collections::HashSet::new();
     for info in providers {
         let id = info.id.as_str().to_string();
+        let is_campaign = is_campaign_provider(&info);
         if let Some(checkin) = info.checkin {
-            if info.capabilities.claims && !checkin.onboarding && !checkin.plans {
+            if is_campaign {
                 campaign_providers.insert(id.clone());
             }
             checkin_by_provider.insert(id, checkin);
@@ -612,17 +638,7 @@ impl Host {
         cancel: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<serde_json::Value, proto::WireError> {
         if self.options.wasm.is_some() {
-            if let Some(token) = cancel {
-                return tokio::select! {
-                    biased;
-                    _ = token.cancelled() => Err(proto::WireError::with_code(
-                        "登录已取消",
-                        proto::WireError::ABORTED,
-                    )),
-                    result = self.call_wasm(method, params, timeout) => result,
-                };
-            }
-            return self.call_wasm(method, params, timeout).await;
+            return self.call_wasm_with_cancel(method, params, timeout, cancel).await;
         }
         let lease = if matches!(method, proto::methods::gateway::INIT | proto::methods::gateway::SHUTDOWN | proto::methods::gateway::ABORT) {
             None

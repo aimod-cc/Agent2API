@@ -13,6 +13,7 @@ import { KeysView } from './views/KeysView'
 import { ModelsView } from './views/ModelsView'
 import { NavCustomizerSheet } from './views/NavCustomizerSheet'
 import { RoutingView } from './views/RoutingView'
+import { ScheduledView } from './views/ScheduledView'
 import {
   ForwardingConfigSheet,
   LogsSheet,
@@ -138,6 +139,7 @@ export function App() {
     <>
       {tab === 'dashboard' ? <DashboardView /> : null}
       {tab === 'checkin' ? <CheckinView /> : null}
+      {tab === 'scheduled' ? <ScheduledView /> : null}
       {tab === 'accounts' ? <AccountsView /> : null}
       {tab === 'models' ? <ModelsView /> : null}
       {tab === 'routing' ? <RoutingView /> : null}

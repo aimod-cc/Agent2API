@@ -116,11 +116,11 @@
 /* ── 逐项明细弹窗 ── */
 .maintenance-detail-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; overflow-x: auto; }
 .maintenance-detail-scroll { min-height: 0; flex: 1; }
-.maintenance-detail-table { min-width: 760px; }
+.maintenance-detail-table { min-width: 764px; }
 .maintenance-detail-table th { font-size: 11px; font-weight: 400; letter-spacing: 0; }
 .maintenance-detail-table tbody tr:last-child > td { border-bottom: 0; }
-/* 原因列要能读完整：窄了换行，不横向撑破表格 */
-.maintenance-detail-table .maintenance-reason { max-width: 340px; min-width: 160px; white-space: normal; overflow-wrap: anywhere; line-height: 1.6; }
+/* 原因列由 <col> 和拖动列宽决定宽度，这里只负责自然换行，不设 max-width 以免拖宽失效 */
+.maintenance-detail-table .maintenance-reason { white-space: normal; overflow-wrap: anywhere; line-height: 1.6; }
 
 .maintenance-metadata { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--hairline); color: var(--text-3); font-size: 12px; }
 .maintenance-detail-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--text-3); font-size: 11.5px; }

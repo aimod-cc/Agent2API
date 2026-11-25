@@ -51,6 +51,14 @@ pub fn known_provider(provider: &str) -> bool {
                 .iter()
                 .any(|package| package.providers.iter().any(|id| id == provider))
         })
+        || super::identities::shared_db()
+            .and_then(|db| super::identities::load_from_db(&db))
+            .is_some_and(|synced| {
+                synced
+                    .packages
+                    .values()
+                    .any(|record| record.aliases.values().any(|id| id == provider))
+            })
 }
 
 pub fn provider_state(provider: &str) -> Option<&'static str> {
@@ -144,6 +152,7 @@ pub fn snapshot() -> Value {
                 "loaded": package.enabled && plugin_host::startup::provider(id).is_some_and(|state| state.available)
                     && package_for_provider(id).as_deref() == Some(package.id.as_str()),
             })).collect::<Vec<_>>(),
+            "providerAliases": super::identities::package_aliases(package),
             "running": package.enabled && plugin_host::startup::status(&package.id)
                 .is_some_and(|status| status.phase == plugin_host::startup::Phase::Ready),
         })
@@ -156,6 +165,7 @@ pub fn snapshot() -> Value {
     }
     json!({
         "runtime": super::bun::snapshot(), "packages": items, "operation": super::operations::operation(),
+        "identities": super::identities::snapshot_json(),
         "error": registry.err(), "hostError": current.and_then(|state| state.last_error),
         "recommended": recommendations[0], "recommendations": recommendations,
         "updates": super::updates::snapshot(), "catalog": super::catalog::status(),
@@ -175,13 +185,23 @@ pub(in crate::server::core::plugin_host) fn package_names(registry: &Registry) -
 
 pub async fn start(store: AccountStore) -> Result<(), String> {
     let mut registry = super::storage::read()?;
+    if let Some(db) = store.database() {
+        if super::identities::reconcile_on_startup(&mut registry, db) {
+            let _ = super::storage::save(&registry);
+        }
+    }
     if !registry.packages.is_empty() {
         super::icons::spawn();
     }
     revoke_ownership_sources(&registry);
     plugin_host::startup::configure_scripts(&registry);
     let ids: Vec<_> = registry.packages.iter().filter(|package| package.enabled).map(|package| package.id.clone()).collect();
-    if ids.is_empty() { return Ok(()); }
+    if ids.is_empty() {
+        if let Some(db) = store.database() {
+            super::identities::sync_to_db(&registry, db);
+        }
+        return Ok(());
+    }
     let loading = plugin_host::startup::begin(ids, plugin_host::startup::Phase::Runtime);
     let executable = match super::bun::ensure().await {
         Ok(executable) => executable,
@@ -202,6 +222,9 @@ pub async fn start(store: AccountStore) -> Result<(), String> {
     }
     revoke_ownership_sources(&registry);
     super::storage::save(&registry)?;
+    if let Some(db) = store.database() {
+        super::identities::sync_to_db(&registry, db);
+    }
     super::icons::wake(false);
     Ok(())
 }

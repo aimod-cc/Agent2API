@@ -321,3 +321,89 @@ pub async fn import_client(State(state): State<ServerState>, body: Bytes) -> Res
     })
     .await
 }
+
+pub async fn get_local_direct(State(state): State<ServerState>) -> Response {
+    let stats = state.request_stats();
+    match crate::server::core::blocking::run(move || {
+        Ok::<Value, String>(crate::server::core::local_direct::status_json(&stats))
+    })
+    .await
+    {
+        Ok(Ok(value)) => ok_json(value),
+        Ok(Err(error)) => management_error(400, error),
+        Err(error) => management_error(500, error.to_string()),
+    }
+}
+
+pub async fn update_local_direct(
+    State(state): State<ServerState>,
+    body: Bytes,
+) -> Response {
+    let body = match payload(&body) {
+        Ok(value) => value,
+        Err(error) => return management_error(400, error),
+    };
+    let stats = state.request_stats();
+    let updated = match crate::server::core::blocking::run(move || {
+        let saved = crate::server::core::local_direct::settings::update_from_json(&body)?;
+        crate::server::core::local_direct::notify_settings_changed();
+        Ok::<(bool, Value), String>((
+            saved.enabled,
+            crate::server::core::local_direct::status_json(&stats),
+        ))
+    })
+    .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(error)) => return management_error(400, error),
+        Err(error) => return management_error(500, error.to_string()),
+    };
+
+    if updated.0 {
+        crate::server::core::local_direct::trigger_background_sync(
+            state.request_stats(),
+            false,
+            None,
+        );
+    }
+    let mut status = updated.1;
+    if let Some(obj) = status.as_object_mut() {
+        obj.insert("success".to_string(), Value::Bool(true));
+    }
+    ok_json(status)
+}
+
+pub async fn sync_local_direct(
+    State(state): State<ServerState>,
+    body: Bytes,
+) -> Response {
+    let parsed = if body.is_empty() {
+        Value::Null
+    } else {
+        match payload(&body) {
+            Ok(value) => value,
+            Err(error) => return management_error(400, error),
+        }
+    };
+    let force_rescan = parsed
+        .get("forceRescan")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let agent_id = parsed
+        .get("agentId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    match crate::server::core::local_direct::sync_now(
+        state.request_stats(),
+        force_rescan,
+        agent_id,
+    )
+    .await
+    {
+        Ok(value) => ok_json(value),
+        Err(error) => management_error(500, error),
+    }
+}

@@ -1,4 +1,4 @@
-import { t } from './i18n'
+import { locale, t } from './i18n'
 import { formatUnitCompact, numberLocaleTag } from './units'
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -161,12 +161,13 @@ export function formatRelativeTime(timestampMs?: number | null): string {
   const diffSec = Math.round((ts - Date.now()) / 1000)
   const absSec = Math.abs(diffSec)
   if (absSec < 45) return diffSec >= 0 ? t('即将') : t('刚刚')
+  const relativeTime = new Intl.RelativeTimeFormat(locale(), { numeric: 'always' })
   const mins = Math.round(absSec / 60)
-  if (mins < 60) return diffSec >= 0 ? `${mins} 分钟后` : `${mins} 分钟前`
+  if (mins < 60) return relativeTime.format(diffSec >= 0 ? mins : -mins, 'minute')
   const hours = Math.round(mins / 60)
-  if (hours < 24) return diffSec >= 0 ? `${hours} 小时后` : `${hours} 小时前`
+  if (hours < 24) return relativeTime.format(diffSec >= 0 ? hours : -hours, 'hour')
   const days = Math.round(hours / 24)
-  if (days < 60) return diffSec >= 0 ? `${days} 天后` : `${days} 天前`
+  if (days < 60) return relativeTime.format(diffSec >= 0 ? days : -days, 'day')
   return formatDateTime(ts)
 }
 

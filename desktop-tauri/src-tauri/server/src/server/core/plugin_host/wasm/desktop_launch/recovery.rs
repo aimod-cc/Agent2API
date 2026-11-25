@@ -54,7 +54,7 @@ pub async fn prepare(manager: Source, db: Db, id: String) -> Result<Value, Strin
     let running = crate::server::core::blocking::run(move || windows::running(&running_executable)).await
         .map_err(|_| "本机恢复进程检查中断")??;
     let operation = Arc::new(Operation {
-        id: super::operations::random_id()?, manager, binding, db, executable: PathBuf::from(executable), targets: Arc::new(targets), setting,
+        id: super::operations::random_id()?, manager, binding, db, executable: PathBuf::from(executable), targets: Arc::new(targets), setting, launch_args: Vec::new(),
         restart: running, hot_switch: false, initial_running: running, proxy: super::proxy::LaunchProxyState::disabled(), pending_backup: Some(id),
         cancel: CancellationToken::new(), deadline: Instant::now() + std::time::Duration::from_secs(180),
         state: std::sync::Mutex::new(State { phase: "awaiting_confirmation", message: String::new(), confirmed: false, worker: false,

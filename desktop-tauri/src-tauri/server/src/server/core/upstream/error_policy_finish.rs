@@ -62,8 +62,15 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     let settings = &ctx.error_policy.settings;
     let decision = error.routing_error.clone().unwrap_or_else(|| error_policy::for_error_with(&ctx.error_policy, &target.provider, &model, error, false));
     error_policy::attach(error, &decision);
-    error_policy::note(ctx.telemetry, &decision, None);
     let replay_or_started = ctx.telemetry.replay_guard().blocked() || ctx.telemetry.response_started();
+    let blocked_reason = if ctx.telemetry.response_started() {
+        Some("响应已开始，未重放；只记录原账号的恢复时间")
+    } else if ctx.telemetry.replay_guard().blocked() {
+        Some("已进入不可重放状态，只记录账号状态，不重发不换号")
+    } else {
+        None
+    };
+    error_policy::note(ctx.telemetry, &decision, blocked_reason);
     if decision.hard_stop || ctx.telemetry.is_cancelled() { return false; }
     if let Some(account) = target.account_id.as_deref() {
         if decision.deprioritizes() {
@@ -86,7 +93,7 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
                 service.route.breaker_failure(account, settings.breaker_failures as i64, settings.breaker_seconds as i64, logging::now_ms());
             }
         }
-        if decision.kind == ErrorKind::Auth && target.account.as_ref().is_some_and(|account| account["needsRelogin"] == true) {
+        if !replay_or_started && decision.kind == ErrorKind::Auth && target.account.as_ref().is_some_and(|account| account["needsRelogin"] == true) {
             ctx.telemetry.note_error_policy(json!({ "reason": "该账号需要重新登录" }));
         }
     }

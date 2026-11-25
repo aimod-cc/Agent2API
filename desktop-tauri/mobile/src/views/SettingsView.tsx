@@ -6,6 +6,7 @@ import { formatBytes, formatNumber } from '../core/format'
 import { localeOptions, rawLocale, setLocale, t } from '../core/i18n'
 import { isChineseUnits, type UnitsPreference } from '../core/units'
 import { baseLabel, nativePlatform, openExternalUrl, serverIdentity } from '../core/servers'
+import { useLoginNoAutoOpen } from '../../../ui-shared/login-browser-prefs'
 import { store, useStore, type ThemeMode } from '../core/store'
 import {
   APP_VERSION,
@@ -22,6 +23,7 @@ import {
 import {
   CommonCard,
   CommonScaffold,
+  CommonSwitch,
   getTabMeta,
   ListGroup,
   ListItem,
@@ -61,6 +63,7 @@ export function SettingsView() {
     revision,
   } = useStore()
   const currentLocale = rawLocale()
+  const [loginNoAutoOpen, setLoginNoAutoOpen] = useLoginNoAutoOpen()
   const [langPickerOpen, setLangPickerOpen] = useState(false)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
@@ -407,6 +410,17 @@ export function SettingsView() {
       </CommonCard>
 
       <ListGroup>
+        <ListItem
+          icon='link'
+          title={t('使用系统浏览器时不自动打开')}
+          subtitle={t('仅生成只读授权链接供复制，不自动跳转浏览器')}
+          trailing={
+            <CommonSwitch
+              checked={loginNoAutoOpen}
+              onChange={setLoginNoAutoOpen}
+            />
+          }
+        />
         <ListItem
           icon='sliders'
           title={t('自定义底部导航栏')}

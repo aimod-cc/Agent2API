@@ -1,6 +1,6 @@
 use crate::server::core::upstream::usage;
 use crate::server::logging;
-use crate::server::request_stats::{AttemptDetail, LimiterEvent, NewRequestEntry, RetryEvent, SensitiveHit};
+use crate::server::request_stats::{AttemptDetail, LimiterEvent, NewRequestEntry, PrivacyHit, RetryEvent, SensitiveHit};
 
 use super::pipeline::{truncate_chars, RecordContext, ERROR_SUMMARY_CHARS};
 
@@ -40,6 +40,17 @@ pub(super) fn stored_sensitive_hits(list: &[usage::SensitiveHit]) -> Vec<Sensiti
     }).collect()
 }
 
+pub(super) fn stored_privacy_hits(list: &[usage::PrivacyHit]) -> Vec<PrivacyHit> {
+    list.iter()
+        .map(|hit| PrivacyHit {
+            kind: hit.kind.clone(),
+            count: hit.count,
+            action: hit.action.clone(),
+            restored: hit.restored,
+        })
+        .collect()
+}
+
 pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     crate::server::core::blocking::in_place(|| persist(context, fallback_error));
 }
@@ -76,6 +87,7 @@ fn persist(context: &RecordContext, fallback_error: Option<String>) {
     entry.upstream_reasoning = snapshot.upstream_reasoning;
     entry.attempt_details = stored_attempt_details(&snapshot.attempts_detail);
     entry.sensitive_hits = stored_sensitive_hits(&snapshot.sensitive_hits);
+    entry.privacy_hits = stored_privacy_hits(&snapshot.privacy_hits);
     entry.route = snapshot.route.unwrap_or(serde_json::Value::Null);
     entry.is_test = context.is_test;
     entry.source = context.source.clone();

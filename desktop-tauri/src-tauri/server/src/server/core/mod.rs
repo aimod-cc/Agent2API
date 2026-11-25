@@ -104,6 +104,7 @@ pub mod import_ccswitch;
 pub mod key_scope;
 pub mod legacy_api_key;
 pub mod limiter;
+pub mod local_direct;
 pub mod login;
 pub mod maintenance;
 pub mod model_meta;
@@ -118,6 +119,8 @@ pub mod panel_oauth;
 /// 与 `providers` 的分工：`providers` 仍是网关对「一家上游」的抽象
 /// （`ProviderAdapter`），本模块提供它的远程实现 `RpcAdapter`。
 pub mod plugin_host;
+pub mod privacy;
+pub mod task_plugins;
 pub mod prompt;
 pub mod protocol;
 pub mod providers;

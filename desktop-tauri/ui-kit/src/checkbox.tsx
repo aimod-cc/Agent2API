@@ -21,9 +21,9 @@ function Checkbox({ className, ...props }: CheckboxPrimitive.Root.Props) {
         'group/checkbox relative inline-flex size-3.5 shrink-0 cursor-pointer items-center justify-center rounded-[3px] border border-control-border bg-control',
         'outline-none transition-colors duration-150 ease-out',
         'hover:border-control-border-hover',
-        // Base UI 在「全选」与「部分选中」两种状态下都挂 data-checked，
-        // 区分两者要靠 aria-checked（部分选中时是 "indeterminate"）
+        // Base UI 在全选时挂 data-checked，部分选中时挂 data-indeterminate（aria-checked="mixed"）
         'data-checked:border-primary data-checked:bg-primary',
+        'data-[indeterminate]:border-primary data-[indeterminate]:bg-primary',
         'focus-visible:shadow-focus',
         'data-disabled:cursor-not-allowed data-disabled:opacity-45',
         className
@@ -43,7 +43,7 @@ function Checkbox({ className, ...props }: CheckboxPrimitive.Root.Props) {
             strokeWidth='2'
             strokeLinecap='round'
             fill='none'
-            className='hidden group-aria-[checked=indeterminate]/checkbox:block'
+            className='hidden group-data-[indeterminate]/checkbox:block'
           />
           <path
             d='M2.5 6.2 4.8 8.5 9.5 3.8'
@@ -52,7 +52,7 @@ function Checkbox({ className, ...props }: CheckboxPrimitive.Root.Props) {
             strokeLinecap='round'
             strokeLinejoin='round'
             fill='none'
-            className='group-aria-[checked=indeterminate]/checkbox:hidden'
+            className='group-data-[indeterminate]/checkbox:hidden'
           />
         </svg>
       </CheckboxPrimitive.Indicator>

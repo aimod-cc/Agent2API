@@ -14,6 +14,8 @@ export function RoutingExecTimeline({ row, now, onDetail, onConfig }: {
 }) {
   const carrier = execCarrier(row)
   const failed = !isTraceRunning(row) && !isTraceSuccess(row) && !isTraceCancelled(row)
+  const timestamp = new Date(row.ts)
+  const currentLocale = typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined
   return <div className='routing-exec'>
     <div className='routing-exec-inner'>
       <header className='routing-exec-head'>
@@ -22,7 +24,7 @@ export function RoutingExecTimeline({ row, now, onDetail, onConfig }: {
           <div className='routing-exec-meta'>
             <RoutingRequestState row={row} />
             <span>{requestClientLabel(row, t)}</span>
-            <time title={new Date(row.ts).toLocaleString()}>{new Date(row.ts).toLocaleTimeString()}</time>
+            <time title={timestamp.toLocaleString(currentLocale)}>{timestamp.toLocaleTimeString(currentLocale)}</time>
             {row.status ? <span>HTTP {row.status}</span> : null}
           </div>
         </div>

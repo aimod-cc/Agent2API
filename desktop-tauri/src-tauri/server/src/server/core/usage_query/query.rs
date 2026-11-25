@@ -28,7 +28,9 @@ pub(super) async fn query_usage_for(
                     Some("usage_timeout".to_string()), 504));
             }
             if let Some(trace) = &trace { trace.start_attempt(); }
+            let attempt_started = tokio::time::Instant::now();
             let result = super::query_usage_inner(store, provider, id, &mut refresh_available).await;
+            let attempt_elapsed = attempt_started.elapsed();
             if matches!(&result, Err(UsageFailure::Request(_, code, _))
                 if matches!(code.as_deref(), Some("usage_timeout" | "timeout")))
                 && super::current_query_deadline().is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
@@ -42,10 +44,14 @@ pub(super) async fn query_usage_for(
                 if matches!(*status, 408 | 429 | 500..=599) && !super::no_usage_retry(code.as_deref()));
             if !retryable || retries >= retry_limit { break result; }
             let delay = std::time::Duration::from_secs(1 << retries.min(2));
-            if !diagnostics::retry_fits(delay) { stop_reason = Some("retry_budget"); break result; }
+            if !diagnostics::retry_budget_fits(delay, attempt_elapsed, retries) {
+                stop_reason = Some("retry_budget");
+                break result;
+            }
             tokio::time::sleep(delay).await;
-            if !diagnostics::retry_fits(std::time::Duration::ZERO) {
-                stop_reason = Some("retry_budget"); break result;
+            if !diagnostics::retry_budget_fits(std::time::Duration::ZERO, attempt_elapsed, retries) {
+                stop_reason = Some("retry_budget");
+                break result;
             }
             retries += 1;
         }

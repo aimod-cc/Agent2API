@@ -62,6 +62,7 @@ export type StorePlugin = {
   platforms: ReleasePlatform[]
   homepage?: string | null
   icon?: string | null
+  category?: 'agent' | 'web' | 'scheduled_task' | string
   providers?: Array<{ id: string; label?: string }>
   requireSigned?: boolean
 }
@@ -153,6 +154,14 @@ export type ScriptCatalogInfo = {
   starsAt?: number
 }
 
+export type ScriptIdentityRecord = {
+  name?: string | null
+  source?: string | null
+  selector?: string | null
+  repository?: string | null
+  aliases: Record<string, string>
+}
+
 export type ScriptPackage = ScriptCatalogInfo & {
   id: string
   name: string
@@ -168,6 +177,7 @@ export type ScriptPackage = ScriptCatalogInfo & {
   running: boolean
   startup?: PluginLoadStatus | null
   providers: PackProvider[]
+  providerAliases?: Record<string, string>
 }
 
 export type ScriptOperation = {
@@ -217,6 +227,7 @@ export type ScriptPluginsState = {
   runtime: { version: string; installed: boolean; path?: string; error?: string | null }
   packages: ScriptPackage[]
   operation: ScriptOperation
+  identities?: Record<string, ScriptIdentityRecord>
   error?: string | null
   hostError?: string | null
   recommended?: ScriptRecommendation | null
@@ -238,6 +249,7 @@ export type ScriptPluginsState = {
 }
 
 export type PluginsPayload = {
+  revision?: string
   capacity?: import('./runtime-capacity').CapacitySnapshot
   supportsPackPreview?: boolean
   maxPackBytes?: number

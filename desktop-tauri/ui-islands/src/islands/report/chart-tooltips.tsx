@@ -128,6 +128,7 @@ export function DonutTooltip(props: ChartTooltipProps) {
     <div className='report-tooltip-title'>{row.name}<span>{formatUsagePercent(row.percentage)}</span></div>
     <DataRow label={t('Token')}><TokenValue value={row.tokens} /></DataRow>
     <DataRow label={t('总请求数')}><strong>{formatInt(row.requests)}</strong></DataRow>
+    {row.mergedSources ? <p className='report-tooltip-note'>{t('已合并：{sources}', { sources: row.mergedSources.join('、') })}</p> : null}
     {row.members ? <p className='report-tooltip-note'>{t('仅在饼图合并，右侧列表完整保留每个项目')}</p> : null}
   </ChartTooltip>
 }

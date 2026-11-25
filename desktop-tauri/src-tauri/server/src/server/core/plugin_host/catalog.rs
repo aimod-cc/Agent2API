@@ -74,9 +74,14 @@ pub fn snapshot_with_states(states: &HashMap<String, task_state::TaskState>) -> 
 }
 
 fn retain_wasm_platforms(item: &mut Value) {
+    let expected = if item["category"].as_str() == Some("scheduled_task") {
+        crate::server::core::task_plugins::types::TASK_SCRIPT_TARGET
+    } else {
+        super::wasm::manifest::TARGET
+    };
     if let Some(platforms) = item["platforms"].as_array_mut() {
         let had_assets = !platforms.is_empty();
-        platforms.retain(|platform| platform["target"] == super::wasm::manifest::TARGET);
+        platforms.retain(|platform| platform["target"] == expected);
         if had_assets && platforms.is_empty() && item["error"] != true {
             item["reason"] = json!(super::support::LEGACY_REASON);
         }
@@ -567,6 +572,27 @@ async fn apply_automatic_tracked(
             || super::operations::active(id)
             || entry["version"].as_str().is_none()
         {
+            continue;
+        }
+        if entry["category"].as_str() == Some("scheduled_task") {
+            let should_update = crate::server::core::task_plugins::store::get_plugin(id)
+                .ok()
+                .flatten()
+                .is_some_and(|pack| {
+                    pack.enabled
+                        && pack.signed
+                        && entry["version"].as_str().is_some_and(|version| {
+                            crate::server::core::update::compare_versions(version, &pack.version) == Some(1)
+                        })
+                });
+            if should_update {
+                let version = entry["version"].as_str().unwrap_or("").to_string();
+                let outcome = match crate::server::core::task_plugins::store_remote::install_from_store(id).await {
+                    Ok(_) => Ok(version),
+                    Err(error) => Err(error),
+                };
+                outcomes.insert(id.to_string(), outcome);
+            }
             continue;
         }
         if entry["protocol"].as_u64().is_some_and(|protocol| {

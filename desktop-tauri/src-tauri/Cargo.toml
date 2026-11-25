@@ -28,7 +28,10 @@ default-members = [".", "server"]
 
 [lib]
 name = "workbuddy_proxy_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面端仅由 src/main.rs 作为 Rust 库链接；移动端走 Capacitor 网页打包，
+# 不使用 Tauri Mobile 的原生静态库/动态库，去掉 staticlib/cdylib 可避免
+# 每次编译额外生成数 GB 的无用 .lib/.dll 并加快链接。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -177,6 +180,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_Globalization",
   "Win32_NetworkManagement_IpHelper",
   "Win32_Networking_WinSock",
   "Win32_System_Diagnostics_ToolHelp",
@@ -201,6 +205,16 @@ windows = { version = "0.61", features = ["Win32_Security_Cryptography"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# 开发与测试模式（[profile.test] 自动继承 [profile.dev]）：
+# 默认 debug = 2 会在 Windows MSVC 下生成单个 2~3 GB 的中间库与数 GB 的增量缓存。
+# 改为仅保留行号表（报错堆栈仍显示精确文件名和行号），并关闭第三方依赖的调试符号，
+# 可大幅压低本地编译缓存体积并提速增量编译，不影响正式发布版配置。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 panic = "abort"

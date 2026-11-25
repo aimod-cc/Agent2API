@@ -99,6 +99,7 @@
   <!-- AI 助手页（智能组）：消息流 / 工具卡 / 确认卡 / 输入区。排在页面样式之后，
        它是一个新页面，没有需要覆盖的既有规则 -->
   <link rel="stylesheet" href="css/page-assistant.css">
+  <link rel="stylesheet" href="css/page-assistant-controls.css">
   <!-- 表格列设置：必须排在所有页面样式之后 ——
        列对齐是**用户配置**，要盖过各表为「这一列靠哪边」写死的默认值
        （.models-table th.r / .acct-table td.cell-pick / .req-head .req-dur …），
@@ -113,6 +114,7 @@
        必须排在 units.js / app.js 等业务脚本之前 —— 它们在加载期就可能读 window.wbI18n；
        排在 head 末尾天然满足。 -->
   <script src="i18n.js"></script>
+  <script src="native-locale.js"></script>
 </head>
 <body>
   <div id="desktop-app"></div>

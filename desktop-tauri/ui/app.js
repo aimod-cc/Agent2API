@@ -139,7 +139,7 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'plugins', 'settings'];
+const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'scheduled', 'tasks', 'requests', 'plugins', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它）
  *
@@ -157,6 +157,7 @@ const PAGE_LABELS = {
   keys: wbI18n.t('网关 Key'),
   docs: wbI18n.t('文档'),
   logs: wbI18n.t('日志'),
+  scheduled: wbI18n.t('定时任务'),
   tasks: wbI18n.t('自动维护'),
   requests: wbI18n.t('请求日志'),
   plugins: wbI18n.t('插件'),
@@ -554,6 +555,9 @@ function showPage(name, { persist = true, checkUpdate = false } = {}) {
   if (page === 'requests') {
     clearRequestsBadge();
     window.wbRequestsPanel?.load?.();
+  }
+  if (page === 'scheduled') {
+    window.wbScheduledPage?.load?.();
   }
   // 自动维护自持执行记录与编辑态，切进去时拉一次最新。
   if (page === 'tasks') {

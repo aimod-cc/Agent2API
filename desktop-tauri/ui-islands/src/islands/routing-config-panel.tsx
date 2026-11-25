@@ -194,7 +194,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, refresh
               onChange={value => mutate(next => { next.strategy = value === '__inherit' ? undefined : value })} /></div>
             <div className='routing-rule-field'><Label>{t('会话粘滞')}</Label><RoutingSelect label={t('会话粘滞')} value={profile.sticky || '__inherit'} disabled={locked}
               options={[...(scope ? [['__inherit', t('继承全局：{value}', { value: stickyLabel(workspace.globalSettings?.routingSticky) })] as [string, string]] : []),
-                ['auto', t('自动')], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('关闭')]]}
+                ['auto', t('自动')], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('已停用')]]}
               onChange={value => mutate(next => { next.sticky = value === '__inherit' ? undefined : value })} /></div>
             {!globalAccounts ? <div className='routing-rule-field routing-rule-wide'><Label>{t('参与方式')}</Label><RoutingSelect label={t('参与方式')} value={profile.providerScope || 'all'} disabled={locked}
               options={[['all', t('全部自动参与')], ['selected', t('仅加入的参与')]]} onChange={value => mutate(next => {
@@ -204,7 +204,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, refresh
           {!globalAccounts ? <p className='routing-config-note'>{profile.providerScope === 'all' ? t('新增提供商自动参与；移出本路由的不会自动加回。') : t('只有加入的提供商参与，新增提供商需要手动加入。')}</p> : null}
           {!scope ? <RoutingModelFilter value={modelFilter.model} models={workspace.models} lastUsed={workspace.modelLastUsed} disabled={disabled} onChange={modelFilter.setModel} /> : null}
           <div className='routing-protection-summary'><RouteIcon name='shield' size={14} /><span>{t('全局保护设置')}</span>
-            <Badge variant='ghost' shape='tag'>{[workspace.settings.routingFailoverBackoff && t('失败退避'), workspace.settings.routingSink && t('限流垫底'), workspace.settings.routingBreakerEnabled && t('熔断保护')].filter(Boolean).join(' · ') || t('关闭')}</Badge>
+            <Badge variant='ghost' shape='tag'>{[workspace.settings.routingFailoverBackoff && t('失败退避'), workspace.settings.routingSink && t('限流垫底'), workspace.settings.routingBreakerEnabled && t('熔断保护')].filter(Boolean).join(' · ') || t('已停用')}</Badge>
             <Button variant='link' size='sm' disabled={editor.busy} onClick={() => onProtection(workspace)}>{t('设置')}</Button>
           </div>
         </div>

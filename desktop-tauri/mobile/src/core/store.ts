@@ -30,13 +30,14 @@ import {
   type ServerEntry,
 } from './servers'
 
-export type TabId = 'dashboard' | 'checkin' | 'accounts' | 'chat' | 'models' | 'routing' | 'keys' | 'settings'
+export type TabId = 'dashboard' | 'checkin' | 'scheduled' | 'accounts' | 'chat' | 'models' | 'routing' | 'keys' | 'settings'
 export type ThemeMode = 'system' | 'light' | 'dark'
 
 export const DEFAULT_NAV_TABS: readonly TabId[] = ['dashboard', 'checkin', 'accounts', 'chat', 'settings']
 export const ALL_TAB_IDS: readonly TabId[] = [
   'dashboard',
   'checkin',
+  'scheduled',
   'accounts',
   'chat',
   'models',

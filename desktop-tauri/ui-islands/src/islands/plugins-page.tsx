@@ -11,31 +11,57 @@ import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
 import { api, bridge, errorMessage, pluginDescription, pluginName, toast } from './plugins-shared'
 import { clampMaxPackBytes, LEGACY_MAX_PACK_BYTES, PluginFileInstallDialog, PluginFileInstallProgress, usePluginFileInstall } from './plugins-file-install'
-import { pluginOperationNotice } from '../../../ui-shared/plugins'
+import { pluginOperationNotice, type ScriptPackage, type ScriptRecommendation } from '../../../ui-shared/plugins'
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
-import { ScriptPluginsPanel } from '../../../ui-shared/plugins-scripts'
-import { matchesPluginStatus, matchesScriptPublisher, type PluginFilterItem, type PluginStatusFilter, type ScriptPublisherFilter } from '../../../ui-shared/plugins-filters'
-import { isRecommendationInstalled, matchesRecommendedPlugin, matchesScriptPlugin, scriptRecommendations, scriptUpdate } from '../../../ui-shared/plugins-script-display'
-import { PLUGIN_GRID_CLASS, PluginInstallButton, PluginSectionHeading } from '../../../ui-shared/plugins-store'
+import { useScriptPluginsController } from '../../../ui-shared/plugins-scripts-controller'
+import { PluginStreamFooter, usePluginStream } from '../../../ui-shared/plugins-stream-footer'
+import { isRecommendationInstalled, scriptRecommendations } from '../../../ui-shared/plugins-script-display'
+import { PLUGIN_GRID_CLASS, PluginInstallButton, type PluginViewMode } from '../../../ui-shared/plugins-store'
 import { PluginDetailsDialog, type PluginDetailsPane } from '../../../ui-shared/plugins-details'
 import { PluginDiagnostics } from './plugins-page-tools'
 import { useGatewayBase } from './port-panel'
 import { PluginStartupDialog, subscribePluginDiagnostics, takePluginDiagnostics } from '../../../ui-shared/plugin-startup-view'
-import { refreshPluginStartup } from '../../../ui-shared/plugin-startup'
+import { getPluginStartup, refreshPluginStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import { openExternal } from './update-shared'
-import { PluginPageToolbar, type PluginSourceFilter } from './plugins-toolbar'
-import { applicablePluginItems, missingPluginItems, packSelectionKey, pluginBatchItems, scriptSelectionKey, type PluginBatchAction, type PluginBatchItem } from '../../../ui-shared/plugins-batch-items'
-import { usePluginBatch } from '../../../ui-shared/plugins-batch-runner'
+import { PluginPageToolbar, type PluginSortKey } from './plugins-toolbar'
+import { PluginCategoryRail, pluginRailSubtitle, pluginRailTitle, type PluginRailKey } from './plugins-rail'
+import { applicablePluginItems, missingPluginItems, pluginBatchItems, type PluginBatchAction, type PluginBatchItem } from '../../../ui-shared/plugins-batch-items'
+import { usePluginBatch, waitScriptOperation, type PluginRequest } from '../../../ui-shared/plugins-batch-runner'
 import { PluginBatchConfirm, PluginBatchProgress, PluginBatchToolbar } from '../../../ui-shared/plugins-batch-view'
 import { PluginMissingBanner, PluginMissingDialog } from '../../../ui-shared/plugins-missing'
 import { PluginCatalogStatus } from '../../../ui-shared/plugins-catalog-status'
+import { ScriptCatalogStatus } from '../../../ui-shared/plugins-script-catalog'
+import { ScriptOperationCard, scriptOperationMatches } from '../../../ui-shared/plugins-script-progress'
 import { summarizeNetworkError } from '../../../ui-shared/updates'
+import { buildUnifiedRows, filterAndSortRows, indexScriptPackages, type UnifiedPluginRow } from './plugins-rows'
+import type { PluginStatusFilter } from '../../../ui-shared/plugins-filters'
+import { TaskPluginsSection } from '../../../ui-shared/task-plugins-section'
+import { PluginScheduledFilterBar, usePluginsTaskData } from './plugins-scheduled-pane'
 import '../styles/plugins-page.css'
 
-type SourceFilter = PluginSourceFilter
+const VIEW_MODE_KEY = 'agent2api-plugins-view-mode'
+
+const EMPTY_PACKS: PackSummary[] = []
+const EMPTY_STORE: StorePlugin[] = []
+const EMPTY_OPERATIONS: PluginOperation[] = []
+const EMPTY_UPDATES: PluginUpdate[] = []
+const EMPTY_SCRIPTS: ScriptPackage[] = []
+
+type ConditionalPluginsResponse =
+  | (PluginsPayload & { maxPackBytes?: unknown; unchanged?: false })
+  | { unchanged: true; revision?: string }
+
+function readStoredViewMode(): PluginViewMode {
+  try {
+    return window.localStorage.getItem(VIEW_MODE_KEY) === 'list' ? 'list' : 'cards'
+  } catch {
+    return 'cards'
+  }
+}
 
 function PluginsPage(): React.ReactElement {
+  const startupView = React.useSyncExternalStore(subscribePluginStartup, getPluginStartup)
   const gatewayBase = useGatewayBase()
   const [payload, setPayload] = React.useState<PluginsPayload | null>(null)
   const [maxPackBytes, setMaxPackBytes] = React.useState(LEGACY_MAX_PACK_BYTES)
@@ -48,10 +74,12 @@ function PluginsPage(): React.ReactElement {
   const [detailsStore, setDetailsStore] = React.useState<StorePlugin | null>(null)
   const [confirmRemove, setConfirmRemove] = React.useState<PackSummary | null>(null)
   const [notes, setNotes] = React.useState<PluginNotes | null>(null)
-  const [source, setSource] = React.useState<SourceFilter>('all')
-  const [status, setStatus] = React.useState<PluginStatusFilter>('all')
-  const [scriptPublisher, setScriptPublisher] = React.useState<ScriptPublisherFilter>('all')
+  const [rail, setRail] = React.useState<PluginRailKey>('installed')
+  const [railTouched, setRailTouched] = React.useState(false)
   const [search, setSearch] = React.useState('')
+  const deferredSearch = React.useDeferredValue(search)
+  const [sortBy, setSortBy] = React.useState<PluginSortKey>('default')
+  const [viewMode, setViewModeState] = React.useState<PluginViewMode>(readStoredViewMode)
   const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false)
   const [startupId, setStartupId] = React.useState<string | null>(null)
   React.useEffect(() => {
@@ -61,31 +89,75 @@ function PluginsPage(): React.ReactElement {
   }, [])
   const [scriptBusy, setScriptBusy] = React.useState(false)
   const [scriptInstallRequest, setScriptInstallRequest] = React.useState(0)
+  const [taskStatus, setTaskStatus] = React.useState<PluginStatusFilter>('all')
+  const [taskImportRequest, setTaskImportRequest] = React.useState(0)
+  const [taskCreateRequest, setTaskCreateRequest] = React.useState(0)
   const [selecting, setSelecting] = React.useState(false)
   const [selected, setSelected] = React.useState(new Set<string>())
   const [batchConfirm, setBatchConfirm] = React.useState<{ action: PluginBatchAction; items: PluginBatchItem[] } | null>(null)
   const [missingOpen, setMissingOpen] = React.useState(false)
   const listRef = React.useRef<HTMLDivElement>(null)
+  const taskData = usePluginsTaskData()
   const seenOperations = React.useRef(new Set<string>())
   const previousSignature = React.useRef('')
+  const lastRevision = React.useRef('')
+  const lastPacksSignature = React.useRef('')
   const mounted = React.useRef(true)
   const fileOperationLocked = React.useRef(false)
   const mutationLocked = React.useRef(false)
+  const busyRef = React.useRef(busy)
+  busyRef.current = busy
+  const scriptBusyRef = React.useRef(scriptBusy)
+  scriptBusyRef.current = scriptBusy
+  const targetRef = React.useRef(payload?.target)
+  targetRef.current = payload?.target
   const loading = React.useRef<Promise<void> | null>(null)
+
+  const setViewMode = React.useCallback((next: PluginViewMode) => {
+    setViewModeState(next)
+    try { window.localStorage.setItem(VIEW_MODE_KEY, next) } catch { /* ignore */ }
+  }, [])
+
+  const selectRail = React.useCallback((next: PluginRailKey) => {
+    setRailTouched(true)
+    setRail(next)
+    if (next === 'scheduled') {
+      setSelecting(false)
+      setSelected(new Set())
+      void taskData.load()
+    }
+  }, [taskData.load])
 
   const synchronize = React.useCallback(async (result: PluginMutation): Promise<void> => {
     const app = bridge().wbApp
     const [refreshed] = await Promise.all([app?.refresh?.(), app?.refreshPluginPages?.(result)])
-    if (mounted.current) setSyncError(refreshed === true ? ''
-      : t('插件状态已变更，但账号列表同步失败。请回到账号页点击「刷新」重试。'))
+    if (mounted.current) {
+      setSyncError(refreshed === true ? ''
+        : t('插件状态已变更，但账号列表同步失败。请回到账号页点击「刷新」重试。'))
+    }
   }, [])
 
-  const load = React.useCallback(async (): Promise<void> => {
-    if (loading.current) return loading.current
+  const load = React.useCallback(async (options?: { force?: boolean }): Promise<void> => {
+    if (loading.current) {
+      if (!options?.force) return loading.current
+      await loading.current.catch(() => undefined)
+    }
     const request = (async () => {
       try {
-        const next = await api<PluginsPayload & { maxPackBytes?: unknown }>('GET', '/api/plugins')
+        const path = !options?.force && lastRevision.current
+          ? `/api/plugins?rev=${encodeURIComponent(lastRevision.current)}`
+          : '/api/plugins'
+        const response = await api<ConditionalPluginsResponse>('GET', path)
         if (!mounted.current) return
+        if ('unchanged' in response && response.unchanged === true) {
+          if (typeof response.revision === 'string' && response.revision) {
+            lastRevision.current = response.revision
+          }
+          setError('')
+          return
+        }
+        const next = response as PluginsPayload & { maxPackBytes?: unknown }
+        lastRevision.current = typeof next.revision === 'string' ? next.revision : ''
         const signature = JSON.stringify({
           packs: next.packs.map(pack => ({ id: pack.id, version: pack.version, enabled: pack.enabled, providers: pack.providers })),
           running: next.host?.running,
@@ -95,10 +167,15 @@ function PluginsPage(): React.ReactElement {
         })
         const changed = Boolean(previousSignature.current && previousSignature.current !== signature)
         previousSignature.current = signature
+        const packsSig = JSON.stringify(next.packs.map(pack => ({
+          id: pack.id, enabled: pack.enabled, ui: (pack as PackSummary & { ui?: unknown }).ui,
+        })))
+        const packsUiChanged = packsSig !== lastPacksSignature.current
+        lastPacksSignature.current = packsSig
         setMaxPackBytes(clampMaxPackBytes(next.maxPackBytes))
         setPayload(next)
+        if (packsUiChanged) void bridge().wbApp?.refreshPluginPages?.(next)
         setError('')
-        void bridge().wbApp?.refreshPluginPages?.(next)
         if (changed) await synchronize(next)
         for (const operation of next.operations || []) {
           if (operation.active) continue
@@ -117,175 +194,288 @@ function PluginsPage(): React.ReactElement {
     try { await request } finally { loading.current = null }
   }, [synchronize])
 
+  const forceLoad = React.useCallback(async () => {
+    await Promise.all([load({ force: true }), taskData.load()])
+  }, [load, taskData.load])
+
+  const pageLoad = React.useCallback(async () => {
+    await Promise.all([load(), taskData.load()])
+  }, [load, taskData.load])
+
   React.useEffect(() => {
     mounted.current = true
     void load()
-    const timer = window.setInterval(() => {
-      const page = bridge().wbApp?.currentPage
-      if (!document.hidden && (!page || page === 'plugins')) void load()
-    }, 1500)
-    return () => { mounted.current = false; window.clearInterval(timer) }
+    return () => { mounted.current = false }
   }, [load])
 
   React.useEffect(() => {
-    currentLoad = load
-    return () => { if (currentLoad === load) currentLoad = null }
-  }, [load])
+    currentLoad = pageLoad
+    return () => { if (currentLoad === pageLoad) currentLoad = null }
+  }, [pageLoad])
 
-  async function run(key: string, action: () => Promise<void>): Promise<void> {
-    if (busy || scriptBusy || fileOperationLocked.current || mutationLocked.current) return
+  const run = React.useCallback(async (key: string, action: () => Promise<void>): Promise<void> => {
+    if (busyRef.current || scriptBusyRef.current || fileOperationLocked.current || mutationLocked.current) return
     mutationLocked.current = true
     setBusy(key)
     try { await action() }
-    catch (error) { toast(error instanceof Error ? error.message : String(error), 'err') }
+    catch (cause) { toast(cause instanceof Error ? cause.message : String(cause), 'err') }
     finally { mutationLocked.current = false; if (mounted.current) setBusy('') }
-  }
+  }, [])
 
-  async function check(): Promise<void> {
+  const check = React.useCallback(async (): Promise<void> => {
     await run('check', async () => {
-      // 本体插件（发布包）与 Magpie 侧脚本插件各有各的检查链路，一起问，别只查一半。
       const [result] = await Promise.all([
         api<{ updates: PluginUpdate[]; error: boolean; reason?: string }>('GET', '/api/plugins/update'),
         api('GET', '/api/plugins/scripts/check').catch(() => undefined),
       ])
-      await load()
+      await forceLoad()
       if (result.error) toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
     })
-  }
+  }, [run, forceLoad])
 
-  async function refreshStore(): Promise<void> {
+  const refreshStore = React.useCallback(async (): Promise<void> => {
     await run('refresh', async () => {
       const result = await api<ReleaseState>('GET', '/api/plugins/release')
-      await load()
+      await forceLoad()
       if (result.error) toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
     })
-  }
+  }, [run, forceLoad])
 
-  async function accept(result: PluginMutation): Promise<void> {
+  const accept = React.useCallback(async (result: PluginMutation): Promise<void> => {
     setPayload(previous => previous ? { ...previous, ...result } : previous)
     await synchronize(result)
     if (result.hostError) toast(result.hostError, 'err')
     else if (result.installNotice) toast(t(result.installNotice), 'ok')
-    await load()
-  }
+    await forceLoad()
+  }, [synchronize, forceLoad])
 
-  async function mutation(key: string, path: string, body: unknown): Promise<void> {
+  const mutation = React.useCallback(async (key: string, path: string, body: unknown): Promise<void> => {
     await run(key, async () => { await accept(await api<PluginMutation>('POST', path, body)) })
-  }
+  }, [run, accept])
 
-  async function start(id: string, update: boolean): Promise<void> {
+  const start = React.useCallback(async (id: string, update: boolean): Promise<void> => {
     await run(`start:${id}`, async () => {
       const result = await api<{ operation: PluginOperation }>('POST', update
-        ? '/api/plugins/update' : '/api/plugins/install-from-release', { id, target: payload?.target })
+        ? '/api/plugins/update' : '/api/plugins/install-from-release', { id, target: targetRef.current })
       setPayload(previous => previous ? {
         ...previous, operations: [...(previous.operations || []).filter(item => item.id !== id), result.operation],
       } : previous)
     })
-  }
+  }, [run])
 
-  const batch = usePluginBatch({ request: api, refresh: load, target: payload?.target || '', t,
+  const batchSynchronize = React.useCallback(async () => {
+    const next = await api<PluginsPayload>('GET', '/api/plugins')
+    lastRevision.current = typeof next.revision === 'string' ? next.revision : ''
+    setPayload(next)
+    await synchronize(next)
+  }, [synchronize])
+
+  const batchCompleted = React.useCallback((items: PluginBatchItem[]) => {
+    setSelected(previous => {
+      const next = new Set(previous)
+      items.forEach(item => next.delete(item.key))
+      return next
+    })
+  }, [])
+
+  const batch = usePluginBatch({
+    request: api,
+    refresh: forceLoad,
+    target: payload?.target || '',
+    t,
     disabled: Boolean(busy) || scriptBusy || fileOperationLocked.current,
-    synchronize: async () => {
-      const next = await api<PluginsPayload>('GET', '/api/plugins')
-      setPayload(next)
-      await synchronize(next)
-    },
-    completed: items => setSelected(previous => { const next = new Set(previous); items.forEach(item => next.delete(item.key)); return next }),
+    synchronize: batchSynchronize,
+    completed: batchCompleted,
   })
-  const fileInstall = usePluginFileInstall({ request: api, t, maxPackBytes, previewAvailable: payload?.supportsPackPreview === true, disabled: Boolean(busy) || scriptBusy || batch.running,
-    accept, refresh: load, remember: operation => {
-      if (!operation.active) seenOperations.current.add(`${operation.id}:${operation.updatedAt}`)
-      setPayload(previous => previous ? { ...previous, operations: [...(previous.operations || []).filter(item => item.id !== operation.id), operation] } : previous)
-    },
+
+  const onTaskPluginInstalled = React.useCallback(() => taskData.refresh(), [taskData.refresh])
+  const rememberFileOp = React.useCallback((operation: PluginOperation) => {
+    if (!operation.active) seenOperations.current.add(`${operation.id}:${operation.updatedAt}`)
+    setPayload(previous => previous ? {
+      ...previous,
+      operations: [...(previous.operations || []).filter(item => item.id !== operation.id), operation],
+    } : previous)
+  }, [])
+
+  const fileInstall = usePluginFileInstall({
+    request: api,
+    t,
+    maxPackBytes,
+    previewAvailable: payload?.supportsPackPreview === true,
+    disabled: Boolean(busy) || scriptBusy || batch.running,
+    accept,
+    onTaskPluginInstalled,
+    refresh: forceLoad,
+    remember: rememberFileOp,
   })
   fileOperationLocked.current = fileInstall.running
   mutationLocked.current = Boolean(busy) || batch.running
 
-  const packs = payload?.packs || []
+  const packs = payload?.packs || EMPTY_PACKS
   const host = payload?.host
   const catalog = payload?.catalog
-  const store = catalog?.plugins || []
-  const detailsItem = detailsStore ? store.find(item => item.id === detailsStore.id) || detailsStore : null
+  const store = React.useMemo(
+    () => (catalog?.plugins || EMPTY_STORE).filter(item => item.category !== 'scheduled_task'),
+    [catalog?.plugins],
+  )
+  const storeById = React.useMemo(() => new Map(store.map(item => [item.id, item])), [store])
+  const detailsItem = detailsStore ? storeById.get(detailsStore.id) || detailsStore : null
   const detailsInstallable = Boolean(detailsItem?.version && !detailsItem.error
     && detailsItem.platforms.some(platform => platform.target === 'wasm32-unknown-unknown'))
-  const installedIds = new Set(packs.map(pack => pack.id))
-  // 当前通道拿不到可安装版本的插件不进商店列表，避免正式版用户看到满屏「暂未发布」。
-  const unpublishedCount = store.filter(item => !installedIds.has(item.id) && !item.version).length
-  const storePlugins = store.filter(item => !installedIds.has(item.id) && Boolean(item.version))
-  const operations = payload?.operations || []
+  const installedIds = React.useMemo(() => new Set(packs.map(pack => pack.id)), [packs])
+  const unpublishedCount = React.useMemo(
+    () => store.filter(item => !installedIds.has(item.id) && !item.version).length,
+    [store, installedIds],
+  )
+  const storePlugins = React.useMemo(
+    () => store.filter(item => !installedIds.has(item.id) && Boolean(item.version)),
+    [store, installedIds],
+  )
+  const operations = payload?.operations || EMPTY_OPERATIONS
+  const operationById = React.useMemo(() => new Map(operations.map(item => [item.id, item])), [operations])
   const active = operations.some(operation => operation.active)
   const target = payload?.target || ''
   const locked = Boolean(busy) || scriptBusy || batch.running || fileInstall.running
   const settingsPack = packs.find(pack => pack.id === settingsPackId)
-  const settingsOperation = operations.find(operation => operation.id === settingsPackId)
+  const settingsOperation = settingsPackId ? operationById.get(settingsPackId) : undefined
 
-  const updates = payload?.updates || []
-  const updateOf = (id: string) => updates.find(item => item.id === id)
-  const updatable = (id: string) => updateOf(id)?.available === true
+  const updates = payload?.updates || EMPTY_UPDATES
+  const updatesById = React.useMemo(() => new Map(updates.map(item => [item.id, item])), [updates])
   const scripts = payload?.scripts
-  const scriptItems = scripts?.packages || []
-  const recommendations = scripts ? scriptRecommendations(scripts) : []
-  const missingScripts = recommendations.filter(item => !isRecommendationInstalled(item, scriptItems))
-  const keyword = search.trim().toLocaleLowerCase()
-  const searchedPacks = packs.filter(pack => {
-    const entry = store.find(item => item.id === pack.id)
-    return !keyword || [pack.id, pluginName(pack.id, entry?.name || pack.name), pluginDescription(pack.id, entry?.description || pack.description),
-      ...pack.providers.map(provider => `${provider.id} ${t(provider.label)}`)].join(' ').toLocaleLowerCase().includes(keyword)
+  const scriptItems = scripts?.packages || EMPTY_SCRIPTS
+  const recommendations = React.useMemo(
+    () => (scripts ? scriptRecommendations(scripts) : ([] as ScriptRecommendation[])),
+    [scripts],
+  )
+  const missingScripts = React.useMemo(() => {
+    const scriptsByName = indexScriptPackages(scriptItems)
+    return recommendations.filter(item => {
+      const sameName = scriptsByName.get(item.name)
+      return !sameName || !isRecommendationInstalled(item, sameName)
+    })
+  }, [recommendations, scriptItems])
+  const resolveIcon = React.useCallback((path: string) => `${gatewayBase.replace(/\/+$/, '')}${path}`, [gatewayBase])
+  const scriptRequest = React.useCallback((path: string, body: Record<string, unknown>) => api('POST', path, body), [])
+
+  const scriptCtrl = useScriptPluginsController({
+    state: scripts,
+    request: scriptRequest,
+    refresh: forceLoad,
+    t,
+    disabled: locked,
+    installRequest: scriptInstallRequest,
+    onBusyChange: setScriptBusy,
+    resolveIcon,
+    onOpenExternal: openExternal,
   })
-  const searchedStore = storePlugins.filter(item => !keyword
-    || `${item.id} ${pluginName(item.id, item.name)} ${pluginDescription(item.id, item.description)}`.toLocaleLowerCase().includes(keyword))
-  const searchedScripts = scriptItems.filter(pack => matchesScriptPlugin(pack, recommendations, search, t))
-  const recommendedMatches = missingScripts.filter(item => matchesRecommendedPlugin(item, search, t))
-  const filteredScripts = searchedScripts.filter(pack => matchesScriptPublisher(pack, scriptPublisher))
-  const filteredRecommendations = recommendedMatches.filter(item => matchesScriptPublisher(item, scriptPublisher))
-  const nativeItems: PluginFilterItem[] = [
-    ...searchedPacks.map(pack => ({ installed: true, updatable: updatable(pack.id) })),
-    ...searchedStore.map(() => ({ installed: false, updatable: false })),
-  ]
-  const magpieItems: PluginFilterItem[] = [
-    ...filteredScripts.map(pack => ({ installed: true, updatable: scriptUpdate(scripts, pack.id) !== undefined })),
-    ...filteredRecommendations.map(() => ({ installed: false, updatable: false })),
-  ]
-  const itemsFor = (chosen: SourceFilter): PluginFilterItem[] => chosen === 'agent2' ? nativeItems
-    : chosen === 'magpie' ? magpieItems : [...nativeItems, ...magpieItems]
-  const countMatching = (chosen: SourceFilter, next: PluginStatusFilter) => itemsFor(chosen).filter(item => matchesPluginStatus(item, next)).length
-  const showNative = source !== 'magpie'
-  const showScripts = source !== 'agent2'
-  const installedRows = searchedPacks.filter(pack => matchesPluginStatus({ installed: true, updatable: updatable(pack.id) }, status))
-  const storeRows = searchedStore.filter(() => matchesPluginStatus({ installed: false, updatable: false }, status))
-  const scriptRows = filteredScripts.filter(pack => matchesPluginStatus({ installed: true, updatable: scriptUpdate(scripts, pack.id) !== undefined }, status))
-  const shownCount = countMatching(source, status)
-  const hasAny = packs.length + storePlugins.length + scriptItems.length + missingScripts.length > 0
-  const filtersActive = source !== 'all' || status !== 'all' || scriptPublisher !== 'all' || keyword.length > 0
-  const scriptGalleryVisible = Boolean(scripts && showScripts)
 
-  function clearFilters(): void {
-    setSource('all'); setStatus('all'); setScriptPublisher('all'); setSearch('')
-  }
-  const resolveIcon = (path: string) => `${gatewayBase.replace(/\/+$/, '')}${path}`
-  const batchItems = pluginBatchItems(payload, t, resolveIcon)
-  const shownKeys = [
-    ...(showNative ? [...installedRows.map(pack => packSelectionKey(pack.id)), ...storeRows.map(item => packSelectionKey(item.id))] : []),
-    ...(showScripts ? [...scriptRows.map(scriptSelectionKey), ...filteredRecommendations.filter(() => status === 'all' || status === 'missing').map(scriptSelectionKey)] : []),
-  ]
-  const pendingUpdates = applicablePluginItems(batchItems.filter(item => shownKeys.includes(item.key)), 'update')
-  const missing = missingPluginItems(payload, batchItems)
-  const missingAccounts = missing.required.reduce((total, item) => total + item.accounts, 0) + missing.unresolved.reduce((total, item) => total + item.count, 0)
+  const { allRows, railCounts } = React.useMemo(() => buildUnifiedRows({
+    packs,
+    storeById,
+    storePlugins,
+    host,
+    updatesById,
+    scripts,
+    scriptItems,
+    recommendations,
+    missingScripts,
+    startupSnapshot: startupView.value,
+    t,
+  }), [packs, storeById, storePlugins, host, updatesById, scripts, scriptItems, recommendations, missingScripts, startupView.value])
 
-  function changeSelection(keys: string[], checked: boolean): void {
-    setSelected(previous => { const next = new Set(previous); keys.forEach(key => checked ? next.add(key) : next.delete(key)); return next })
-  }
-  const selectionFor = (key: string) => ({ checked: selected.has(key), disabled: locked || batchItems.find(item => item.key === key)?.active === true,
-    onChange: (checked: boolean) => changeSelection([key], checked) })
-  function selectGroup(kind: 'pack' | 'script'): void {
-    const keys = batchItems.filter(item => item.kind === kind && shownKeys.includes(item.key) && !item.active).map(item => item.key)
-    changeSelection(keys, !keys.every(key => selected.has(key)))
-  }
-  function confirmBatch(action: PluginBatchAction, items = batchItems.filter(item => selected.has(item.key))): void {
-    const current = items.flatMap(item => { const row = item.required ? missing.required.find(row => row.key === item.key) || batchItems.find(row => row.key === item.key) : batchItems.find(row => row.key === item.key); return row ? [{ ...row, required: item.required }] : [] })
+  // 新装软件无任何已装插件时，自动定位到「全部插件」方便直接挑选安装
+  React.useEffect(() => {
+    if (!payload || railTouched) return
+    if (railCounts.installed === 0 && railCounts.all > 0 && rail === 'installed') {
+      setRail('all')
+    }
+  }, [payload, railTouched, railCounts.installed, railCounts.all, rail])
+
+  // 异常清零后自动切回已安装
+  React.useEffect(() => {
+    if (rail === 'error' && railCounts.error === 0) setRail('installed')
+  }, [rail, railCounts.error])
+
+  const deferredKeyword = deferredSearch.trim().toLocaleLowerCase()
+  const filteredRows = React.useMemo(
+    () => filterAndSortRows(allRows, rail, deferredKeyword, sortBy),
+    [allRows, rail, deferredKeyword, sortBy],
+  )
+
+  const streamResetKey = React.useMemo(() => JSON.stringify([rail, deferredKeyword, sortBy]), [rail, deferredKeyword, sortBy])
+  const stream = usePluginStream(filteredRows.length, streamResetKey)
+  const visibleRows = React.useMemo(() => stream.slice(filteredRows), [stream, filteredRows])
+
+  const unmatchedScriptOperation = Boolean(
+    scripts && scriptCtrl.operation.active
+    && !visibleRows.some(row => (row.kind === 'script-installed' && scriptOperationMatches(scriptCtrl.operation, row.pack))
+      || (row.kind === 'script-recommended' && scriptOperationMatches(scriptCtrl.operation, row.item)))
+  )
+
+  const pollBusy = active || scripts?.operation.active === true || catalog?.checking === true
+    || scripts?.catalog?.refreshing === true || fileInstall.running || batch.running || Boolean(busy) || scriptBusy
+  React.useEffect(() => {
+    let activeTimer = true
+    let timer = 0
+    const interval = pollBusy ? 1500 : 8000
+    const schedule = () => {
+      timer = window.setTimeout(async () => {
+        if (!activeTimer || !mounted.current) return
+        const page = bridge().wbApp?.currentPage
+        if (!document.hidden && (!page || page === 'plugins')) await load()
+        if (activeTimer && mounted.current) schedule()
+      }, interval)
+    }
+    schedule()
+    return () => { activeTimer = false; window.clearTimeout(timer) }
+  }, [load, pollBusy])
+
+  const hasAny = allRows.length > 0
+  const batchItems = React.useMemo(() => pluginBatchItems(payload, t, resolveIcon), [payload, resolveIcon])
+  const batchItemByKey = React.useMemo(() => new Map(batchItems.map(item => [item.key, item])), [batchItems])
+  const pendingUpdates = React.useMemo(() => applicablePluginItems(batchItems, 'update'), [batchItems])
+  const missing = React.useMemo(() => missingPluginItems(payload, batchItems, t, resolveIcon), [payload, batchItems, resolveIcon])
+  const missingAccounts = React.useMemo(() => (
+    missing.required.reduce((total, item) => total + item.accounts, 0)
+    + missing.bindable.reduce((total, item) => total + item.provider.count, 0)
+    + missing.unresolved.reduce((total, item) => total + item.count, 0)
+  ), [missing])
+  const selectableVisibleKeys = React.useMemo(
+    () => filteredRows.map(row => row.selectionKey).filter(key => !batchItemByKey.get(key)?.active),
+    [filteredRows, batchItemByKey],
+  )
+
+  const changeSelection = React.useCallback((keys: string[], checked: boolean): void => {
+    setSelected(previous => {
+      const next = new Set(previous)
+      keys.forEach(key => checked ? next.add(key) : next.delete(key))
+      return next
+    })
+  }, [])
+  const handleToggleSelect = React.useCallback((key: string, checked: boolean): void => {
+    changeSelection([key], checked)
+  }, [changeSelection])
+
+  const batchItemsRef = React.useRef(batchItems)
+  batchItemsRef.current = batchItems
+  const missingRef = React.useRef(missing)
+  missingRef.current = missing
+  const selectedRef = React.useRef(selected)
+  selectedRef.current = selected
+  const pendingUpdatesRef = React.useRef(pendingUpdates)
+  pendingUpdatesRef.current = pendingUpdates
+
+  const confirmBatch = React.useCallback((action: PluginBatchAction, items?: PluginBatchItem[]): void => {
+    const picked = items ?? batchItemsRef.current.filter(item => selectedRef.current.has(item.key))
+    const current = picked.flatMap(item => {
+      const row = item.required
+        ? missingRef.current.required.find(r => r.key === item.key) || batchItemsRef.current.find(r => r.key === item.key)
+        : batchItemsRef.current.find(r => r.key === item.key)
+      return row ? [{ ...row, required: item.required }] : []
+    })
     const targets = applicablePluginItems(current, action)
     if (targets.length) setBatchConfirm({ action, items: targets })
-  }
+  }, [])
 
   React.useEffect(() => {
     if (!payload) return
@@ -294,96 +484,298 @@ function PluginsPage(): React.ReactElement {
       const next = new Set([...previous].filter(key => valid.has(key)))
       return next.size === previous.size ? previous : next
     })
-  }, [payload])
+  }, [payload, batchItems])
 
   React.useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = 0
-  }, [source, status, scriptPublisher, search])
+  }, [rail, deferredKeyword, sortBy, taskStatus])
 
   React.useEffect(() => {
     if (settingsPackId && payload && !settingsPack) setSettingsPackId(null)
-    if (detailsStore && payload?.packs.some(pack => pack.id === detailsStore.id)) setDetailsStore(null)
-  }, [payload, settingsPack, settingsPackId, detailsStore])
+    if (detailsStore && installedIds.has(detailsStore.id)) setDetailsStore(null)
+  }, [payload, settingsPack, settingsPackId, detailsStore, installedIds])
 
-  function openPackDetails(id: string, pane: PluginDetailsPane): void {
-    setDetailsPane(pane); setSettingsPackId(id)
+  const openPackDetails = React.useCallback((id: string, pane: PluginDetailsPane): void => {
+    setDetailsPane(pane)
+    setSettingsPackId(id)
+  }, [])
+  const handleEnablePack = React.useCallback((id: string, enabled: boolean) => {
+    void mutation(`enable:${id}`, '/api/plugins/enable', { id, enabled })
+  }, [mutation])
+  const handlePackSettings = React.useCallback((id: string) => openPackDetails(id, 'settings'), [openPackDetails])
+  const handlePackAbout = React.useCallback((id: string) => openPackDetails(id, 'about'), [openPackDetails])
+  const handleInstallStore = React.useCallback((id: string) => { void start(id, false) }, [start])
+  const handleOpenStoreDetails = React.useCallback((item: StorePlugin) => setDetailsStore(item), [])
+  const handleShowStoreNotes = React.useCallback((item: StorePlugin) => {
+    setNotes({
+      name: pluginName(item.id, item.name),
+      version: item.version || '',
+      notes: item.notes,
+      page: item.page,
+      prerelease: item.prerelease,
+    })
+  }, [])
+
+  const handleToggleSelectMode = React.useCallback(() => {
+    setSelecting(value => !value)
+    setSelected(new Set())
+  }, [])
+  const handleUpdateAll = React.useCallback(() => confirmBatch('update', pendingUpdatesRef.current), [confirmBatch])
+  const handleOpenMissing = React.useCallback(() => setMissingOpen(true), [])
+  const handleRefreshStore = React.useCallback(() => { void refreshStore() }, [refreshStore])
+  const handleCheck = React.useCallback(() => { void check() }, [check])
+  const handleOpenSettings = React.useCallback(() => setSettingsOpen(true), [])
+  const handleOpenScript = React.useCallback(() => setScriptInstallRequest(value => value + 1), [])
+  const handleOpenDiagnostics = React.useCallback(() => setDiagnosticsOpen(true), [])
+  const handleExitBatch = React.useCallback(() => { setSelecting(false); setSelected(new Set()) }, [])
+  const handleTaskImport = React.useCallback(() => setTaskImportRequest(value => value + 1), [])
+  const handleTaskCreate = React.useCallback(() => setTaskCreateRequest(value => value + 1), [])
+  const handleTaskNotify = React.useCallback((message: string, kind?: 'ok' | 'err') => {
+    toast(message, kind === 'err' ? 'err' : 'ok')
+  }, [])
+  const handleOpenScheduledPage = React.useCallback((pluginId?: string) => {
+    bridge().wbApp?.showPage?.('scheduled')
+    if (pluginId) window.wbScheduledPage?.openCreateForPlugin?.(pluginId)
+  }, [])
+  const scrollListToTop = React.useCallback(() => { listRef.current?.scrollTo({ top: 0, behavior: 'smooth' }) }, [])
+
+  const isScheduledRail = rail === 'scheduled'
+  const mergedRailCounts = React.useMemo(() => ({
+    ...railCounts,
+    scheduled: taskData.totalCount,
+    scheduledUpdatable: taskData.updatableCount,
+  }), [railCounts, taskData.totalCount, taskData.updatableCount])
+  const toolbarCount = isScheduledRail ? taskData.countMatching(taskStatus, deferredKeyword) : filteredRows.length
+  const showCommunityCatalogStatus = (rail === 'all' || rail === 'community') && Boolean(catalog?.error)
+  const isMagpieRail = rail === 'magpie-official' || rail === 'magpie-recommended' || rail === 'magpie-third-party'
+  const showScriptCatalogStatus = Boolean(
+    scripts?.catalog && (isMagpieRail || (rail === 'all' && (scripts.catalog.refreshing || scripts.catalog.marketError || scripts.catalog.githubError)))
+  )
+  const topError = isScheduledRail ? taskData.error : (error || syncError || (typeof scriptCtrl.failure === 'string' ? scriptCtrl.failure : ''))
+
+  const renderRow = (row: UnifiedPluginRow) => {
+    const selectionDisabled = locked || batchItemByKey.get(row.selectionKey)?.active === true
+    const rowSelected = selected.has(row.selectionKey)
+    if (row.kind === 'native-installed') {
+      const pack = row.pack
+      const operation = operationById.get(pack.id)
+      return <InstalledPluginCard key={row.key} viewMode={viewMode} pack={pack} store={row.store}
+        host={host || null} update={updatesById.get(pack.id)} operation={operation} disabled={locked || operation?.active === true}
+        selecting={selecting} selected={rowSelected} selectionDisabled={selectionDisabled}
+        selectionKey={row.selectionKey} onToggleSelect={handleToggleSelect}
+        onEnabled={handleEnablePack} onSettings={handlePackSettings} onDetails={handlePackAbout} />
+    }
+    if (row.kind === 'native-store') {
+      const item = row.item
+      const operation = operationById.get(item.id)
+      return <StorePluginCard key={row.key} viewMode={viewMode} item={item} target={target}
+        operation={operation} disabled={locked}
+        selecting={selecting} selected={rowSelected} selectionDisabled={selectionDisabled}
+        selectionKey={row.selectionKey} onToggleSelect={handleToggleSelect}
+        onInstall={handleInstallStore} onDetails={handleOpenStoreDetails} onNotes={handleShowStoreNotes} />
+    }
+    if (row.kind === 'script-installed') {
+      return scriptCtrl.renderInstalled(row.pack, {
+        viewMode,
+        selecting,
+        selected: rowSelected,
+        selectionDisabled,
+        selectionKey: row.selectionKey,
+        onToggleSelect: handleToggleSelect,
+      })
+    }
+    return scriptCtrl.renderRecommended(row.item, {
+      viewMode,
+      selecting,
+      selected: rowSelected,
+      selectionDisabled,
+      selectionKey: row.selectionKey,
+      onToggleSelect: handleToggleSelect,
+    })
   }
 
   return <>
     <div className='plugins-page-layout'>
-      <div className='plugins-fixed-area'>
-        <PluginPageToolbar source={source} status={status} search={search} count={countMatching}
-          selecting={selecting} locked={locked} checking={busy === 'check' || catalog?.checking === true}
-          scriptsAvailable={Boolean(scripts)} scriptActive={scripts?.operation.active === true}
-          updateCount={pendingUpdates.length} updateDisabled={locked || active || scripts?.operation.active === true}
-          onSource={setSource} onStatus={setStatus} onSearch={setSearch}
-          onSelect={() => { setSelecting(value => !value); setSelected(new Set()) }}
-          onUpdateAll={() => confirmBatch('update', pendingUpdates)}
-          onFile={fileInstall.show} onMissing={() => setMissingOpen(true)}
-          onRefresh={() => void refreshStore()} onCheck={() => void check()} onSettings={() => setSettingsOpen(true)}
-          onScript={() => setScriptInstallRequest(value => value + 1)} onDiagnostics={() => setDiagnosticsOpen(true)} />
-        {error || syncError ? <Alert variant='destructive' className='break-words'>{error || syncError}</Alert> : null}
-        {missing.required.length || missing.unresolved.length ? <PluginMissingBanner count={missing.required.length + missing.unresolved.length}
-          accounts={missingAccounts} onOpen={() => setMissingOpen(true)} t={t} /> : null}
-        {selecting ? <PluginBatchToolbar items={batchItems} visibleKeys={shownKeys.filter(key => !batchItems.find(item => item.key === key)?.active)}
-          selected={selected} disabled={locked} onSelection={changeSelection} onAction={confirmBatch}
-          onExit={() => { setSelecting(false); setSelected(new Set()) }} t={t} /> : null}
-        {batch.task ? <PluginBatchProgress task={batch.task} t={t} onClose={batch.clear}
-          onRetry={items => confirmBatch(batch.task!.action, items)} /> : null}
-        {fileInstall.backgroundVisible ? <PluginFileInstallProgress model={fileInstall} t={t} /> : null}
-      </div>
-      <div ref={listRef} className='plugins-scroll-list'>
-      {showNative && (installedRows.length > 0 || storeRows.length > 0) ? <section className='@container/plugin-gallery min-w-0 shrink-0' aria-label={t('Agent2API 社区')}>
-        <PluginSectionHeading t={t} title={t('Agent2API 社区')} count={installedRows.length + storeRows.length}
-          hint={t('独立插件，来自项目插件仓库')} actions={selecting ? <Button variant='link' size='xs' disabled={locked} onClick={() => selectGroup('pack')}>{t('全选本组')}</Button> : null} />
-        <PluginCatalogStatus catalog={catalog} refreshing={busy === 'refresh' || busy === 'check' || catalog?.checking === true}
-          disabled={locked} onRetry={refreshStore} t={t} />
-        <div className={PLUGIN_GRID_CLASS}>
-          {installedRows.map(pack => {
-            const operation = operations.find(item => item.id === pack.id)
-            return <InstalledPluginCard key={pack.id} pack={pack} store={store.find(item => item.id === pack.id)}
-              host={host || null} update={updateOf(pack.id)} operation={operation} disabled={locked || operation?.active === true}
-              selection={selecting ? selectionFor(packSelectionKey(pack.id)) : undefined}
-              onEnabled={enabled => void mutation(`enable:${pack.id}`, '/api/plugins/enable', { id: pack.id, enabled })}
-              onSettings={() => openPackDetails(pack.id, 'settings')} onDetails={() => openPackDetails(pack.id, 'about')} />
-          })}
-          {storeRows.map(item => <StorePluginCard key={item.id} item={item} target={target}
-            operation={operations.find(operation => operation.id === item.id)} disabled={locked}
-            selection={selecting ? selectionFor(packSelectionKey(item.id)) : undefined}
-            onInstall={() => void start(item.id, false)} onDetails={() => setDetailsStore(item)}
-            onNotes={() => setNotes({ name: pluginName(item.id, item.name), version: item.version || '',
-              notes: item.notes, page: item.page, prerelease: item.prerelease })} />)}
+      <PluginCategoryRail value={rail} counts={mergedRailCounts} scriptsAvailable={Boolean(scripts)} onChange={selectRail} />
+
+      <div className='plugins-main-pane'>
+        <div className='plugins-fixed-area'>
+          <PluginPageToolbar
+            title={pluginRailTitle(rail)}
+            count={toolbarCount}
+            subtitle={pluginRailSubtitle(rail)}
+            search={search}
+            sort={sortBy}
+            viewMode={viewMode}
+            selecting={selecting}
+            locked={locked}
+            checking={busy === 'check' || catalog?.checking === true}
+            scriptsAvailable={Boolean(scripts)}
+            scriptActive={scripts?.operation.active === true}
+            scheduledMode={isScheduledRail}
+            updateCount={pendingUpdates.length}
+            updateDisabled={locked || active || scripts?.operation.active === true}
+            onSearch={setSearch}
+            onSort={setSortBy}
+            onViewMode={setViewMode}
+            onSelect={handleToggleSelectMode}
+            onUpdateAll={handleUpdateAll}
+            onTaskImport={handleTaskImport}
+            onTaskCreate={handleTaskCreate}
+            onFile={fileInstall.show}
+            onMissing={handleOpenMissing}
+            onRefresh={handleRefreshStore}
+            onCheck={handleCheck}
+            onSettings={handleOpenSettings}
+            onScript={handleOpenScript}
+            onDiagnostics={handleOpenDiagnostics}
+          />
+          {topError ? <Alert variant='destructive' className='whitespace-pre-wrap break-words'>{topError}</Alert> : null}
+          {!isScheduledRail && (missing.required.length || missing.bindable.length || missing.unresolved.length) ? <PluginMissingBanner
+            count={missing.required.length + missing.bindable.length + missing.unresolved.length}
+            accounts={missingAccounts} onOpen={handleOpenMissing} t={t} /> : null}
+          {isScheduledRail ? <PluginScheduledFilterBar
+            status={taskStatus}
+            totalCount={taskData.totalCount}
+            installedCount={taskData.installedCount}
+            storeUninstalledCount={taskData.storeUninstalledCount}
+            updatableCount={taskData.updatableCount}
+            onStatusChange={setTaskStatus}
+            t={t}
+          /> : null}
+          {!isScheduledRail && selecting ? <PluginBatchToolbar items={batchItems}
+            visibleKeys={selectableVisibleKeys}
+            selected={selected} disabled={locked} onSelection={changeSelection} onAction={confirmBatch}
+            onExit={handleExitBatch} t={t} /> : null}
+          {batch.task ? <PluginBatchProgress task={batch.task} t={t} onClose={batch.clear}
+            onRetry={items => confirmBatch(batch.task!.action, items)} /> : null}
+          {fileInstall.backgroundVisible ? <PluginFileInstallProgress model={fileInstall} t={t} /> : null}
         </div>
-      </section> : null}
-      {!payload || (shownCount === 0 && !scripts?.operation.active && !scriptGalleryVisible) ? <Card className='shrink-0'><Empty>
-        <EmptyTitle>{!payload || (!hasAny && catalog?.checking) ? t('正在读取插件列表…')
-          : hasAny ? t('没有符合筛选条件的插件') : t('暂无可安装的插件')}</EmptyTitle>
-        <EmptyDescription>{hasAny ? t('换一组筛选条件，或把来源和状态都切回「全部」。')
-          : summarizeNetworkError(catalog?.reason, t).summary || (unpublishedCount > 0
-            ? t('插件发布后会显示在这里。')
-            : t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。'))}</EmptyDescription>
-        {payload && hasAny && filtersActive ? <Button variant='outline' size='sm' className='mt-2'
-          onClick={clearFilters}>{t('清除筛选')}</Button>
-          : payload && !hasAny && catalog?.error ? <Button variant='outline' size='sm' className='mt-2' disabled={locked || catalog.checking}
-            onClick={() => void refreshStore()}>{t('刷新重试')}</Button> : null}
-      </Empty></Card> : null}
-      {scripts ? <div className='shrink-0'><ScriptPluginsPanel state={scripts} t={t} disabled={locked} query={search}
-        resolveIcon={resolveIcon} onOpenExternal={openExternal}
-        selection={selecting ? selectionFor : undefined} onSelectGroup={() => selectGroup('script')}
-        galleryVisible={showScripts} showInstallAction={false} installRequest={scriptInstallRequest} onBusyChange={setScriptBusy}
-        status={status} publisher={scriptPublisher} onPublisherChange={setScriptPublisher} onClearFilters={clearFilters}
-        request={(path, body) => api('POST', path, body)} refresh={load} /></div> : null}
-      <p className='m-0 shrink-0 text-[11.5px] leading-relaxed text-muted-foreground'>
-        {t('插件独立安装与更新。卸载后账号数据仍会保留；脚本插件共用一个按需下载的运行时。')}
-      </p>
+
+        <div ref={listRef} className='plugins-scroll-list'>
+          {isScheduledRail && !taskData.loaded && !taskData.payload ? (
+            <Card className='shrink-0'><Empty>
+              <EmptyTitle>{t('正在读取插件列表…')}</EmptyTitle>
+            </Empty></Card>
+          ) : null}
+          <TaskPluginsSection
+            payload={taskData.payload}
+            status={taskStatus}
+            query={deferredSearch}
+            request={api}
+            refresh={taskData.refresh}
+            jobCounts={taskData.jobCounts}
+            embedded
+            hideContent={!isScheduledRail || (!taskData.loaded && !taskData.payload)}
+            scrollRef={listRef}
+            importRequest={taskImportRequest}
+            createRequest={taskCreateRequest}
+            t={t}
+            notify={handleTaskNotify}
+            onOpenScheduledPage={handleOpenScheduledPage}
+          />
+
+          {!isScheduledRail ? <>
+            {showCommunityCatalogStatus ? (
+              <PluginCatalogStatus catalog={catalog} refreshing={busy === 'refresh' || busy === 'check' || catalog?.checking === true}
+                disabled={locked} onRetry={refreshStore} t={t} />
+            ) : null}
+            {showScriptCatalogStatus && scripts?.catalog ? (
+              <ScriptCatalogStatus catalog={scripts.catalog} request={scriptRequest}
+                refresh={forceLoad} disabled={locked} t={t} />
+            ) : null}
+
+            {!payload ? (
+              <Card className='shrink-0'><Empty>
+                <EmptyTitle>{t('正在读取插件列表…')}</EmptyTitle>
+              </Empty></Card>
+            ) : filteredRows.length === 0 && !unmatchedScriptOperation ? (
+              <Card className='shrink-0'><Empty>
+                <EmptyTitle>
+                  {!hasAny && catalog?.checking ? t('正在读取插件列表…')
+                    : rail === 'updatable' && !deferredKeyword ? t('所有已安装插件均为最新版本')
+                      : rail === 'installed' && !deferredKeyword ? t('还没有安装任何插件')
+                        : hasAny ? t('没有符合筛选条件的插件') : t('暂无可安装的插件')}
+                </EmptyTitle>
+                <EmptyDescription>
+                  {rail === 'installed' && !deferredKeyword && hasAny
+                    ? t('可以从左侧「插件商店」挑选并安装需要的提供商插件。')
+                    : rail === 'updatable' && !deferredKeyword
+                      ? t('可在右上角更多操作中随时检查更新。')
+                      : hasAny ? t('试试更换搜索词，或切换到其他插件分类查看。')
+                        : summarizeNetworkError(catalog?.reason, t).summary || (unpublishedCount > 0
+                          ? t('插件发布后会显示在这里。')
+                          : t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。'))}
+                </EmptyDescription>
+                {search.trim() ? (
+                  <Button variant='outline' size='sm' className='mt-2' onClick={() => setSearch('')}>{t('清除筛选')}</Button>
+                ) : rail !== 'all' && hasAny ? (
+                  <Button variant='outline' size='sm' className='mt-2' onClick={() => selectRail('all')}>{t('浏览全部插件')}</Button>
+                ) : !hasAny && catalog?.error ? (
+                  <Button variant='outline' size='sm' className='mt-2' disabled={locked || catalog.checking}
+                    onClick={() => void refreshStore()}>{t('刷新重试')}</Button>
+                ) : null}
+              </Empty></Card>
+            ) : (
+              <section className='@container/plugin-gallery min-w-0 shrink-0' aria-label={pluginRailTitle(rail)}>
+                {viewMode === 'cards' ? (
+                  <div className={PLUGIN_GRID_CLASS}>
+                    {unmatchedScriptOperation ? <ScriptOperationCard operation={scriptCtrl.operation} t={t} /> : null}
+                    {visibleRows.map(renderRow)}
+                  </div>
+                ) : (
+                  <>
+                    {unmatchedScriptOperation ? <div className='mb-3'><ScriptOperationCard operation={scriptCtrl.operation} t={t} /></div> : null}
+                    <div className='plugins-list-stack'>
+                      {visibleRows.map(renderRow)}
+                    </div>
+                  </>
+                )}
+                <PluginStreamFooter
+                  stream={stream}
+                  scrollRef={listRef}
+                  onScrollTop={scrollListToTop}
+                  t={t}
+                />
+              </section>
+            )}
+
+            <p className='m-0 shrink-0 text-[11.5px] leading-relaxed text-muted-foreground'>
+              {t('插件独立安装与更新。卸载后账号数据仍会保留；脚本插件共用一个按需下载的运行时。')}
+            </p>
+          </> : null}
+        </div>
       </div>
     </div>
-    <PluginFileInstallDialog model={fileInstall} maxPackBytes={maxPackBytes} t={t} />
+
+    {scriptCtrl.dialogs}
+    <PluginFileInstallDialog
+      model={fileInstall}
+      maxPackBytes={maxPackBytes}
+      onOpenScheduledTasks={() => { fileInstall.close(); bridge().wbApp?.showPage?.('scheduled') }}
+      t={t}
+    />
     {batchConfirm ? <PluginBatchConfirm key={`${batchConfirm.action}:${batchConfirm.items.map(item => item.key).join('|')}`}
       action={batchConfirm.action} items={batchConfirm.items} disabled={locked} t={t} onClose={() => setBatchConfirm(null)}
       onConfirm={() => { const { action, items } = batchConfirm; setBatchConfirm(null); void batch.execute(action, items) }} /> : null}
-    {missingOpen ? <PluginMissingDialog required={missing.required} unresolved={missing.unresolved}
-      disabled={locked} t={t} onClose={() => setMissingOpen(false)} onInstall={items => { setMissingOpen(false); void batch.execute('install', items) }} /> : null}
+    {missingOpen ? <PluginMissingDialog required={missing.required} bindable={missing.bindable} unresolved={missing.unresolved}
+      disabled={locked} t={t} onClose={() => setMissingOpen(false)}
+      onInstall={items => { setMissingOpen(false); void batch.execute('install', items) }}
+      onBindAlias={async ({ packageId, original, alias }) => {
+        const response = await api<{ operation?: import('../../../ui-shared/plugins').ScriptOperation }>('POST', '/api/plugins/scripts/change', {
+          id: packageId, action: 'bind_alias', original, alias,
+        })
+        if (response?.operation) {
+          const finalOp = await waitScriptOperation(response.operation, api as PluginRequest, t)
+          if (finalOp.error || finalOp.stage === 'failed') throw new Error(finalOp.error || t('插件操作失败'))
+        }
+        refreshPluginStartup()
+        const next = await api<PluginsPayload>('GET', '/api/plugins')
+        lastRevision.current = typeof next.revision === 'string' ? next.revision : ''
+        setPayload(next)
+        await synchronize(next)
+        await forceLoad()
+      }} /> : null}
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
     <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />
     {startupId ? <PluginStartupDialog id={startupId}
@@ -394,7 +786,7 @@ function PluginsPage(): React.ReactElement {
         if (startupId.startsWith('script-')) await api('POST', '/api/plugins/scripts/change', { id: startupId, action: 'reload' })
         else await api('POST', '/api/plugins/reload', { id: startupId })
         refreshPluginStartup()
-        await load()
+        await forceLoad()
       }} /> : null}
     {detailsItem ? <PluginDetailsDialog name={pluginName(detailsItem.id, detailsItem.name)}
       description={pluginDescription(detailsItem.id, detailsItem.description)} version={detailsItem.version}
@@ -410,16 +802,16 @@ function PluginsPage(): React.ReactElement {
       primaryAction={<PluginInstallButton t={t} disabled={locked || !detailsInstallable || operations.some(item => item.id === detailsItem.id && item.active)}
         onClick={() => { setDetailsStore(null); void start(detailsItem.id, false) }} />} /> : null}
     {settingsPack ? <PluginPackSettingsDialog key={settingsPack.id} pack={settingsPack} initialPane={detailsPane}
-      store={store.find(item => item.id === settingsPack.id)} update={updateOf(settingsPack.id)} operation={settingsOperation}
+      store={storeById.get(settingsPack.id)} update={updatesById.get(settingsPack.id)} operation={settingsOperation}
       disabled={locked || settingsOperation?.active === true} onClose={() => setSettingsPackId(null)}
       onEnabled={enabled => void mutation(`enable:${settingsPack.id}`, '/api/plugins/enable', { id: settingsPack.id, enabled })}
       onProvider={(provider, enabled) => void mutation(`provider:${provider.id}`, '/api/plugins/provider', {
         id: settingsPack.id, provider: provider.id, enabled,
       })}
       onUpdate={() => void start(settingsPack.id, true)}
-      onReload={async () => { await api('POST', '/api/plugins/reload', { id: settingsPack.id }); await load() }}
+      onReload={async () => { await api('POST', '/api/plugins/reload', { id: settingsPack.id }); await forceLoad() }}
       onNotes={() => {
-        const update = updateOf(settingsPack.id)
+        const update = updatesById.get(settingsPack.id)
         setSettingsPackId(null)
         setNotes({ name: pluginName(settingsPack.id, settingsPack.name), version: update?.latest || settingsPack.version,
           notes: update?.notes, page: update?.page, prerelease: update?.prerelease })
@@ -463,7 +855,10 @@ function mount(): void {
 mountOnPage('plugins', PAGE_SELECTOR, mount)
 
 declare global {
-  interface Window { wbPluginsPage?: { load(): Promise<void> } }
+  interface Window {
+    wbPluginsPage?: { load(): Promise<void> }
+    wbScheduledPage?: { load(): Promise<void>; openCreateForPlugin?(pluginId: string): void }
+  }
 }
 
 window.wbPluginsPage = { async load() { await currentLoad?.() } }

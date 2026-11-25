@@ -134,6 +134,10 @@ pub struct QuotaSource {
     pub ends_at: i64,
     #[serde(default)]
     pub resets_at: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_amount: Option<f64>,
     #[serde(default)]
     pub window: Option<Window>,
     #[serde(default)]
@@ -144,6 +148,8 @@ pub struct QuotaSource {
     pub local_only: bool,
 }
 
+fn is_zero_i64(value: &i64) -> bool { *value == 0 }
+
 impl QuotaSource {
     pub fn identity(&self) -> Self {
         let mut source = self.clone();
@@ -152,6 +158,8 @@ impl QuotaSource {
         source.used = None;
         source.remaining_percent = None;
         source.resets_at = 0;
+        source.expires_at = 0;
+        source.expires_amount = None;
         source
     }
 

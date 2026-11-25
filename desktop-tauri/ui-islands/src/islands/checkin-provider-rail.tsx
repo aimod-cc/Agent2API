@@ -7,22 +7,22 @@ import { t } from '../i18n'
  * 签到中心的**提供商分类栏**（左栏）。
  *
  * ── 它为什么在这里 ──────────────────────────────────────────
- * 「每日签到 / 新手福利 / 活动福利 / 成长任务」是**任务**，提供商是同一任务下的
- * **分类**。所以左栏不是固定的：切到某个任务时，只列这个任务里真正有账号的提供商
- * —— 否则用户会在「成长任务」下面看到一堆点进去空空如也的家。
+ * 「每日签到 / 福利与任务」是**功能档位**，提供商是同一档位下的
+ * **分类**。所以左栏不是固定的：切到某个档位时，只列这个档位里真正有账号或任务的提供商
+ * —— 否则用户会在列表里看到一堆点进去空空如也的家。
  *
  * ── 计数口径 ────────────────────────────────────────────────
- * 每家后面是 `已完成 / 总数`。计数由调用方按**当前任务**算好传进来（各任务的
- * 「完成」判据不同：签到看今日已签、福利看是否领完、成长看任务树），这里只负责
+ * 每家后面是 `已完成 / 总数`（或纯总数）。计数由调用方按**当前档位**算好传进来（各档位的
+ * 「完成」判据不同：签到看今日已签、福利与任务按账号数或任务展示），这里只负责
  * 画。没完成的用警示色，不额外挂徽标 —— 徽标会把提供商名字挤断。
  */
 
 export type ProviderOption = {
   id: string
   label: string
-  /** 已完成的账号数；`null` = 这一档没有「完成」概念（活动福利按领取算，逐行才知道） */
+  /** 已完成的账号数；`null` = 这一档没有统一的「完成」口径（福利与任务按各自区块展示） */
   done: number | null
-  /** 这一家在**当前任务**里的账号总数 */
+  /** 这一家在**当前档位**里的账号总数 */
   total: number
   /** 仅由插件自动化任务挂载（无逐账号列表），不归入「暂无账号」折叠组 */
   isTask?: boolean
@@ -31,7 +31,7 @@ export type ProviderOption = {
 export function ProviderRail({ options, selected, total, onSelect }: {
   options: ProviderOption[]
   selected: string
-  total: { done: number; all: number }
+  total: { done: number | null; all: number }
   onSelect: (id: string) => void
 }): React.ReactElement {
   const isEmptyOption = (option: ProviderOption) => !option.isTask && option.total === 0
@@ -49,7 +49,7 @@ export function ProviderRail({ options, selected, total, onSelect }: {
       key={option.id}
       active={selected === option.id}
       icon={<ProviderLogo id={option.id} label={option.label} />}
-      trailing={<Count done={option.done} total={option.total} />}
+      trailing={<Count done={option.done} total={option.total} taskOnly={option.isTask} />}
       onClick={() => onSelect(option.id)}
     >
       {t(option.label)}
@@ -96,9 +96,9 @@ export function ProviderRail({ options, selected, total, onSelect }: {
   )
 }
 
-function Count({ done, total }: { done: number | null; total: number }): React.ReactElement {
+function Count({ done, total, taskOnly }: { done: number | null; total: number; taskOnly?: boolean }): React.ReactElement {
   return <span className={`ck-provider-count${done !== null && done < total ? ' pending' : ''}`}>
-    {done === null ? total : `${done}/${total}`}
+    {done !== null ? `${done}/${total}` : taskOnly && total === 0 ? t('任务') : total}
   </span>
 }
 

@@ -62,10 +62,10 @@ body.colset-dragging { cursor: grabbing; user-select: none; }
 .models-table th.ta-center, .models-table td.ta-center { text-align: center; }
 .models-table th.ta-right, .models-table td.ta-right { text-align: right; }
 
-/* 请求日志：格子是 grid 项（span），压过 `.req-head .req-dur` 与 `.req-row .req-dur` */
-.req-head > .ta-left, .req-row > .ta-left { text-align: left; }
-.req-head > .ta-center, .req-row > .ta-center { text-align: center; }
-.req-head > .ta-right, .req-row > .ta-right { text-align: right; }
+/* 请求日志：表头统一居中，列设置的对齐只作用于数据行格子（压过 `.req-row .req-dur` 等默认对齐） */
+.req-row > .ta-left { text-align: left; }
+.req-row > .ta-center { text-align: center; }
+.req-row > .ta-right { text-align: right; }
 
 .ck-records-table th.ta-left, .ck-records-table td.ta-left { text-align: left; }
 .ck-records-table th.ta-center, .ck-records-table td.ta-center { text-align: center; }
@@ -109,33 +109,40 @@ body.colset-dragging { cursor: grabbing; user-select: none; }
 
 /* ── 3. 竖排读数与靠边的 grid 项 ── */
 
-/* 这些格子里是「竖着排的几行」（时间 / 提供商账号 / 用时 / 用量），
-   靠 align-items 决定整块贴哪边 —— 它们的 text-align 管不到自己的子项
-   （align-items: flex-end 之类的默认值写在各自的列样式里）。
-   底部的 .req-time 还自带 flex-direction: column，所以这一层同样必要。 */
+/* 请求日志各竖排两行单元格靠 align-items 决定整块贴哪边 */
 .req-row > .req-time.ta-left,
+.req-row > .req-status.ta-left,
+.req-row > .req-source.ta-left,
 .req-row > .req-target.ta-left,
-.req-row > .req-usage.ta-left { align-items: flex-start; }
+.req-row > .req-model-stack.ta-left,
+.req-row > .req-dur.ta-left,
+.req-row > .req-speed.ta-left,
+.req-row > .req-usage.ta-left,
+.req-row > .req-billing.ta-left { align-items: flex-start; }
 
 .req-row > .req-time.ta-center,
+.req-row > .req-status.ta-center,
+.req-row > .req-source.ta-center,
 .req-row > .req-target.ta-center,
-.req-row > .req-usage.ta-center { align-items: center; }
+.req-row > .req-model-stack.ta-center,
+.req-row > .req-dur.ta-center,
+.req-row > .req-speed.ta-center,
+.req-row > .req-usage.ta-center,
+.req-row > .req-billing.ta-center { align-items: center; }
 
 .req-row > .req-time.ta-right,
+.req-row > .req-status.ta-right,
+.req-row > .req-source.ta-right,
 .req-row > .req-target.ta-right,
-.req-row > .req-usage.ta-right { align-items: flex-end; }
+.req-row > .req-model-stack.ta-right,
+.req-row > .req-dur.ta-right,
+.req-row > .req-speed.ta-right,
+.req-row > .req-usage.ta-right,
+.req-row > .req-billing.ta-right { align-items: flex-end; }
 
-/* 重试列是**横向**标签容器（两枚并排放不下才换行，见 page-requests.css），
-   所以它的三档落在主轴 justify-content 上，不在上面那一层。 */
-.req-row > .req-retry.ta-left { justify-content: flex-start; }
-.req-row > .req-retry.ta-center { justify-content: center; }
-.req-row > .req-retry.ta-right { justify-content: flex-end; }
-
-/* 用时列是「右对齐」的两行读数：grid 项默认 stretch、内容自身 align-items: flex-end，
-   所以要改的是内容盒的 align-items，而不是格子的 text-align。 */
-.req-row > .req-dur.ta-left { align-items: flex-start; }
-.req-row > .req-dur.ta-center { align-items: center; }
-.req-row > .req-dur.ta-right { align-items: flex-end; }
+/* 居中或右对齐时取消第二行 Logo 缩进，避免视觉偏左 */
+.req-row > .ta-center .req-sub-indent,
+.req-row > .ta-right .req-sub-indent { padding-left: 0; }
 
 /* 详情列靠 justify-self 贴右（它不是靠 text-align）：跟随用户选择移动 */
 .req-row > .req-detail.ta-left { justify-self: start; }

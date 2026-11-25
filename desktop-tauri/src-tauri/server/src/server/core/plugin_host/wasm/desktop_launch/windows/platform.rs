@@ -353,6 +353,21 @@ pub fn wait_hot_services_respawn(executable: &Path, hot_switch: &HotSwitch, prev
 
 pub fn running(executable: &Path) -> Result<bool, String> { Ok(!targets(executable)?.is_empty()) }
 
+pub fn running_has_args(executable: &Path, required_args: &[String]) -> Result<bool, String> {
+    if required_args.is_empty() { return Ok(true); }
+    let executable = paths::checked(executable, false)?;
+    let mut system = system();
+    let roots = main_root_pids(&mut system, &executable);
+    if roots.is_empty() { return Ok(false); }
+    Ok(roots.into_iter().all(|pid| {
+        system.process(sysinfo::Pid::from_u32(pid)).is_some_and(|process| {
+            let cmd: Vec<String> = process.cmd().iter().skip(1)
+                .map(|arg| arg.to_string_lossy().into_owned()).collect();
+            required_args.iter().all(|required| cmd.iter().any(|actual| actual == required))
+        })
+    }))
+}
+
 unsafe extern "system" fn close_window(window: windows::Win32::Foundation::HWND, value: LPARAM) -> windows::core::BOOL {
     let selected = &*(value.0 as *const HashSet<u32>);
     let mut pid = 0;
@@ -547,13 +562,14 @@ pub fn close(executable: &Path) -> Result<(), String> {
     Err("客户端进程尚未全部退出，未写入凭证".into())
 }
 
-pub fn start(executable: &Path, proxy: Option<&super::super::proxy::LaunchProxy>) -> Result<(), String> {
+pub fn start(executable: &Path, proxy: Option<&super::super::proxy::LaunchProxy>, extra_args: &[String]) -> Result<(), String> {
     paths::checked(executable, false)?;
     if running(executable)? { return Err("客户端已经运行，未再次启动".into()); }
     let mut command = std::process::Command::new(executable);
     command
         .current_dir(executable.parent().ok_or("客户端安装目录不可用")?)
-        .creation_flags(0x08000000);
+        .creation_flags(0x08000000)
+        .args(extra_args);
     if let Some(proxy) = proxy {
         for key in ["http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
             command.env_remove(key);

@@ -90,22 +90,30 @@ fn account_display_name(account: &Value) -> String {
 /// 「访客没有积分体系」这条由插件申报（`CheckinInfo::exclude_guest`）：
 /// 哪一家有访客概念、访客能不能签，是 provider 知识。下面按 `isGuest` /
 /// `edition` / Accio 家族的三条特判只服务**没申报的旧插件**。
-fn out_of_scope_reason(
+fn out_of_scope_reason<'a>(
     account: &Value,
     provider: &str,
-    declared: Option<&agent2api_provider_protocol::CheckinInfo>,
-) -> &'static str {
+    declared: Option<&'a agent2api_provider_protocol::CheckinInfo>,
+) -> &'a str {
     let guest = account.get("isGuest").and_then(Value::as_bool) == Some(true);
-    // 申报过的家：只有「访客排除」一种情况会让它的账号落到范围外
+    // 申报过的家：只有「访客排除」或「明确声明无每日签到」会让它的账号落到范围外
     // （其余排除条件都是网关侧的内置特判，申报家不会走到）
     if let Some(declared) = declared {
         if declared.exclude_guest && guest {
             return "访客账号没有积分体系";
         }
-        // 申报了 `plans` / `onboarding` / `growth` 但没申报每日签到的家
-        // （ZCode 只有「活动福利」）：理由要说准，别让人以为这家整个没接。
-        if !declared.daily && (declared.plans || declared.onboarding || declared.growth) {
-            return "本家没有每日签到，请到对应活动或任务标签查看";
+        if !declared.daily {
+            if let Some(description) = declared
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                return description;
+            }
+            if declared.plans || declared.onboarding || declared.growth {
+                return "本家没有每日签到，请到「福利与任务」查看";
+            }
         }
         return "没有签到链路";
     }

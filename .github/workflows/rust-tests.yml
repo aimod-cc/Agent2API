@@ -37,7 +37,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 显式钉在 macos-26（与构建仓库一致），避开 macos-latest 通配标签在 arm64 池排队过长甚至被取消的问题
+        os: [ubuntu-latest, windows-latest, macos-26]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -52,6 +53,12 @@ jobs:
           cache-on-failure: true
       - name: 单元测试
         run: node scripts/cargo-test.mjs
+      - name: 检查服务端可执行入口编译
+        # 只在最快的 ubuntu-latest 上顺带检查 bin 入口（总时长仍短于 Windows 单元测试），
+        # 避免拖慢作为整体瓶颈的 Windows / macOS 任务
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: desktop-tauri/src-tauri
+        run: cargo check --locked -p agent2api-server --bin agent2api-server
 
   coverage:
     name: 服务端覆盖率报告

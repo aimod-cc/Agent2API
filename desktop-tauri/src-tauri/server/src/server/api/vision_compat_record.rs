@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::server::request_stats::NewRequestEntry;
-use super::pipeline::{stored_attempt_details, stored_sensitive_hits, RecordContext};
+use super::pipeline::{stored_attempt_details, stored_privacy_hits, stored_sensitive_hits, RecordContext};
 
 pub(super) fn persist(context: &RecordContext) {
     for call in context.telemetry.take_vision_calls() {
@@ -26,6 +26,7 @@ pub(super) fn persist(context: &RecordContext) {
         entry.credit = snapshot.credit;
         entry.attempt_details = stored_attempt_details(&snapshot.attempts_detail);
         entry.sensitive_hits = stored_sensitive_hits(&snapshot.sensitive_hits);
+        entry.privacy_hits = stored_privacy_hits(&snapshot.privacy_hits);
         entry.is_test = context.is_test;
         entry.source = context.source.clone();
         entry.route = snapshot.route.unwrap_or_else(|| json!({}));

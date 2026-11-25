@@ -329,6 +329,7 @@ export type ForwardingBundle = {
     bodyTimeoutSeconds?: number
   }
   sanitize: boolean
+  privacyEnabled: boolean
   keepaliveStrip: boolean
   developerRoleCompat: boolean
   reasoningCollapse: boolean
@@ -336,7 +337,7 @@ export type ForwardingBundle = {
 }
 
 export async function fetchForwardingBundle(signal?: AbortSignal): Promise<ForwardingBundle> {
-  const [ac, retry, timeouts, san, ka, dev, rc, cors] = await Promise.all([
+  const [ac, retry, timeouts, san, priv, ka, dev, rc, cors] = await Promise.all([
     apiCall<{ autoContinue?: boolean; autoContinueMaxRounds?: number }>('/api/auto-continue', {
       signal,
     }).catch(() => ({})),
@@ -352,6 +353,9 @@ export async function fetchForwardingBundle(signal?: AbortSignal): Promise<Forwa
       bodyTimeoutSeconds?: number
     }>('/api/timeouts', { signal }).catch(() => ({})),
     apiCall<{ sanitizeBlacklistFingerprints?: boolean }>('/api/sanitize', { signal }).catch(
+      () => ({}),
+    ),
+    apiCall<{ enabled?: boolean }>('/api/privacy', { signal }).catch(
       () => ({}),
     ),
     apiCall<{ stripNewlineKeepalive?: boolean }>('/api/keepalive-strip', { signal }).catch(
@@ -370,6 +374,7 @@ export async function fetchForwardingBundle(signal?: AbortSignal): Promise<Forwa
     retry,
     timeouts,
     sanitize: Boolean((san as { sanitizeBlacklistFingerprints?: boolean }).sanitizeBlacklistFingerprints),
+    privacyEnabled: Boolean((priv as { enabled?: boolean }).enabled),
     keepaliveStrip: Boolean((ka as { stripNewlineKeepalive?: boolean }).stripNewlineKeepalive),
     developerRoleCompat: Boolean((dev as { developerRoleCompat?: boolean }).developerRoleCompat),
     reasoningCollapse: Boolean(
@@ -404,11 +409,12 @@ export function saveTimeoutSettings(patch: {
 }
 
 export function saveCompatSwitch(
-  kind: 'sanitize' | 'keepalive-strip' | 'developer-role-compat' | 'reasoning-collapse' | 'cors',
+  kind: 'sanitize' | 'privacy' | 'keepalive-strip' | 'developer-role-compat' | 'reasoning-collapse' | 'cors',
   enabled: boolean,
 ): Promise<unknown> {
   const map: Record<typeof kind, { path: string; body: Record<string, boolean> }> = {
     sanitize: { path: '/api/sanitize', body: { sanitizeBlacklistFingerprints: enabled } },
+    privacy: { path: '/api/privacy', body: { enabled } },
     'keepalive-strip': { path: '/api/keepalive-strip', body: { stripNewlineKeepalive: enabled } },
     'developer-role-compat': {
       path: '/api/developer-role-compat',

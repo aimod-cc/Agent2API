@@ -267,7 +267,8 @@ function toPlainText(info: SystemInfo): string {
   ])
   section(t('开关'), [
     [t('调试模式'), onOff(features.debugMode)],
-    [t('指纹脱敏'), onOff(features.sanitizeFingerprints)],
+    [t('关键词替换'), onOff(features.sanitizeFingerprints)],
+    [t('隐私脱敏'), onOff(features.privacyRedaction)],
     [t('跨域访问'), onOff(features.cors)],
     [t('开发者角色兼容'), onOff(features.developerRoleCompat)],
     [t('第三方模型回答完自动折叠过程'), onOff(features.thirdPartyReasoningCollapse)],
@@ -446,7 +447,8 @@ function SystemInfoPanel() {
       title: t('开关'),
       rows: [
         [t('调试模式'), onOff(features.debugMode)],
-        [t('指纹脱敏'), onOff(features.sanitizeFingerprints)],
+        [t('关键词替换'), onOff(features.sanitizeFingerprints)],
+        [t('隐私脱敏'), onOff(features.privacyRedaction)],
         [t('跨域访问'), onOff(features.cors)],
         [t('开发者角色兼容'), onOff(features.developerRoleCompat)],
         [t('第三方模型回答完自动折叠过程'), onOff(features.thirdPartyReasoningCollapse)],

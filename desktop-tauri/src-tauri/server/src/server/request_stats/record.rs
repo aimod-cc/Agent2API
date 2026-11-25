@@ -207,6 +207,8 @@ pub struct RequestEntry {
     /// 模式的原始报文（请求日志的「详情」列）比看那行日志更完整。
     #[serde(rename = "sensitiveHits", default)]
     pub sensitive_hits: Vec<SensitiveHit>,
+    #[serde(rename = "privacyHits", default)]
+    pub privacy_hits: Vec<PrivacyHit>,
     /// **在途请求当前所处的转发阶段**（`connecting` / `waiting` / `streaming` /
     /// `retrying` / `queued`；空串 = 不在途 —— 终态行、旧行、转发前就失败的行）。
     ///
@@ -261,6 +263,23 @@ pub struct RequestEntry {
     pub cache_creation_1h_tokens: i64,
     #[serde(rename = "costUsd", default)]
     pub cost_usd: Option<f64>,
+    #[serde(default = "default_origin")]
+    pub origin: String,
+}
+
+pub(crate) const ORIGIN_GATEWAY: &str = "gateway";
+pub(crate) const ORIGIN_LOCAL_DIRECT: &str = "local_direct";
+
+pub(super) fn default_origin() -> String {
+    ORIGIN_GATEWAY.to_string()
+}
+
+pub(super) fn normalize_origin_value(raw: &str) -> String {
+    if raw.trim() == ORIGIN_LOCAL_DIRECT {
+        ORIGIN_LOCAL_DIRECT.to_string()
+    } else {
+        ORIGIN_GATEWAY.to_string()
+    }
 }
 
 /// 一个被命中的敏感词及其次数（存储契约）。
@@ -275,6 +294,18 @@ pub struct SensitiveHit {
     /// 本次请求里命中的次数
     #[serde(default)]
     pub count: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivacyHit {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub count: i64,
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub restored: i64,
 }
 
 /// 单次上游尝试的明细（存储契约）。
@@ -462,12 +493,15 @@ pub struct NewRequestEntry {
     pub route: Value,
     /// 本次请求命中的敏感词（见 `RequestEntry::sensitive_hits`）。空表 = 没命中。
     pub sensitive_hits: Vec<SensitiveHit>,
+    pub privacy_hits: Vec<PrivacyHit>,
     /// 这条请求是不是模型测试发起的（见 `RequestEntry::is_test`；默认 false）。
     pub is_test: bool,
     /// 请求来源客户端（入口由 `User-Agent` 判别后带入，见 `RequestEntry::client`；
     /// 不采集的路径为空串）。模型测试没有下游 UA，保持空串 —— 「谁发起的」
     /// 那件事已经由 `is_test` 表达，这里不编一个 `test` 值出来。
     pub source: RequestSource,
+    /// 来源通道：`"gateway"`（经本网关转发）或 `"local_direct"`（本地采集直连请求）。
+    pub origin: String,
 }
 
 impl NewRequestEntry {
@@ -504,12 +538,14 @@ impl NewRequestEntry {
             // 没走到选路时保持 Null（与旧行同一形态，展示层不渲染）
             route: Value::Null,
             sensitive_hits: Vec::new(),
+            privacy_hits: Vec::new(),
             // 默认是真实流量；模型测试那一条由 `api::model_test` 显式改成 true
             // （`RecordContext::is_test` 一路带过来）
             is_test: false,
             // 客户端同样「有采集才有值」：入口取到 UA 才填（见 `RequestEntry::client`），
             // 拿不到 UA 的路径保持空串，前端显示占位符
             source: RequestSource::default(),
+            origin: ORIGIN_GATEWAY.to_string(),
         }
     }
 
@@ -658,6 +694,17 @@ impl NewRequestEntry {
                 })
                 .filter(|hit| !hit.word.is_empty())
                 .collect(),
+            privacy_hits: self
+                .privacy_hits
+                .into_iter()
+                .map(|hit| PrivacyHit {
+                    kind: hit.kind.trim().to_string(),
+                    count: hit.count.max(0),
+                    action: hit.action.trim().to_string(),
+                    restored: hit.restored.max(0),
+                })
+                .filter(|hit| !hit.kind.is_empty() && (hit.count > 0 || hit.restored > 0))
+                .collect(),
             // 终态行的两个阶段列恒为空：阶段是**在途**读数（合法值只有
             // `LogPhase` 的四个字面量），一条已经收尾的行没有「当前阶段」——
             // 写入侧不给值，读侧也就不必为「终态行带着阶段」写分支
@@ -671,6 +718,7 @@ impl NewRequestEntry {
             cache_creation_tokens: cw,
             cache_creation_1h_tokens: cw1h,
             cost_usd,
+            origin: normalize_origin_value(&self.origin),
         }
     }
 }
@@ -734,6 +782,7 @@ pub struct RunningProgress {
     pub route: Option<Value>,
     /// 本次请求命中的脱敏规则（空表 = 没命中）
     pub sensitive_hits: Vec<SensitiveHit>,
+    pub privacy_hits: Vec<PrivacyHit>,
 }
 
 /// 按天聚合行（契约字段名与任务约定逐字一致）。
@@ -915,6 +964,8 @@ pub struct RequestQuery {
     pub start: Option<i64>,
     /// 结束毫秒时间戳（**开**区间上界）
     pub end: Option<i64>,
+    /// 来源通道筛选：`"gateway"` / `"local_direct"` / None（全部）。
+    pub origin: Option<String>,
     /// `view=list` 时仅查询表格展示列与轻量标记，大字段（路由回放 / 重试链 / 脱敏词 / 证据）点开详情再查。
     pub list_only: bool,
 }
@@ -955,9 +1006,12 @@ pub(super) struct RequestListRow {
     pub has_route: bool,
     pub vision_mode: String,
     pub has_sensitive_hits: bool,
+    pub has_privacy_hits: bool,
+    pub privacy_action: String,
     pub has_process_facts: bool,
     pub internal_retries: i64,
     pub has_client_evidence: bool,
     pub recorded_client_name: String,
     pub client_user_agent: String,
+    pub origin: String,
 }

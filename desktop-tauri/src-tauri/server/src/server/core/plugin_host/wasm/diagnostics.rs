@@ -9,6 +9,7 @@ pub(super) struct Invocation {
     provider: String,
     method: String,
     module: String,
+    usage_query: bool,
     started: std::time::Instant,
     state: Mutex<State>,
 }
@@ -22,9 +23,9 @@ struct State {
 }
 
 impl Invocation {
-    pub(super) fn new(provider: &str, method: &str, module: &str) -> Arc<Self> {
+    pub(super) fn new(provider: &str, method: &str, module: &str, usage_query: bool) -> Arc<Self> {
         Arc::new(Self { provider: provider.to_string(), method: method.to_string(), module: module.to_string(),
-            started: std::time::Instant::now(), state: Mutex::new(State { phase: "queued", account: String::new(),
+            usage_query, started: std::time::Instant::now(), state: Mutex::new(State { phase: "queued", account: String::new(),
                 request: None, snapshot: Value::Null, reason: None }) })
     }
 
@@ -83,13 +84,25 @@ impl Invocation {
             Some(_) => "Wasm 插件执行未完成",
             None => "Wasm 插件沙盒资源统计",
         };
-        let level = if matches!(reason, Some("cancelled" | "unavailable")) { "info" }
+        // 余额查询的结果由编排层统一记录；总时限收尾或取消触发的中断归入调试详情，不再与上层重复报警告。
+        let level = if self.usage_query && matches!(reason, Some("timeout" | "cancelled")) { "debug" }
+            else if matches!(reason, Some("cancelled" | "unavailable")) { "info" }
             else if error.is_some() { "warn" }
             else { "debug" };
-        let data = json!({ "provider": self.provider, "action": self.method, "moduleDigest": self.module,
-            "account": state.account, "requestId": state.request, "phase": state.phase,
-            "outcome": outcome, "reason": reason, "code": error.and_then(|error| error.code.as_deref()),
-            "durationMs": self.started.elapsed().as_millis() as u64, "compute": state.snapshot });
+        let data = json!({
+            "provider": self.provider,
+            "providerLabel": crate::server::core::providers::label_of(&self.provider),
+            "action": self.method,
+            "moduleDigest": self.module,
+            "account": state.account,
+            "requestId": state.request,
+            "phase": state.phase,
+            "outcome": outcome,
+            "reason": reason,
+            "code": error.and_then(|error| error.code.as_deref()),
+            "durationMs": self.started.elapsed().as_millis() as u64,
+            "compute": state.snapshot
+        });
         drop(state);
         crate::server::logging::log_event(level, "plugin", message, Some(data));
     }

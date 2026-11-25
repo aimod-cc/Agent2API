@@ -65,6 +65,11 @@ pub(super) fn trim_requests(conn: &Connection, max: i64) -> rusqlite::Result<usi
         params![overflow],
     )?;
     conn.execute(
+        "DELETE FROM local_direct_refs WHERE request_id IN \
+         (SELECT id FROM requests ORDER BY ts ASC, row_id ASC LIMIT ?1)",
+        params![overflow],
+    )?;
+    conn.execute(
         "DELETE FROM requests WHERE row_id IN \
          (SELECT row_id FROM requests ORDER BY ts ASC, row_id ASC LIMIT ?1)",
         params![overflow],

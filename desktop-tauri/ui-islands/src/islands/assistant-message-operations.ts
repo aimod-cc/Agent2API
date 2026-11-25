@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useMemo, useRef } from 'react'
 import { removeAssistantMessage, type ChatMessage } from '../../../ui-shared/assistant-history'
 import { forkSession, toast, type SessionDetail } from './assistant-state'
 import { errorText } from './assistant-tools'
@@ -19,40 +19,46 @@ type Options = {
 }
 
 export function useAssistantMessageOperations(options: Options) {
+  const optionsRef = useRef(options)
+  optionsRef.current = options
+
   const edit = useCallback(async (id: string, text: string) => {
-    if (options.busy()) return
-    options.setBusy(true)
+    const current = optionsRef.current
+    if (current.busy()) return
+    current.setBusy(true)
     try {
-      options.messages.current = options.messages.current.map(message => message.id === id ? { ...message, content: text } : message)
-      options.ui.current = replayMessages(options.messages.current, options.model())
-      options.sync()
-      await options.persist()
-    } finally { options.setBusy(false) }
-  }, [options])
+      current.messages.current = current.messages.current.map(message => message.id === id ? { ...message, content: text } : message)
+      current.ui.current = replayMessages(current.messages.current, current.model())
+      current.sync()
+      await current.persist()
+    } finally { current.setBusy(false) }
+  }, [])
 
   const remove = useCallback(async (id: string) => {
-    if (options.busy()) return
-    options.setBusy(true)
+    const current = optionsRef.current
+    if (current.busy()) return
+    current.setBusy(true)
     try {
-      options.messages.current = removeAssistantMessage(options.messages.current, id)
-      options.ui.current = replayMessages(options.messages.current, options.model())
-      options.sync()
-      await options.persist()
-    } finally { options.setBusy(false) }
-  }, [options])
+      current.messages.current = removeAssistantMessage(current.messages.current, id)
+      current.ui.current = replayMessages(current.messages.current, current.model())
+      current.sync()
+      await current.persist()
+    } finally { current.setBusy(false) }
+  }, [])
 
   const fork = useCallback(async (id: string) => {
-    if (options.busy()) return
-    options.setBusy(true)
+    const current = optionsRef.current
+    if (current.busy()) return
+    current.setBusy(true)
     try {
-      await options.persist()
-      const detail = await forkSession(options.activeId.current, id)
-      options.open(detail)
+      await current.persist()
+      const detail = await forkSession(current.activeId.current, id)
+      current.open(detail)
       toast(t('已从这条消息分叉为新对话'))
     } catch (failure) {
       toast(t('分叉会话失败：{message}', { message: errorText(failure) }), 'err')
-    } finally { options.setBusy(false) }
-  }, [options])
+    } finally { current.setBusy(false) }
+  }, [])
 
-  return { onEdit: edit, onDelete: remove, onFork: fork }
+  return useMemo(() => ({ onEdit: edit, onDelete: remove, onFork: fork }), [edit, remove, fork])
 }

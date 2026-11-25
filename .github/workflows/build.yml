@@ -76,39 +76,16 @@ name: build
 
 
 # ── 2026-10：编译搬到独立构建账号 ─────────────────────────────
-# 上面的 job 分工与签名说明仍然有效 —— 它们描述的是**构建仓库**里那份
-# 工作流（`Agent2Builder/agent2api-releases`）。本文件现在只做转发：
-#
-#   · 本仓库推 `v*` tag → 发一条 `repository_dispatch` → 构建仓库开跑
-#   · 七个平台 job（三套工具链 + Android/iOS 签名）不再占用本仓库的 Actions
-#
-# ── 为什么搬 ────────────────────────────────────────────────
-# 七个 job 里有两个 macOS、两个 Linux 容器、一个 Windows，还有 Android 与
-# iOS 的签名链路 —— 跑一次是实打实的重负载，而 tag 是发版动作、频率不可控。
-# 把「打一个版本标签」变成「自动兑换七台虚拟机」，最坏会被判定为 Actions
-# 滥用。构建仓库挂在专用账号下，额度与负载都落在那边。
-#
-# ── 密钥归属 ────────────────────────────────────────────────
-# 所有签名材料（Apple / Android / iOS）只存在**构建仓库**的 secrets 里，
-# 本仓库没有、也不需要。本仓库唯一要配的是 `BUILDER_DISPATCH_TOKEN` ——
-# 一个对构建仓库有 contents write 权限的 token，只用来派发事件。
-#
-# ── 产物去哪 ────────────────────────────────────────────────
-# 各平台安装包仍是 workflow artifact，落在**构建仓库**的 run 页面上。
-# 本仓库的 `scripts/release.sh` 挂 Release 的流程不变：从构建仓库的
-# artifact（或 Releases）取包，再挂到本仓库的 Release。
-
-# ── 2026-10：编译搬到独立构建账号 ─────────────────────────────
 # 上面的 job 分工与签名说明描述的是**构建仓库**里那份工作流
 # （`Agent2Builder/agent2api-releases` 的 `release.yml`）。本文件现在只做转发：
 #
-#   · 本仓库推 `v*` tag → 发一条 `repository_dispatch` → 构建仓库开跑
+#   · 本仓库推 `v*` tag → 确认前置门禁通过 → 发一条 `repository_dispatch` → 构建仓库开跑
 #   · 七个平台 job（三套工具链 + Android/iOS 签名）不再占用本仓库的 Actions
 #
 # ── 为什么搬 ────────────────────────────────────────────────
-# 七个 job 里有两个 macOS、两个 Linux、一个 Windows，还有 Android 与 iOS
-# 的签名链路 —— 跑一次是实打实的重负载，而 tag 是发版动作、频率不可控。
-# 把「打一个版本标签」变成「自动兑换七台虚拟机」，最坏会被判定为 Actions
+# 七个 job 里有 macOS、Linux、Windows，还有 Android 与 iOS 的签名链路 ——
+# 跑一次是实打实的重负载，而 tag 是发版动作、频率不可控。
+# 把「打一个版本标签」变成「自动兑换多台虚拟机」，最坏会被判定为 Actions
 # 滥用。构建仓库挂在专用账号下，额度与负载都落在那边。
 #
 # ── 密钥归属 ────────────────────────────────────────────────
@@ -119,7 +96,7 @@ name: build
 #
 # ── 产物去哪 ────────────────────────────────────────────────
 # 各平台安装包是**构建仓库** run 页面上的 workflow artifact；Release 由
-# `scripts/release.sh` 挂到构建仓库（脚本里的 `BUILD_REPO` 已指向那里）。
+# 构建仓库的 `publish-installers.yml` 自动发布并同步回本仓库。
 
 on:
   push:
@@ -173,16 +150,41 @@ jobs:
           REQUIRED_WORKFLOWS=("frontend-artifacts.yml" "rust-tests.yml")
           echo "→ 检查提交 $TARGET_SHA 的前置质量门禁（${REQUIRED_WORKFLOWS[*]}）…"
 
-          for attempt in $(seq 1 180); do
+          for attempt in $(seq 1 240); do
             ALL_PASSED=true
             WAIT_REASONS=()
 
             for wf in "${REQUIRED_WORKFLOWS[@]}"; do
-              RUN_JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/runs?head_sha=$TARGET_SHA&per_page=5" \
-                --jq '.workflow_runs | sort_by(.run_number) | last // empty')"
+              RUNS_JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/runs?head_sha=$TARGET_SHA&per_page=20")"
 
-              if [[ -z "$RUN_JSON" ]]; then
-                if [[ "$attempt" -ge 6 ]]; then
+              # 同一个提交可能被 main 与 beta 各自触发一次；只要该提交已有任意一次
+              # 完整通过记录即视为放行，不再被晚几秒启动的另一条分支重复运行拖慢。
+              PASSED_URL="$(jq -r '
+                [.workflow_runs[] | select(.status == "completed" and .conclusion == "success")]
+                | sort_by(.run_number) | last | .html_url // empty
+              ' <<<"$RUNS_JSON")"
+              if [[ -n "$PASSED_URL" ]]; then
+                continue
+              fi
+
+              # 若尚无通过记录，优先看是否仍有运行中的记录（含排队/执行中）
+              ACTIVE_STATUS="$(jq -r '
+                [.workflow_runs[] | select(.status != "completed")]
+                | sort_by(.run_number) | last | .status // empty
+              ' <<<"$RUNS_JSON")"
+              if [[ -n "$ACTIVE_STATUS" ]]; then
+                ALL_PASSED=false
+                WAIT_REASONS+=("$wf($ACTIVE_STATUS)")
+                continue
+              fi
+
+              # 既无通过也无进行中：看是否尚未触发，或全部已以非成功结束
+              LATEST_DONE="$(jq -c '
+                [.workflow_runs[] | select(.status == "completed")]
+                | sort_by(.run_number) | last // empty
+              ' <<<"$RUNS_JSON")"
+              if [[ -z "$LATEST_DONE" ]]; then
+                if [[ "$attempt" -ge 9 ]]; then
                   echo "::error::未找到提交 $TARGET_SHA 对应的工作流 $wf 运行记录。请先将发布提交推送到 main 或 beta 分支以触发并通过 CI 校验，再推送版本标签。"
                   exit 1
                 fi
@@ -191,20 +193,10 @@ jobs:
                 continue
               fi
 
-              STATUS="$(jq -r '.status' <<<"$RUN_JSON")"
-              CONCLUSION="$(jq -r '.conclusion // ""' <<<"$RUN_JSON")"
-              HTML_URL="$(jq -r '.html_url' <<<"$RUN_JSON")"
-
-              if [[ "$STATUS" != "completed" ]]; then
-                ALL_PASSED=false
-                WAIT_REASONS+=("$wf($STATUS)")
-                continue
-              fi
-
-              if [[ "$CONCLUSION" != "success" ]]; then
-                echo "::error::发版门禁拦截：工作流 $wf 在提交 $TARGET_SHA 上未通过（结果: $CONCLUSION），已中止向构建仓库派发打包！详情: $HTML_URL"
-                exit 1
-              fi
+              CONCLUSION="$(jq -r '.conclusion // ""' <<<"$LATEST_DONE")"
+              HTML_URL="$(jq -r '.html_url' <<<"$LATEST_DONE")"
+              echo "::error::发版门禁拦截：工作流 $wf 在提交 $TARGET_SHA 上未通过（结果: $CONCLUSION），已中止向构建仓库派发打包！详情: $HTML_URL"
+              exit 1
             done
 
             if [[ "$ALL_PASSED" == "true" ]]; then
@@ -212,11 +204,11 @@ jobs:
               exit 0
             fi
 
-            echo "⏳ [$attempt/180] 等待前置测试完成: ${WAIT_REASONS[*]}（15 秒后复查）…"
-            sleep 15
+            echo "⏳ [$attempt/240] 等待前置测试完成: ${WAIT_REASONS[*]}（10 秒后复查）…"
+            sleep 10
           done
 
-          echo "::error::等待提交 $TARGET_SHA 的前置测试工作流超时（45 分钟），已中止发版派发。"
+          echo "::error::等待提交 $TARGET_SHA 的前置测试工作流超时（40 分钟），已中止发版派发。"
           exit 1
 
       - name: 派发到构建仓库

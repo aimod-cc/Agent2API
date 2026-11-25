@@ -95,6 +95,11 @@ mod lifecycle;
 mod writer;
 pub(crate) use writer::LimiterEvent;
 mod sql;
+mod local_direct;
+pub use local_direct::{
+    LocalDirectAgentStats, LocalDirectFileState, LocalDirectIngestItem, LocalDirectIngestReport,
+    LocalDirectRef,
+};
 #[cfg(test)]
 mod tests;
 
@@ -130,7 +135,7 @@ use report::{entry_json, list_entry_json, provider_label, CACHE_WINDOWS};
 use maintenance::VacuumStatus;
 pub use maintenance::CompactStart;
 pub use record::{
-    AttemptDetail, NewRequestEntry, RequestEntry, RequestQuery, RetryEvent,
+    AttemptDetail, NewRequestEntry, PrivacyHit, RequestEntry, RequestQuery, RetryEvent,
     RunningProgress, SensitiveHit, DEFAULT_LIMIT, MAX_LIMIT, MAX_RAW_ROWS,
 };
 
@@ -455,34 +460,63 @@ impl RequestStats {
         range: &str,
         custom: Option<(NaiveDate, NaiveDate)>,
         api_key: Option<&str>,
+        client: Option<&str>,
+        origin: Option<&str>,
     ) -> Value {
         let now = clock::now_ms();
+        let origin_filter = aggregate::normalize_origin_filter(origin);
         let windows: Vec<i64> = CACHE_WINDOWS.iter().map(|(_, ms)| *ms).collect();
         let loaded = {
             let guard = self.guard();
             self.with_conn(&guard, |conn| {
-                let daily = daily::select_daily_map(conn)?;
+                let daily = match origin_filter {
+                    None => daily::select_daily_map(conn)?,
+                    Some(origin_val) => aggregate::select_daily_for_origin(conn, origin_val, range, custom)?,
+                };
                 // 四档命中率在 SQL 侧聚合（一次索引扫描出四组合计）
-                let cache_totals = sql::sum_cache_windows(conn, now, &windows)?;
+                let cache_totals = sql::sum_cache_windows(conn, now, &windows, origin_filter)?;
                 // 报表侧排除模型测试（见 `select_summary_rows` 的说明）：
                 // 趋势图与排行回答的是「真实流量长什么样」
-                let entries = sql::select_summary_rows(conn, now - SUMMARY_WINDOW_MS, now)?;
-                Ok((daily, cache_totals, entries))
+                let entries = sql::select_summary_rows(conn, now - SUMMARY_WINDOW_MS, now, origin_filter)?;
+                let has_local_direct = local_direct::has_local_direct_requests(conn);
+                Ok((daily, cache_totals, entries, has_local_direct))
             })
         };
-        let (daily, cache_totals, entries) = loaded.unwrap_or_default();
+        let (daily, cache_totals, entries, has_local_direct) = loaded.unwrap_or_default();
         let mut summary = summarize(&daily, &cache_totals, &entries, range, now, custom);
         let start = summary["startDate"].as_str().unwrap_or("");
         let end = summary["endDate"].as_str().unwrap_or("");
-        let mut sources = source_report::source_summary(&daily, start, end, api_key);
+        let client_models = client.and_then(|client_id| {
+            let start_day = NaiveDate::parse_from_str(start, "%Y-%m-%d").ok()?;
+            let end_day = NaiveDate::parse_from_str(end, "%Y-%m-%d").ok()?;
+            let (from_ms, to_ms) = request_date_bounds(start_day, end_day)?;
+            let guard = self.guard();
+            self.with_conn(&guard, |conn| {
+                source_report::select_client_models(conn, from_ms, to_ms, client_id, origin_filter)
+            })
+        });
+        let mut sources = source_report::source_summary(
+            &daily,
+            start,
+            end,
+            api_key,
+            client,
+            client_models.as_deref(),
+        );
         let keys = crate::server::core::api_keys::list();
-        if let Some(rows) = sources["apiKeys"].as_array_mut() {
+        let enrich_keys = |rows: &mut Vec<Value>| {
             for row in rows {
                 if row["source"] != "key" { continue; }
                 let entry = keys.iter().find(|key| Some(key.id.as_str()) == row["id"].as_str());
                 row["state"] = json!(match entry { Some(key) if key.enabled => "enabled", Some(_) => "disabled", None => "deleted" });
                 if let Some(key) = entry { row["label"] = json!(key.name); }
             }
+        };
+        if let Some(rows) = sources["apiKeys"].as_array_mut() {
+            enrich_keys(rows);
+        }
+        if let Some(rows) = sources["clientDetail"].get_mut("apiKeys").and_then(Value::as_array_mut) {
+            enrich_keys(rows);
         }
         let pricing = crate::server::core::model_pricing::settings();
         let fx_snap = crate::server::core::model_pricing::fx::current_rate_soon();
@@ -490,6 +524,8 @@ impl RequestStats {
             target.insert("currency".to_string(), json!(pricing.currency));
             target.insert("exchangeRate".to_string(), json!(fx_snap.rate));
             target.insert("fx".to_string(), fx_snap.to_json(now));
+            target.insert("origin".to_string(), json!(origin_filter.unwrap_or("all")));
+            target.insert("hasLocalDirect".to_string(), Value::Bool(has_local_direct));
         }
         if let (Some(target), Some(sources)) = (summary.as_object_mut(), sources.as_object()) {
             target.extend(sources.clone());
@@ -571,20 +607,44 @@ impl RequestStats {
     pub fn request_detail(&self, row_id: Option<i64>, id: Option<&str>, ts: Option<i64>) -> Option<Value> {
         let loaded = {
             let guard = self.guard();
-            self.with_conn(&guard, |conn| match row_id.filter(|value| *value > 0) {
-                Some(row_id) => sql::select_detail_by_row_id(conn, row_id),
-                None => match id.map(str::trim).filter(|value| !value.is_empty()) {
-                    Some(id) => sql::select_detail_by_id(conn, id, ts),
-                    None => Ok(None),
-                },
+            self.with_conn(&guard, |conn| {
+                let row = match row_id.filter(|value| *value > 0) {
+                    Some(row_id) => sql::select_detail_by_row_id(conn, row_id)?,
+                    None => match id.map(str::trim).filter(|value| !value.is_empty()) {
+                        Some(id) => sql::select_detail_by_id(conn, id, ts)?,
+                        None => None,
+                    },
+                };
+                let Some((row_id, entry)) = row else {
+                    return Ok(None);
+                };
+                let local_ref = if entry.origin == record::ORIGIN_LOCAL_DIRECT {
+                    local_direct::select_ref_by_request_id(conn, &entry.id)?
+                } else {
+                    None
+                };
+                Ok(Some((row_id, entry, local_ref)))
             })
         }?;
-        let (row_id, entry) = loaded?;
+        let (row_id, entry, local_ref) = loaded?;
         let pricing = crate::server::core::model_pricing::settings();
         let mut value = entry_json(&entry, &pricing);
         if let Some(object) = value.as_object_mut() {
             object.insert("rowId".to_string(), json!(row_id));
             object.insert("detailsLoaded".to_string(), Value::Bool(true));
+            if let Some(local_ref) = local_ref {
+                object.insert("localDirect".to_string(), json!({
+                    "agentId": local_ref.agent_id,
+                    "rootKind": local_ref.root_kind,
+                    "conversationId": local_ref.conversation_id,
+                    "conversationTitle": local_ref.conversation_title,
+                    "workspaceUri": local_ref.workspace_uri,
+                    "stepIndex": local_ref.step_index,
+                    "responseId": local_ref.response_id,
+                    "transcriptPath": local_ref.transcript_path,
+                    "dbPath": local_ref.db_path,
+                }));
+            }
         }
         Some(value)
     }

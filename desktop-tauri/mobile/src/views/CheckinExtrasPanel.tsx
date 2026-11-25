@@ -14,6 +14,7 @@ import {
   runGrowthSchool,
   runGrowthTask,
   runGrowthTravel,
+  type BenefitKind,
   type CampaignEntry,
   type CampaignPreview,
   type GrowthEntry,
@@ -26,21 +27,25 @@ import {
 import { formatDateTime, providerDisplayName } from '../core/format'
 import { t } from '../core/i18n'
 import { store } from '../core/store'
-import { CommonCard, EmptyBlock, TonalChip } from '../ui/components'
+import { CommonCard, ConnectedButtonGroup, EmptyBlock, SectionHeader, TonalChip } from '../ui/components'
 import { ProviderAvatar } from '../ui/icons'
 
 export function OnboardingSectionPanel({
   items,
   onReload,
+  hideEmpty = false,
 }: {
   items: OnboardingEntry[]
   onReload: () => Promise<void>
+  hideEmpty?: boolean
 }) {
   const [results, setResults] = useState<Record<string, OnboardingResult>>({})
+  const [subs, setSubs] = useState<Record<string, OfficeaceSubscriptionState>>({})
   const [busyId, setBusyId] = useState('')
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   if (!items.length) {
+    if (hideEmpty) return null
     return <EmptyBlock icon='gift' title={t('暂无新手福利账号')} subtitle={t('支持新人奖励的账号会自动出现在这里')} />
   }
 
@@ -79,6 +84,34 @@ export function OnboardingSectionPanel({
     }
   }
 
+  const checkOfficeace = async (id: string) => {
+    if (busyId) return
+    setBusyId(`sub:${id}`)
+    try {
+      const res = await getOfficeaceSubscription(id)
+      setSubs(prev => ({ ...prev, [id]: res }))
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : String(err), 'danger')
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  const activateOfficeace = async (id: string) => {
+    if (busyId) return
+    setBusyId(`act:${id}`)
+    try {
+      const res = await activateOfficeaceSubscription(id, true)
+      store.toast(res.message || t('已发起开通请求'), 'success')
+      setBusyId('')
+      await checkOfficeace(id)
+      await onReload()
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : String(err), 'danger')
+      setBusyId('')
+    }
+  }
+
   return (
     <>
       {items.map(item => {
@@ -87,6 +120,7 @@ export function OnboardingSectionPanel({
         const settled = res?.settled || Boolean(item.settled && tasks.length > 0 && tasks.every(x => x.done))
         const earned = res?.earned ?? item.settled?.earned
         const total = res?.total ?? item.settled?.total
+        const sub = subs[item.id]
         return (
           <CommonCard key={item.id}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -126,6 +160,34 @@ export function OnboardingSectionPanel({
               <div style={{ fontSize: 12.5, color: 'var(--fc-danger)', marginTop: 8 }}>{errors[item.id]}</div>
             ) : null}
 
+            {item.provider === 'officeace' ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 10 }}>
+                <span style={{ fontSize: 12.5, color: 'var(--fc-text-muted)' }}>
+                  {sub ? `${t('试用资格')}：${sub.status}` : t('可查询并激活免费试用订阅')}
+                </span>
+                <div style={{ display: 'inline-flex', gap: 6 }}>
+                  <button
+                    type='button'
+                    className='fc-btn is-sm'
+                    disabled={Boolean(busyId)}
+                    onClick={() => void checkOfficeace(item.id)}
+                  >
+                    {busyId === `sub:${item.id}` ? t('查询中…') : t('查状态')}
+                  </button>
+                  {sub?.canActivate ? (
+                    <button
+                      type='button'
+                      className='fc-btn is-sm is-primary'
+                      disabled={Boolean(busyId)}
+                      onClick={() => void activateOfficeace(item.id)}
+                    >
+                      {busyId === `act:${item.id}` ? t('开通中…') : t('激活试用')}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
             <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
               <button
                 type='button'
@@ -156,15 +218,16 @@ export function CampaignsAndPlansSectionPanel({
   campaigns,
   onOpenPlan,
   onReload,
+  hideEmpty = false,
 }: {
   plans: PlanEntry[]
   campaigns: CampaignEntry[]
   onOpenPlan: (entry: PlanEntry) => void
   onReload: () => Promise<void>
+  hideEmpty?: boolean
 }) {
   const [previews, setPreviews] = useState<Record<string, CampaignPreview>>({})
   const [codes, setCodes] = useState<Record<string, string>>({})
-  const [subs, setSubs] = useState<Record<string, OfficeaceSubscriptionState>>({})
   const [busyKey, setBusyKey] = useState('')
 
   const loadCampaign = async (id: string) => {
@@ -219,34 +282,8 @@ export function CampaignsAndPlansSectionPanel({
     }
   }
 
-  const checkOfficeace = async (id: string) => {
-    if (busyKey) return
-    setBusyKey(`sub:${id}`)
-    try {
-      const res = await getOfficeaceSubscription(id)
-      setSubs(prev => ({ ...prev, [id]: res }))
-    } catch (err) {
-      store.toast(err instanceof Error ? err.message : String(err), 'danger')
-    } finally {
-      setBusyKey('')
-    }
-  }
-
-  const activateOfficeace = async (id: string) => {
-    if (busyKey) return
-    setBusyKey(`act:${id}`)
-    try {
-      const res = await activateOfficeaceSubscription(id, true)
-      store.toast(res.message || t('已发起开通请求'), 'success')
-      await checkOfficeace(id)
-    } catch (err) {
-      store.toast(err instanceof Error ? err.message : String(err), 'danger')
-    } finally {
-      setBusyKey('')
-    }
-  }
-
   if (!plans.length && !campaigns.length) {
+    if (hideEmpty) return null
     return <EmptyBlock icon='gift' title={t('暂无活动福利账号')} subtitle={t('有套餐领取或活动福利的账号会在此展示')} />
   }
 
@@ -278,7 +315,6 @@ export function CampaignsAndPlansSectionPanel({
 
       {campaigns.map(entry => {
         const data = previews[entry.id]
-        const sub = subs[entry.id]
         return (
           <CommonCard key={`camp:${entry.id}`}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -298,34 +334,6 @@ export function CampaignsAndPlansSectionPanel({
                 {busyKey === `load:${entry.id}` ? t('查询中…') : t('查询活动')}
               </button>
             </div>
-
-            {entry.provider === 'officeace' ? (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 10 }}>
-                <span style={{ fontSize: 12.5, color: 'var(--fc-text-muted)' }}>
-                  {sub ? `${t('试用资格')}：${sub.status}` : t('可查询并激活免费试用订阅')}
-                </span>
-                <div style={{ display: 'inline-flex', gap: 6 }}>
-                  <button
-                    type='button'
-                    className='fc-btn is-sm'
-                    disabled={Boolean(busyKey)}
-                    onClick={() => void checkOfficeace(entry.id)}
-                  >
-                    {t('查状态')}
-                  </button>
-                  {sub?.canActivate ? (
-                    <button
-                      type='button'
-                      className='fc-btn is-sm is-primary'
-                      disabled={Boolean(busyKey)}
-                      onClick={() => void activateOfficeace(entry.id)}
-                    >
-                      {t('激活试用')}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
 
             {data?.campaigns?.length ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
@@ -393,15 +401,18 @@ export function CampaignsAndPlansSectionPanel({
 export function GrowthSectionPanel({
   items,
   onReload,
+  hideEmpty = false,
 }: {
   items: GrowthEntry[]
   onReload: () => Promise<void>
+  hideEmpty?: boolean
 }) {
   const [dataMap, setDataMap] = useState<Record<string, GrowthResult>>({})
   const [busyKey, setBusyKey] = useState('')
   const [runningAllId, setRunningAllId] = useState('')
 
   if (!items.length) {
+    if (hideEmpty) return null
     return <EmptyBlock icon='spark' title={t('暂无成长任务账号')} subtitle={t('支持成长任务、猫猫旅行或开学季活动的账号将显示于此')} />
   }
 
@@ -597,6 +608,88 @@ export function GrowthSectionPanel({
           </CommonCard>
         )
       })}
+    </>
+  )
+}
+
+export function BenefitsSectionPanel({
+  onboarding,
+  plans,
+  campaigns,
+  growth,
+  onOpenPlan,
+  onReload,
+}: {
+  onboarding: OnboardingEntry[]
+  plans: PlanEntry[]
+  campaigns: CampaignEntry[]
+  growth: GrowthEntry[]
+  onOpenPlan: (entry: PlanEntry) => void
+  onReload: () => Promise<void>
+}) {
+  const [kind, setKind] = useState<BenefitKind>('all')
+  const availableKinds: Array<Exclude<BenefitKind, 'all'>> = []
+  if (onboarding.length > 0) availableKinds.push('onboarding')
+  if (plans.length > 0 || campaigns.length > 0) availableKinds.push('activity')
+  if (growth.length > 0) availableKinds.push('growth')
+
+  const activeKind: BenefitKind = availableKinds.includes(kind as Exclude<BenefitKind, 'all'>) ? kind : 'all'
+  const showOnboarding = (activeKind === 'all' || activeKind === 'onboarding') && onboarding.length > 0
+  const showActivity = (activeKind === 'all' || activeKind === 'activity') && (plans.length > 0 || campaigns.length > 0)
+  const showGrowth = (activeKind === 'all' || activeKind === 'growth') && growth.length > 0
+
+  if (!availableKinds.length) {
+    return (
+      <EmptyBlock
+        icon='gift'
+        title={t('暂无福利与任务')}
+        subtitle={t('支持新手奖励、活动福利、套餐领取或成长任务的账号会自动出现在这里')}
+      />
+    )
+  }
+
+  return (
+    <>
+      {availableKinds.length > 1 ? (
+        <ConnectedButtonGroup<BenefitKind>
+          value={activeKind}
+          onChange={setKind}
+          options={[
+            { id: 'all', label: t('全部') },
+            ...availableKinds.map(item => ({
+              id: item,
+              label: item === 'onboarding' ? t('新手') : item === 'activity' ? t('活动') : t('成长'),
+            })),
+          ]}
+        />
+      ) : null}
+
+      {onboarding.length > 0 ? (
+        <div style={showOnboarding ? { display: 'flex', flexDirection: 'column', gap: 14 } : { display: 'none' }}>
+          <SectionHeader title={t('新手福利')} />
+          <OnboardingSectionPanel items={onboarding} onReload={onReload} hideEmpty />
+        </div>
+      ) : null}
+
+      {plans.length > 0 || campaigns.length > 0 ? (
+        <div style={showActivity ? { display: 'flex', flexDirection: 'column', gap: 14 } : { display: 'none' }}>
+          <SectionHeader title={t('活动福利')} />
+          <CampaignsAndPlansSectionPanel
+            plans={plans}
+            campaigns={campaigns}
+            onOpenPlan={onOpenPlan}
+            onReload={onReload}
+            hideEmpty
+          />
+        </div>
+      ) : null}
+
+      {growth.length > 0 ? (
+        <div style={showGrowth ? { display: 'flex', flexDirection: 'column', gap: 14 } : { display: 'none' }}>
+          <SectionHeader title={t('成长任务')} />
+          <GrowthSectionPanel items={growth} onReload={onReload} hideEmpty />
+        </div>
+      ) : null}
     </>
   )
 }

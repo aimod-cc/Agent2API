@@ -18,7 +18,14 @@ struct RetryStart { intent: String, #[serde(default)] restart_confirmed: bool }
 struct Confirm { intent: String, confirmed: bool, #[serde(default)] restart_confirmed: bool }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Configure { selection: Selection, path: String, revision: String }
+struct Configure {
+    selection: Selection,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    args: Option<String>,
+    revision: String,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,5 +109,5 @@ pub async fn configure(State(state): State<ServerState>, ConnectInfo(peer): Conn
     let source = match source(peer, &headers) { Ok(source) => source, Err(message) => return management_error(403, message) };
     let input: Configure = match parse(&body) { Ok(input) => input, Err(error) => return response(Err(error)) };
     let Some(db) = state.db().cloned() else { return response(Err("本机设置数据库不可用".into())); };
-    response(desktop_launch::configure(source, state.store().clone(), db, input.selection, input.path, &input.revision).await)
+    response(desktop_launch::configure(source, state.store().clone(), db, input.selection, input.path, input.args, &input.revision).await)
 }

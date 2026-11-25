@@ -159,7 +159,17 @@ impl Host {
     }
 
     pub(crate) async fn call_wasm(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, proto::WireError> {
-        self.call_wasm_inner(method, params, timeout, None).await
+        self.call_wasm_inner(method, params, timeout, None, None).await
+    }
+
+    pub(crate) async fn call_wasm_with_cancel(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<Value, proto::WireError> {
+        self.call_wasm_inner(method, params, timeout, None, cancel).await
     }
 
     pub(in crate::server::core::plugin_host) async fn call_wasm_doubao_rewards(self: &Arc<Self>,
@@ -246,11 +256,18 @@ impl Host {
         call.validate(provider).map_err(sms_error)?;
         call.validate_action(action, &payload).map_err(sms_error)?;
         let params = json!({ "provider": provider, "account": "", "action": action, "payload": payload });
-        self.call_wasm_inner("admin.action", params, timeout, Some(call)).await
+        self.call_wasm_inner("admin.action", params, timeout, Some(call), None).await
     }
 
     async fn call_wasm_inner(&self, method: &str, mut params: Value, timeout: Duration,
-        sms: Option<&crate::server::core::login::sms::Call>) -> Result<Value, proto::WireError> {
+        sms: Option<&crate::server::core::login::sms::Call>,
+        cancel: Option<&tokio_util::sync::CancellationToken>) -> Result<Value, proto::WireError> {
+        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return Err(proto::WireError::with_code(
+                if method.starts_with("login.") { "登录已取消" } else { "Wasm 调用已取消" },
+                proto::WireError::ABORTED,
+            ));
+        }
         if matches!(method, super::desktop_launch::declaration::CHECK | super::desktop_launch::declaration::PREPARE) {
             return Err(proto::WireError::with_code("本机启动必须由原桌面确认入口发起", "forbidden"));
         }
@@ -357,8 +374,8 @@ impl Host {
                 return Err(sms_error(error));
             }
             result?
-        } else if let Some(owner) = claim_owner { runtime.invoke_claim(method, params, timeout, owner).await? }
-        else { runtime.invoke(method, params, timeout, None).await? };
+        } else if let Some(owner) = claim_owner { runtime.invoke_claim_with_cancel(method, params, timeout, owner, cancel.cloned()).await? }
+        else { runtime.invoke_with_cancel(method, params, timeout, None, cancel.cloned()).await? };
         let result = unwrap_reply(reply)?;
         let sms_captcha = sms_action && result["status"] == "captcha";
         let _sms_completed = (sms_verify && !sms_captcha).then(|| LoginCleanup { shared: runtime.shared.clone(),

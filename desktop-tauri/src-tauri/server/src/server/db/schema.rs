@@ -211,6 +211,10 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 上游客户端版本号的持久化缓存、同步排期与手动冷却（core::upstream_versions）。
     // 属于本机同步状态而非配置项；不进云同步，也不能在修改普通配置时被误删。
     "upstreamVersionCache",
+    // 脚本插件包与提供商标识的跨机映射（core::plugin_host::script::identities），随云同步迁移。
+    "scriptPluginIdentities",
+    // 本机直连 Agent 采集配置与目录列表（core::local_direct），属于本机配置，不随网关配置保存被清空。
+    "localDirectAgents",
 ];
 
 /// 这个键是否属于「其它零散状态」（即不归网关配置管）。
@@ -359,7 +363,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 35;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1102,6 +1106,9 @@ fn apply_version(
         30 => conn.execute_batch(include_str!("schema_usage_diagnostics.sql")),
         31 => conn.execute_batch(include_str!("schema_checkin_records_index.sql")),
         32 => conn.execute_batch(include_str!("schema_model_pricing.sql")),
+        33 => conn.execute_batch(include_str!("schema_task_plugins.sql")),
+        34 => conn.execute_batch(include_str!("schema_privacy_redaction.sql")),
+        35 => conn.execute_batch(include_str!("schema_local_direct.sql")),
         _ => Ok(()),
     }
 }

@@ -34,14 +34,14 @@ pub async fn put_sanitize(State(_state): State<ServerState>, body: Bytes) -> Res
     let enabled = patch.enabled;
     let saved = config::set_sanitize_settings(patch);
     if !saved {
-        logging::log("[Config]", "⚠️  出站指纹脱敏设置写入失败，本次运行内仍生效");
+        logging::log("[Config]", "⚠️  出站关键词替换设置写入失败，本次运行内仍生效");
     }
     logging::log(
         "[Config]",
         match enabled {
-            Some(true) => "出站指纹脱敏已开启",
-            Some(false) => "出站指纹脱敏已关闭：请求内容将不再按脱敏词表改写",
-            None => "出站指纹脱敏词表 / 提供商范围已更新",
+            Some(true) => "出站关键词替换已开启",
+            Some(false) => "出站关键词替换已关闭：请求内容将不再按替换规则改写",
+            None => "出站关键词替换规则 / 提供商范围已更新",
         },
     );
     let mut result = sanitize_json();
@@ -59,7 +59,7 @@ fn parse_patch(payload: &Value) -> Result<SanitizePatch, String> {
     .iter()
     .any(|key| object.contains_key(*key))
     {
-        return Err("请提供指纹脱敏开关、词表或应用提供商".to_string());
+        return Err("请提供关键词替换开关、规则列表或应用提供商".to_string());
     }
     let enabled = object
         .get(KEY_SANITIZE_FINGERPRINTS)
@@ -74,7 +74,7 @@ fn parse_patch(payload: &Value) -> Result<SanitizePatch, String> {
         Some(Value::Null) => Some(None),
         Some(value) => {
             let entries = serde_json::from_value::<Vec<sanitize::SanitizeRule>>(value.clone())
-                .map_err(|error| format!("脱敏词表必须是合法的规则数组：{error}"))?;
+                .map_err(|error| format!("替换规则必须是合法的规则数组：{error}"))?;
             Some(Some(Arc::new(sanitize::RuleSet::compile(entries)?)))
         }
     };

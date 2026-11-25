@@ -22,10 +22,10 @@ pub(super) async fn complete(state: &ServerState, ids: &[String], result: &mut V
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| id.clone());
         let report = match adapter_by_id(PROVIDER) {
-            None => json!({ "status": "skipped", "message": "提供商插件未加载，未检查或开通免费套餐；安装插件后可到「签到中心 → 新手福利」开通" }),
+            None => json!({ "status": "skipped", "message": "提供商插件未加载，未检查或开通免费套餐；安装插件后可到「签到中心 → 福利与任务」开通" }),
             Some(_) if tokio::time::Instant::now() >= deadline => json!({
                 "status": "skipped",
-                "message": "本轮导入的套餐检查已达到等待上限，该账号未执行开通；可稍后到「签到中心 → 新手福利」开通",
+                "message": "本轮导入的套餐检查已达到等待上限，该账号未执行开通；可稍后到「签到中心 → 福利与任务」开通",
             }),
             Some(adapter) => {
                 let payload = json!({});
@@ -36,7 +36,7 @@ pub(super) async fn complete(state: &ServerState, ids: &[String], result: &mut V
                     Ok(Ok(value)) => public_report(&value),
                     Ok(Err(error)) if error.status_code == 501 => json!({
                         "status": "skipped",
-                        "message": "当前提供商插件不支持开通免费套餐；更新插件后可到「签到中心 → 新手福利」开通",
+                        "message": "当前提供商插件不支持开通免费套餐；更新插件后可到「签到中心 → 福利与任务」开通",
                     }),
                     Ok(Err(error)) => json!({ "status": "failed", "message": error.message }),
                     Err(_) => json!({

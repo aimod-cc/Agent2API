@@ -793,6 +793,7 @@ async fn attempt_queue(
                     return Ok(outcome);
                 },
                 Err(error) => {
+                    if error.code.as_deref() == Some("privacy_blocked") { return Err(error); }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     // 手动终止优先（与无状态路径同一判定与理由）：不把已受理的
                     // 终止当成「这一轮失败」去顺延下一个账号
@@ -881,6 +882,7 @@ async fn attempt_queue(
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
                 Err(error) => {
+                    if error.code.as_deref() == Some("privacy_blocked") { return Err(error); }
                     // 手动终止优先（与无状态 / 自定义两条路径同一判定与理由）：
                     // 会话式这一轮已经结束，但用户要的是终止 —— 不把它当成
                     // 普通失败去顺延下一个账号（那会把终止拖成另一轮转发）
@@ -1091,7 +1093,13 @@ async fn attempt_queue(
             let cache_key = (provider_id, account_pool.clone(), selected_model.clone(), degraded);
             if !send_cache.contains_key(&cache_key) {
                 let built = if let Some(native) = subscription_native {
-                    let mut prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded);
+                    let mut prepared = match super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+                            return Err(error);
+                        }
+                    };
                     let requested = model_of(ctx.body);
                     let wire = crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, target.account.as_ref());
                     if ctx.direct_model.is_none() && target.account.as_ref().and_then(crate::server::core::routing_groups::candidate_model).is_none() {
@@ -1103,7 +1111,13 @@ async fn attempt_queue(
                     }
                     prepared
                 } else {
-                    send_body(ctx, provider_id, target.account.as_ref(), degraded).await
+                    match send_body(ctx, provider_id, target.account.as_ref(), degraded).await {
+                        Ok(send) => send,
+                        Err(error) => {
+                            ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+                            return Err(error);
+                        }
+                    }
                 };
                 send_cache.insert(cache_key.clone(), built);
             }
@@ -2026,9 +2040,15 @@ async fn attempt_custom(
     // modelRules），处理结果就是「提示词/脱敏后的客户端请求体」—— 自定义
     // 语义的改写（映射 alias → 真名、思考等级）在 forward 里做。
     let native = if super::native_payload::eligible(ctx, &provider_id, target.account.as_ref())? { ctx.native } else { None };
-    let send = match native {
+    let send = match match native {
         Some(native) => super::native_payload::prepare(ctx, native, &provider_id, target.account.as_ref(), degraded),
         None => send_body(ctx, &provider_id, target.account.as_ref(), degraded).await,
+    } {
+        Ok(send) => send,
+        Err(error) => {
+            ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+            return Err(error);
+        }
     };
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
@@ -2281,7 +2301,7 @@ async fn attempt_stateful(
     // `degraded` 由调用方（账号循环）给出：本路径**没有**就地补救（有状态
     // provider 一次转发就是一个会话轮次，没有「换提示词重发」这一步），
     // 但降级期内（状态机已生效）首发的提示词也要跟着换。
-    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
+    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await?;
     // 工具失败标记由实际出站桥接消费，不能提前清掉。
     let web_tools = crate::server::config::web_tools::enabled() && adapter.list_models().iter()
         .any(|model| super::web_tools::Profile::from_model(model).is_some());
@@ -2336,7 +2356,13 @@ async fn attempt_stateful(
         crate::server::core::plugin_host::script::native::protocol(provider_id, wire_model) == Some(native.protocol)
             && native.protocol != crate::server::core::protocol::native::WireProtocol::Chat
     }) {
-        let prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded);
+        let prepared = match super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+                return Err(error);
+            }
+        };
         crate::server::core::plugin_host::script::native::forward(provider_id,
             target.account_id.as_deref().unwrap_or(""), prepared.body.into_owned(), ctx.client_headers,
             target.proxy.clone(), native.protocol, &model, ctx.stream, ctx.telemetry).await

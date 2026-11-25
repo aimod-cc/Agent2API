@@ -40,6 +40,7 @@ pub const CLIENTS: &[BuiltinClient] = &[
     BuiltinClient { id: "qwen-code", name: "Qwen Code", value: "Qwen Code", products: &["qwencode", "qwen-code"], ua: "QwenCode/0.5.0" },
     BuiltinClient { id: "factory-droid", name: "Factory Droid", value: "Factory Droid", products: &["factory-cli"], ua: "factory-cli/1.0" },
     BuiltinClient { id: "goose", name: "Goose", value: "Goose", products: &["goose"], ua: "goose/1.0" },
+    BuiltinClient { id: "antigravity", name: "Antigravity", value: "Antigravity", products: &["antigravity"], ua: "Antigravity/1.0" },
 ];
 
 pub const DECLARATION_HEADER: &str = "x-agent2api-client";

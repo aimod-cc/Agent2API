@@ -232,9 +232,24 @@ pub(crate) fn request_timeout(default_ms: Option<u64>) -> Option<u64> {
     }
 }
 
+const MIN_RETRY_WINDOW: Duration = Duration::from_secs(5);
+const MAX_RETRY_ESTIMATE: Duration = Duration::from_secs(20);
+
 pub(super) fn retry_fits(delay: Duration) -> bool {
     super::current_query_deadline().is_none_or(|deadline|
         deadline.saturating_duration_since(tokio::time::Instant::now()) > delay + Duration::from_secs(1))
+}
+
+pub(super) fn retry_budget_fits(delay: Duration, last_attempt: Duration, retries: u64) -> bool {
+    super::current_query_deadline().is_none_or(|deadline| {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let needed = if retries >= 1 {
+            last_attempt.clamp(MIN_RETRY_WINDOW, MAX_RETRY_ESTIMATE)
+        } else {
+            MIN_RETRY_WINDOW
+        };
+        remaining > delay.saturating_add(needed)
+    })
 }
 
 pub(super) fn log_result(job: &super::jobs::Job, row: &Value) {
