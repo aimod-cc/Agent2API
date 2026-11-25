@@ -117,9 +117,7 @@ export function PluginCredentialFile({ spec, value, upload, disabled, onChange, 
       }
       if (unreadable.length) {
         // 一份都没读出来时，第一条原因原样给出
-        setError(first
-          ? `${t('{count} 个文件未能读取：', { count: unreadable.length })}\n${unreadable[0]}`
-          : unreadable[0])
+        setError(first ? t('{count} 个文件未能读取：', { count: unreadable.length }) + unreadable[0] : unreadable[0])
       }
     } finally { if (current()) setReading(false) }
   }

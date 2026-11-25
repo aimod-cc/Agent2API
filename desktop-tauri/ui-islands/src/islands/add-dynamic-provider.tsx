@@ -456,7 +456,7 @@ export function DynamicProviderBlock({
   }
 
   /** 凭据文件多选、全部发完之后的收尾：表单只清一次，关窗 / 刷新 / 提示合并成一条 */
-  async function finishBatch(results: LoginResult[]): Promise<void> {
+  async function finishBatch(results: LoginResult[], quiet = false): Promise<void> {
     clearCallback()
     progressRef.current = {}
     loginScope.current = null
@@ -467,7 +467,7 @@ export function DynamicProviderBlock({
     setUpload(undefined)
     settings.resetAll()
     setError('')
-    await afterAddBatch(results.length, label, results, provider)
+    await afterAddBatch(results.length, label, results, provider, quiet)
   }
 
   async function submit(): Promise<void> {
@@ -534,9 +534,11 @@ export function DynamicProviderBlock({
             failures.push(`${item.name}：${describeError(failure)}`)
           }
         }
-        // 全部失败时不清表单，留着原样方便改了再试
-        if (results.length) await finishBatch(results)
-        if (failures.length) toastFailures(failures)
+        // 全部失败时不清表单，留着原样方便改了再试。
+        // 部分失败时把成功数并进失败提示：面板同一时刻只显示一条提示，分两条发时成功那条会被顶掉。
+        const partial = results.length > 0 && failures.length > 0
+        if (results.length) await finishBatch(results, partial)
+        if (failures.length) toastFailures(failures, partial ? results.length : undefined)
         return
       }
       const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxyPayload)

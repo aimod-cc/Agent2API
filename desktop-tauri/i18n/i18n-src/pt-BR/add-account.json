@@ -464,6 +464,7 @@
   "已有 API Key（留空则在浏览器登录后自动创建）": "API Key existente (deixe vazio para criar após o login pelo navegador)",
   "已有验证码流程正在进行，请先完成或取消": "Já existe uma verificação em andamento. Conclua ou cancele primeiro.",
   "已检测到本机客户端": "Cliente local detectado",
+  "已添加 {added} 个，导入失败 {count} 个：": "{added} adicionadas, falha ao importar {count}:",
   "已点发送，等待短信…": "Enviado; aguardando o SMS…",
   "已用系统默认浏览器打开登录页，请在浏览器中完成登录…": "Página de login aberta no navegador padrão do sistema; conclua o login no navegador…",
   "已登录的 CLAUDE_CONFIG_DIR 绝对路径": "Caminho absoluto do CLAUDE_CONFIG_DIR autenticado",

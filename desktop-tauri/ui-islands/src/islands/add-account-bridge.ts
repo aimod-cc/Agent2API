@@ -599,26 +599,29 @@ export async function afterAdd(name: string, label: string, result?: unknown, pr
 }
 
 /**
- * 批量导入的收尾：关窗、刷新、提示各只做一次（逐个提示会刷屏），附加提示按文案去重后并列。
+ * 批量导入的收尾：关窗、刷新各只做一次（逐个提示会刷屏），附加提示按文案去重后并列成一条。
  * 「首个账号弹获取模型」与单条添加同口径 —— 都是在刷新**之前**数该提供商名下原有的账号数，
  * 所以调用方须等全部添加请求都返回之后、列表还没刷新时再调。
+ * `quiet`：有失败项时由调用方把成功数并进失败提示，这里不再单独发一条（面板同一时刻只显示一条提示）。
  */
-export async function afterAddBatch(addedCount: number, label: string, results: unknown[], providerId?: string): Promise<void> {
+export async function afterAddBatch(addedCount: number, label: string, results: unknown[], providerId?: string, quiet = false): Promise<void> {
   const resolvedProvider = addedProviderOf(results[0], providerId)
   const wasFirstAccount = Boolean(resolvedProvider) && accountCountOf(resolvedProvider) === 0
   closeAddModals()
   await shared().wbApp?.refresh?.()
-  const lines = [t('✅ {label}账号已添加 {count} 个', { label, count: addedCount })]
-  let warning = false
-  const seen = new Set<string>()
-  for (const result of results) {
-    const notice = accountImportNotice(result)
-    if (!notice || seen.has(notice.text)) continue
-    seen.add(notice.text)
-    lines.push(t(notice.text))
-    warning = warning || notice.warning
+  if (!quiet) {
+    const lines = [t('✅ {label}账号已添加 {count} 个', { label, count: addedCount })]
+    let warning = false
+    const seen = new Set<string>()
+    for (const result of results) {
+      const notice = accountImportNotice(result)
+      if (!notice || seen.has(notice.text)) continue
+      seen.add(notice.text)
+      lines.push(t(notice.text))
+      warning = warning || notice.warning
+    }
+    toast(lines.join('\n'), warning ? 'warn' : 'ok')
   }
-  toast(lines.join('\n'), warning ? 'warn' : 'ok')
   if (wasFirstAccount && resolvedProvider) openModelsFetch(resolvedProvider, label || resolvedProvider)
 }
 
