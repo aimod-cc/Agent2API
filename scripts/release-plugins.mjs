@@ -84,6 +84,26 @@ function gitOut(cwd, args) {
   return res.status === 0 ? res.stdout.trim() : ''
 }
 
+function branchAheadState(repoDir, branch) {
+  const remoteRef = `refs/remotes/origin/${branch}`
+  const exists = runSpawn('git', ['rev-parse', '--verify', '--quiet', remoteRef], {
+    cwd: repoDir,
+    capture: true,
+  })
+  if (exists.status === 0) {
+    return {
+      remoteExists: true,
+      ahead: Number(gitOut(repoDir, ['rev-list', '--count', `origin/${branch}..HEAD`]) || 0),
+    }
+  }
+  const hasOriginMain = runSpawn('git', ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main'], {
+    cwd: repoDir,
+    capture: true,
+  }).status === 0
+  const count = Number(gitOut(repoDir, ['rev-list', '--count', hasOriginMain ? 'origin/main..HEAD' : 'HEAD']) || 0)
+  return { remoteExists: false, ahead: Math.max(1, count) }
+}
+
 function repoRepoSelect(repoFlag) {
   if (!repoFlag || repoFlag === 'all') return PLUGIN_REPOS
   const found = PLUGIN_REPOS.filter(r => r.key === repoFlag)
@@ -355,16 +375,19 @@ function runStatus(flags) {
 
   const stdRepo = PLUGIN_REPOS[0]
   const stdBranch = gitOut(stdRepo.dir, ['rev-parse', '--abbrev-ref', 'HEAD'])
-  const stdAhead = Number(gitOut(stdRepo.dir, ['rev-list', '--count', `origin/${stdBranch}..HEAD`]) || 0)
+  const stdState = branchAheadState(stdRepo.dir, stdBranch)
 
   for (const repo of repos) {
     const branch = gitOut(repo.dir, ['rev-parse', '--abbrev-ref', 'HEAD'])
     const dirtyAll = gitOut(repo.dir, ['status', '--porcelain']).split(/\r?\n/).filter(Boolean)
-    const ahead = Number(gitOut(repo.dir, ['rev-list', '--count', `origin/${branch}..HEAD`]) || 0)
+    const branchState = branchAheadState(repo.dir, branch)
     const batchFallback = repo.kind === 'wasm' ? latestBatchTag(repo.dir) : ''
-    console.log(`\n=== ${repo.label}（分支：${branch}，领先远端 ${ahead} 提交，未提交项 ${dirtyAll.length}）===`)
-    if (repo.key === 'web' && stdAhead > 0) {
-      console.log(`⚠️  注意：普通插件仓（${stdBranch}）尚有 ${stdAhead} 个本地提交未推到远端；网页插件依赖其 SDK 时请先推普通插件仓！`)
+    const syncLabel = branchState.remoteExists
+      ? `领先远端 ${branchState.ahead} 提交`
+      : `远端尚无 ${branch} 分支，本地领先 ${branchState.ahead} 提交`
+    console.log(`\n=== ${repo.label}（分支：${branch}，${syncLabel}，未提交项 ${dirtyAll.length}）===`)
+    if (repo.key === 'web' && (!stdState.remoteExists || stdState.ahead > 0)) {
+      console.log(`⚠️  注意：普通插件仓（${stdBranch}）尚有 ${stdState.ahead} 个本地提交未推到远端；网页插件依赖其 SDK 时请先推普通插件仓！`)
     }
 
     const pkgs = discoverPackages(repo)
@@ -502,14 +525,18 @@ function runPushTags(positional, flags) {
       targetTags = localPluginTags.filter(t => !remoteSet.has(t))
     }
 
-    const aheadCount = Number(gitOut(repo.dir, ['rev-list', '--count', `origin/${branch}..HEAD`]) || 0)
-    if (aheadCount === 0 && targetTags.length === 0) {
+    const branchState = branchAheadState(repo.dir, branch)
+    const needsBranchPush = !branchState.remoteExists || branchState.ahead > 0
+    if (!needsBranchPush && targetTags.length === 0) {
       console.log(`→ ${repo.label}：分支与单包 tag 均已与远端同步`)
       continue
     }
 
     const batches = chunkArray(targetTags, batchSize)
-    console.log(`\n=== ${repo.label}（分支：${branch}，领先 ${aheadCount} 提交，待推 tag ${targetTags.length} 个，分 ${batches.length} 批，每批 ≤ ${batchSize}）===`)
+    const pushLabel = branchState.remoteExists
+      ? `领先 ${branchState.ahead} 提交`
+      : `新建远端分支并推送（相对主干 ${branchState.ahead} 提交）`
+    console.log(`\n=== ${repo.label}（分支：${branch}，${pushLabel}，待推 tag ${targetTags.length} 个，分 ${batches.length} 批，每批 ≤ ${batchSize}）===`)
     for (const [idx, batch] of batches.entries()) {
       console.log(`  第 ${idx + 1}/${batches.length} 批：${batch.join(' ')}`)
     }
@@ -520,9 +547,10 @@ function runPushTags(positional, flags) {
 
     const repoEnv = envForGhAccount(repo.pushUser || pushUser)
     const remoteUrl = `https://github.com/${repo.github}.git`
-    if (aheadCount > 0) {
-      console.log(`  → 先推送分支 ${branch}…`)
-      const pushBranchRes = runSpawn('git', [...gitAuthHeaderArgs(repoEnv.GH_TOKEN), 'push', remoteUrl, branch], {
+    if (needsBranchPush) {
+      const refspec = branchState.remoteExists ? branch : `refs/heads/${branch}:refs/heads/${branch}`
+      console.log(`  → 先${branchState.remoteExists ? '推送' : '创建并推送'}分支 ${branch}…`)
+      const pushBranchRes = runSpawn('git', [...gitAuthHeaderArgs(repoEnv.GH_TOKEN), 'push', remoteUrl, refspec], {
         cwd: repo.dir,
         env: repoEnv,
       })
