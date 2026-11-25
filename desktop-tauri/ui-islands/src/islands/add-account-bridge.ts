@@ -605,24 +605,36 @@ function batchNoticesOf(results: unknown[]): { lines: string[]; warning: boolean
   const seen = new Set<string>()
   for (const result of results) {
     const notice = accountImportNotice(result)
-    if (!notice || seen.has(notice.text)) continue
+    if (!notice) continue
+    // 级别先累计、再去重：同一句文案先以普通提示、后以警告出现时，警告级别不能被去重丢掉
+    warning = warning || notice.warning
+    if (seen.has(notice.text)) continue
     seen.add(notice.text)
     lines.push(t(notice.text))
-    warning = warning || notice.warning
   }
   return { lines, warning }
 }
 
 /**
  * 批量导入的收尾：关窗、刷新各只做一次（逐个提示会刷屏），附加提示按文案去重后并列成一条。
- * 「首个账号弹获取模型」与单条添加同口径 —— 都是在刷新**之前**数该提供商名下原有的账号数，
- * 所以调用方须等全部添加请求都返回之后、列表还没刷新时再调。
  * 返回成功账号的附加提示（已去重、已翻译）。`quiet` 只禁止单独发提示，提示照常返回：
  * 有失败项时由调用方把成功数、失败项和它们合成一条——面板同一时刻只显示一条提示。
  */
-export async function afterAddBatch(addedCount: number, label: string, results: unknown[], providerId?: string, quiet = false): Promise<string[]> {
+export async function afterAddBatch({ addedCount, label, results, providerId, wasFirstAccount, quiet = false }: {
+  addedCount: number
+  label: string
+  results: unknown[]
+  providerId?: string
+  /**
+   * 批次开始前，该提供商名下是否一个账号都没有。调用方须在发出第一个请求**之前**取：
+   * 批次进行中列表可能已被刷新（写操作成功会触发状态变更），事后再数会把这一批新账号算进去，
+   * 首批账号就不再自动弹出获取模型窗口。
+   */
+  wasFirstAccount: boolean
+  /** 只禁止单独发提示；附加提示照常返回 */
+  quiet?: boolean
+}): Promise<string[]> {
   const resolvedProvider = addedProviderOf(results[0], providerId)
-  const wasFirstAccount = Boolean(resolvedProvider) && accountCountOf(resolvedProvider) === 0
   closeAddModals()
   await shared().wbApp?.refresh?.()
   const notices = batchNoticesOf(results)

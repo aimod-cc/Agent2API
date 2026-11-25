@@ -7,7 +7,7 @@ import { AddFoot } from './add-account-kit'
 import { t } from '../i18n'
 import { MAX_NAME_LENGTH } from './add-account-constants'
 import {
-  accountRequest, addedLabelOf, afterAdd, afterAddBatch, describeError, desktopImportRequest, isMethodsUnavailable,
+  accountCountOf, accountRequest, addedLabelOf, afterAdd, afterAddBatch, describeError, desktopImportRequest, isMethodsUnavailable,
   normalizeLoginResult, postAccount, accountProviderAvailable, saveAccountProxySelection, shared, startLogin, toast,
   type LoginProgress, type LoginResult,
   type WebLoginController, type WebLoginView,
@@ -456,7 +456,7 @@ export function DynamicProviderBlock({
   }
 
   /** 凭据文件多选、全部发完之后的收尾：表单只清一次，关窗 / 刷新 / 提示合并成一条。返回成功账号的附加提示 */
-  async function finishBatch(results: LoginResult[], quiet = false): Promise<string[]> {
+  async function finishBatch(results: LoginResult[], wasFirstAccount: boolean, quiet = false): Promise<string[]> {
     clearCallback()
     progressRef.current = {}
     loginScope.current = null
@@ -467,7 +467,7 @@ export function DynamicProviderBlock({
     setUpload(undefined)
     settings.resetAll()
     setError('')
-    return afterAddBatch(results.length, label, results, provider, quiet)
+    return afterAddBatch({ addedCount: results.length, label, results, providerId: provider, wasFirstAccount, quiet })
   }
 
   async function submit(): Promise<void> {
@@ -520,6 +520,8 @@ export function DynamicProviderBlock({
         // 顺序执行：添加时插件可能要拿凭据去上游换票，一次涌过去既容易撞限流，出错也不好归因。
         // 备注名只对一个账号有意义，多份时不带。
         delete payload.name
+        // 批次开始前先记下这是不是该提供商的第一批账号：批进行中列表可能被刷新，事后再数会把新账号算进去
+        const wasFirstAccount = accountCountOf(provider) === 0
         const fileField = method.file.field
         const results: LoginResult[] = []
         const failures: string[] = []
@@ -540,7 +542,7 @@ export function DynamicProviderBlock({
         // 部分失败时把成功数并进失败提示：面板同一时刻只显示一条提示，分两条发时成功那条会被顶掉。
         const partial = results.length > 0 && failures.length > 0
         // 部分失败时，成功账号的附加提示也并进那一条提示里，不丢
-        const notices = results.length ? await finishBatch(results, partial) : []
+        const notices = results.length ? await finishBatch(results, wasFirstAccount, partial) : []
         if (failures.length) toastFailures(failures, partial ? results.length : undefined, notices)
         return
       }
