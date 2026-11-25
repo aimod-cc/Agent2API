@@ -555,8 +555,8 @@ impl NewRequestEntry {
             // 两个等级列同一口径：trim 后透传，空串 = 没有等级
             client_reasoning: self.client_reasoning.trim().to_string(),
             upstream_reasoning: self.upstream_reasoning.trim().to_string(),
-            // 决策快照透传（Null 或对象，原样入库 —— 形状由采集侧保证）
-            route: self.route,
+            // 决策快照：成功只留摘要，失败保留全量（见 `stored_route`）
+            route: stored_route(self.route, failed),
             // ── 两个明细字段的归一（本次改造）───────────────────────
             // 都做「清掉空项 + 夹到合理形状」，让读侧（SQL false 编码、前端渲染）
             // 拿到的永远是可直接消费的表：
@@ -627,6 +627,52 @@ impl NewRequestEntry {
             source: self.source.normalized(),
         }
     }
+}
+
+/// 成功请求落库时保留的 `ordered` 条数（只留队头几个，够看「首选是谁」）。
+const ROUTE_SUMMARY_ORDERED: usize = 3;
+
+/// 落库前的 `route` 压缩：**成功只留摘要，失败保留全量**。
+///
+/// ── 为什么（2026-11-25 实库测量）──────────────────────────────
+/// `route` 是整份候选清单（`ordered` / `blocked` 各最多 200 条），实测平均
+/// **33 KB/行**（200 的成功请求也 26 KB）。76000 行/天 → 约 2.5 GB/天，运行库
+/// 已经涨到 10.4 GB：列表统计、详情反序列化、数据库压缩全都被这份 JSON 拖慢，
+/// 这是「软件越用越卡」的主因之一。
+///
+/// 成功请求排障几乎不看候选清单 —— 要看的是「最后谁扛下来、当时一共多少候选、
+/// 别人为什么被跳过」，摘要就够；真需要逐条候选的是**失败**请求（为什么没换号、
+/// 卡在谁身上），那边原样保留。
+///
+/// ── 形状刻意保持兼容 ────────────────────────────────────────
+/// `ordered` / `blocked` 仍是数组（只是截短 / 清空），读侧的
+/// `json_extract(route,'$.stickyHit')` 和 `$.ordered` 循环不会遇到 None；
+/// `compact: true` 是给前端的一句明示（成功行只保留了摘要）。
+fn stored_route(route: Value, failed: bool) -> Value {
+    // 失败一律全量；Null / 非对象（旧行、没走到选路）原样返回
+    if failed || !route.is_object() { return route; }
+    let Some(object) = route.as_object() else { return route };
+    let mut kept = serde_json::Map::new();
+    // 小字段 + 非选路的三份改写记录（`visionCompatibility` 还要给
+    // `normalize` 判「辅助识图是否已计费」，绝不能丢）
+    for key in [
+        "scope", "strategy", "sticky", "stickyHit", "picked", "pickedCandidate",
+        "orderedTotal", "blockedTotal", "queuedTotal", "blockedByReason",
+        "visionCompatibility", "compactRoute", "titleRoute", "errorPolicyConfig",
+    ] {
+        if let Some(value) = object.get(key) {
+            kept.insert(key.to_string(), value.clone());
+        }
+    }
+    let ordered = object.get("ordered").and_then(Value::as_array)
+        .map(|list| Value::Array(list.iter().take(ROUTE_SUMMARY_ORDERED).cloned().collect()))
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    kept.insert("ordered".into(), ordered);
+    // 被跳过者清空，但 `blockedByReason` 保留 —— 「70 个里 33 个限流」这一句
+    // 才是成功请求里真正有用的信息
+    kept.insert("blocked".into(), Value::Array(Vec::new()));
+    kept.insert("compact".into(), Value::Bool(true));
+    Value::Object(kept)
 }
 
 /// 一条「进行中」行的**在途**字段（转发期间就已经确定、收尾前就该显示的那些）。
