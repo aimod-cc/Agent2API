@@ -455,19 +455,19 @@ export function DynamicProviderBlock({
     if (combinedWarning) toast(t('账号已添加，但请留意：{warning}', { warning: combinedWarning }), 'warn')
   }
 
-  /** 凭据文件多选、全部发完之后的收尾：表单只清一次，关窗 / 刷新 / 提示合并成一条 */
-  async function finishBatch(results: LoginResult[], quiet = false): Promise<void> {
+  /** 凭据文件多选、全部发完之后的收尾：表单只清一次，关窗 / 刷新 / 提示合并成一条。返回成功账号的附加提示 */
+  async function finishBatch(results: LoginResult[], quiet = false): Promise<string[]> {
     clearCallback()
     progressRef.current = {}
     loginScope.current = null
-    if (!alive.current) { await shared().wbApp?.refresh?.(); return }
+    if (!alive.current) { await shared().wbApp?.refresh?.(); return [] }
     setProgress({})
     setValues({})
     setName('')
     setUpload(undefined)
     settings.resetAll()
     setError('')
-    await afterAddBatch(results.length, label, results, provider, quiet)
+    return afterAddBatch(results.length, label, results, provider, quiet)
   }
 
   async function submit(): Promise<void> {
@@ -502,7 +502,9 @@ export function DynamicProviderBlock({
       if (method.type === 'api') {
         payload.methodIndex = method.methodIndex
         payload.inputs = fields
-        Object.assign(payload, credentialFilePayload(method, upload, fields))
+        // 多份时凭据在提交循环里逐份带入，共享的 payload 不带任何凭据字段：
+        // 后端先读 authFileContent、后读 authFileB64，首份的内容跟着每一份发出去会把后面的二进制凭据盖掉。
+        if (!(method.file && upload?.batch?.length)) Object.assign(payload, credentialFilePayload(method, upload, fields))
       } else if (method.type === 'desktop') {
         payload.importDesktop = true
       } else {
@@ -537,8 +539,9 @@ export function DynamicProviderBlock({
         // 全部失败时不清表单，留着原样方便改了再试。
         // 部分失败时把成功数并进失败提示：面板同一时刻只显示一条提示，分两条发时成功那条会被顶掉。
         const partial = results.length > 0 && failures.length > 0
-        if (results.length) await finishBatch(results, partial)
-        if (failures.length) toastFailures(failures, partial ? results.length : undefined)
+        // 部分失败时，成功账号的附加提示也并进那一条提示里，不丢
+        const notices = results.length ? await finishBatch(results, partial) : []
+        if (failures.length) toastFailures(failures, partial ? results.length : undefined, notices)
         return
       }
       const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxyPayload)

@@ -28,15 +28,16 @@ const MAX_FAILURE_LINES = 5
 
 /**
  * 批量添加 / 导入后的失败汇总：总数，加上逐条的「是哪一份、为什么」。
- * `added` 给出时把成功数一并写进来——面板同一时刻只显示一条提示，分两条发时成功那条会被这条顶掉。
- * 提示框不保留换行，所以明细用分号隔开，而不是一行一条。
+ * `added` 给出时把成功数一并写进来，`notices` 是成功账号的附加提示——面板同一时刻只显示一条提示，
+ * 分多条发时后面的会顶掉前面的，所以有失败项时全部并进这一条。
+ * 提示框不保留换行，所以失败明细用分号隔开，而不是一行一条。
  */
-export function toastFailures(lines: string[], added?: number): void {
+export function toastFailures(lines: string[], added?: number, notices: readonly string[] = []): void {
   const shown = lines.slice(0, MAX_FAILURE_LINES)
   if (lines.length > shown.length) shown.push('…')
   const summary = added === undefined
     ? t('导入失败 {count} 个：', { count: lines.length })
     : t('已添加 {added} 个，导入失败 {count} 个：', { added, count: lines.length })
-  toast(summary + shown.join('；'), 'err')
+  toast([summary + shown.join('；'), ...notices].join('\n'), 'err')
 }
 

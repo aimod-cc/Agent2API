@@ -598,31 +598,40 @@ export async function afterAdd(name: string, label: string, result?: unknown, pr
   if (wasFirstAccount && resolvedProvider) openModelsFetch(resolvedProvider, label || resolvedProvider)
 }
 
+/** 批量结果里的附加提示：按文案去重并翻译；`warning` 表示其中至少一条是警告 */
+function batchNoticesOf(results: unknown[]): { lines: string[]; warning: boolean } {
+  const lines: string[] = []
+  let warning = false
+  const seen = new Set<string>()
+  for (const result of results) {
+    const notice = accountImportNotice(result)
+    if (!notice || seen.has(notice.text)) continue
+    seen.add(notice.text)
+    lines.push(t(notice.text))
+    warning = warning || notice.warning
+  }
+  return { lines, warning }
+}
+
 /**
  * 批量导入的收尾：关窗、刷新各只做一次（逐个提示会刷屏），附加提示按文案去重后并列成一条。
  * 「首个账号弹获取模型」与单条添加同口径 —— 都是在刷新**之前**数该提供商名下原有的账号数，
  * 所以调用方须等全部添加请求都返回之后、列表还没刷新时再调。
- * `quiet`：有失败项时由调用方把成功数并进失败提示，这里不再单独发一条（面板同一时刻只显示一条提示）。
+ * 返回成功账号的附加提示（已去重、已翻译）。`quiet` 只禁止单独发提示，提示照常返回：
+ * 有失败项时由调用方把成功数、失败项和它们合成一条——面板同一时刻只显示一条提示。
  */
-export async function afterAddBatch(addedCount: number, label: string, results: unknown[], providerId?: string, quiet = false): Promise<void> {
+export async function afterAddBatch(addedCount: number, label: string, results: unknown[], providerId?: string, quiet = false): Promise<string[]> {
   const resolvedProvider = addedProviderOf(results[0], providerId)
   const wasFirstAccount = Boolean(resolvedProvider) && accountCountOf(resolvedProvider) === 0
   closeAddModals()
   await shared().wbApp?.refresh?.()
+  const notices = batchNoticesOf(results)
   if (!quiet) {
-    const lines = [t('✅ {label}账号已添加 {count} 个', { label, count: addedCount })]
-    let warning = false
-    const seen = new Set<string>()
-    for (const result of results) {
-      const notice = accountImportNotice(result)
-      if (!notice || seen.has(notice.text)) continue
-      seen.add(notice.text)
-      lines.push(t(notice.text))
-      warning = warning || notice.warning
-    }
-    toast(lines.join('\n'), warning ? 'warn' : 'ok')
+    toast([t('✅ {label}账号已添加 {count} 个', { label, count: addedCount }), ...notices.lines].join('\n'),
+      notices.warning ? 'warn' : 'ok')
   }
   if (wasFirstAccount && resolvedProvider) openModelsFetch(resolvedProvider, label || resolvedProvider)
+  return notices.lines
 }
 
 /* ─── 表单草稿（非受控输入的「关掉再打开还在」）──────────────
