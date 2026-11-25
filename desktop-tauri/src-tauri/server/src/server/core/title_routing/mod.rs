@@ -160,7 +160,9 @@ fn claude_title(messages: &[Value]) -> bool {
 /// 判定这次请求属于哪家客户端的标题生成。
 ///
 /// `client` 是行为客户端标识（`pipeline::request_source` 的 `behavior_client`），
-/// 与压缩路由同一取值来源；只有配置里勾了这家客户端才继续判。
+/// 与压缩路由同一取值来源；只有配置里勾了这家客户端才继续判。注意它取的是
+/// `core::client::classify()` 的归类名（如 "Codex"），与规则里保存的配置 id
+/// （如 "codex"）大小写可能不同，比较一律先过 `title_routes::canonical_client`。
 /// `headers` 给 Codex 的显式标记用；提示词类判据不看它。
 pub fn client_for_request(
     client: &str,
@@ -169,12 +171,14 @@ pub fn client_for_request(
     responses: bool,
 ) -> Option<&'static str> {
     let settings = title_routes::active()?;
+    // 行为归类名 → 配置 id 的归一形态；分支判断与 CLIENTS 回查都用它。
+    let normalized = title_routes::canonical_client(client);
     // 这家客户端得有一条真会命中的规则（自己开着、勾了它、配了模型）才值得往下判 ——
     // 提示词判据要遍历消息结构，不便宜。
     if title_routes::match_rule(&settings, client).is_none() { return None; }
 
     // Codex 的判据是请求头，不需要看消息结构，先判它（省一次遍历）。
-    if client == CLIENT_CODEX {
+    if normalized == CLIENT_CODEX {
         return if codex_title(headers, body) { Some(CLIENT_CODEX) } else { None };
     }
 
@@ -188,14 +192,14 @@ pub fn client_for_request(
     } else if has_tools(body) {
         return None;
     }
-    let matched = match client {
+    let matched = match normalized.as_str() {
         CLIENT_ZCODE => zcode_title(messages),
         CLIENT_CLAUDE_CODE => claude_title(messages),
         _ => false,
     };
     if !matched { return None; }
     // 返回静态 id：调用方会把它带进改写痕迹与日志，不能是配置里的临时字符串。
-    title_routes::CLIENTS.iter().find(|(id, _)| *id == client).map(|(id, _)| *id)
+    title_routes::CLIENTS.iter().find(|(id, _)| *id == normalized).map(|(id, _)| *id)
 }
 
 pub fn mark_routed(body: &mut Value, source: &str, target: &str, client: &str) {

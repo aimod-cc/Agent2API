@@ -217,11 +217,21 @@ pub fn active() -> Option<TitleRoutes> {
     Some(settings.clone())
 }
 
+/// 客户端标识归一：`core::client::classify()` 的行为归类名（"Codex" /
+/// "ZCode" / "Claude Code"）与本页规则里保存的配置 id（"codex" / "zcode" /
+/// "claude-code"）是两套词汇——前者是 UA 归类值，后者是面板勾选与落库 id。
+/// 比较前把两侧都折叠成小写并把空白、下划线折成连字符；保存侧
+/// `validate` / `client_label` 仍严格认小写 id，只有运行态匹配放宽。
+pub fn canonical_client(client: &str) -> String {
+    client.trim().to_lowercase().replace([' ', '_'], "-")
+}
+
 /// 这次请求该走哪条规则：按列表顺序取第一条命中的 —— 顺序即优先级。
 pub fn match_rule(settings: &TitleRoutes, client: &str) -> Option<TitleRule> {
+    let wanted = canonical_client(client);
     settings.rules.iter()
         .filter(|rule| effective(rule))
-        .find(|rule| rule.clients.iter().any(|id| id == client))
+        .find(|rule| rule.clients.iter().any(|id| canonical_client(id) == wanted))
         .cloned()
 }
 
