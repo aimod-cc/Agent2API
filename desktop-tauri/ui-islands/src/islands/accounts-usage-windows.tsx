@@ -303,9 +303,9 @@ function supplementaryReadings(entry: Record<string, unknown>, rows: UsageWindow
 
 function WindowTooltipBody({ row, now }: { row: UsageWindowReading; now: number }) {
   const value = row.percentText || row.view
-  const reset = row.resetsAt !== null ? formatResetCountdown(row.resetsAt, now) : null
-  const exact = row.resetsAt !== null ? exactResetLabel(row.resetsAt) : ''
   const isFull = row.unlimited || (row.percent !== null && row.percent >= 100)
+  const reset = row.resetsAt !== null && !isFull ? formatResetCountdown(row.resetsAt, now) : null
+  const exact = row.resetsAt !== null && !isFull ? exactResetLabel(row.resetsAt) : ''
   return (
     <div className='usage-window-tip-card'>
       <div className='usage-window-tip-head'>
@@ -409,8 +409,9 @@ function WindowReading({ row, now }: { row: UsageWindowReading; now: number }) {
 function ModelQuotaCard({ row, now }: { row: ModelQuotaReading; now: number }) {
   const value = row.percentText || row.view
   const remaining = row.percent === null ? row.view : t('剩余 {percent}%', { percent: numberText(row.percent) })
-  const reset = row.resetsAt !== null ? formatResetCountdown(row.resetsAt, now) : null
-  const exact = row.resetsAt !== null ? exactResetLabel(row.resetsAt) : ''
+  const isFull = row.percent !== null && row.percent >= 100
+  const reset = row.resetsAt !== null && !isFull ? formatResetCountdown(row.resetsAt, now) : null
+  const exact = row.resetsAt !== null && !isFull ? exactResetLabel(row.resetsAt) : ''
   return (
     <div className='usage-window-model-card'>
       <div className='usage-window-model-head'>
@@ -433,6 +434,8 @@ function ModelQuotaCard({ row, now }: { row: ModelQuotaReading; now: number }) {
             <span>{reset.short}</span>
             <span className='usage-window-pop-at'>· {exact}</span>
           </time>
+        ) : isFull ? (
+          <span>{t('当前满额，无需等待恢复')}</span>
         ) : (
           <span>{t('未返回重置时间')}</span>
         )}
@@ -585,8 +588,9 @@ export function UsageWindowsCell({ entry, rows, updatedAt, now: nowProp, creditD
                     </div>
                   ) : (
                     rows.map(row => {
-                      const reset = row.resetsAt !== null ? formatResetCountdown(row.resetsAt, now) : null
-                      const exact = row.resetsAt !== null ? exactResetLabel(row.resetsAt) : ''
+                      const isFull = row.unlimited || (row.percent !== null && row.percent >= 100)
+                      const reset = row.resetsAt !== null && !isFull ? formatResetCountdown(row.resetsAt, now) : null
+                      const exact = row.resetsAt !== null && !isFull ? exactResetLabel(row.resetsAt) : ''
                       return (
                         <div className='usage-window-reset' key={row.id}>
                           <div className='usage-window-reset-head'>
@@ -604,7 +608,9 @@ export function UsageWindowsCell({ entry, rows, updatedAt, now: nowProp, creditD
                               </time>
                             </div>
                           ) : row.expiresAt === null ? (
-                            <span className='usage-window-reset-unknown'>{t('未返回重置时间')}</span>
+                            <span className='usage-window-reset-unknown'>
+                              {isFull ? t('当前满额，无需等待恢复') : t('未返回重置时间')}
+                            </span>
                           ) : null}
                           {row.expiresAt !== null ? <time dateTime={new Date(row.expiresAt).toISOString()}>
                             {t('到期 {date}', { date: formatTime(row.expiresAt) })}
