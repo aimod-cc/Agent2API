@@ -465,12 +465,9 @@ pub async fn download(
     asset: &PackAsset,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Vec<u8>, String> {
-    if !website::trusted_url(&asset.url) || !url::Url::parse(&asset.url).is_ok_and(|url| {
-        let origin = url.origin().ascii_serialization();
-        let valid_path = (origin == website::ORIGIN && url.path().starts_with("/downloads/plugins/"))
-            || (origin == website::CDN_ORIGIN && url.path().starts_with("/agent2api/plugins/"));
-        valid_path && url.query().is_none()
-    }) { return Err("官方插件只能从官网下载，请重新刷新插件列表".to_string()); }
+    if !website::plugin_download_url(&asset.url) {
+        return Err("官方插件只能从官网下载，请重新刷新插件列表".to_string());
+    }
     crate::server::core::update::assert_downloadable(&asset.url).map_err(|error| error.message)?;
     if asset.size > MAX_PACK_BYTES as u64 {
         return Err(format!("插件包超过 {} MiB 上限", MAX_PACK_BYTES / (1024 * 1024)));

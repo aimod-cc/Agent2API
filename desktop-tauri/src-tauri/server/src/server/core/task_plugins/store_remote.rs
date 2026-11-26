@@ -4,6 +4,7 @@ use std::io::Read;
 
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use futures::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -215,9 +216,10 @@ pub async fn install_from_store(plugin_id: &str) -> Result<TaskPlugin, String> {
         .as_str()
         .filter(|u| !u.is_empty())
         .ok_or_else(|| "插件下载地址缺失".to_string())?;
+    let expected_size = platform["size"].as_u64().unwrap_or(0);
     let expected_sha256 = platform["sha256"].as_str().map(str::to_string);
 
-    let bytes = download_zip_bytes(url, expected_sha256.as_deref()).await?;
+    let bytes = download_zip_bytes(url, expected_size, expected_sha256.as_deref()).await?;
     let mut plugin = import_zip_bytes(&bytes, true)?;
     if plugin.id != plugin_id {
         return Err(format!("安装包内的插件标识（{}）与所选插件（{plugin_id}）不一致", plugin.id));
@@ -379,20 +381,73 @@ fn decode_hex_32(hex: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-async fn download_zip_bytes(url: &str, expected_sha256: Option<&str>) -> Result<Vec<u8>, String> {
-    if !website::download_url(url) {
+async fn download_zip_bytes(
+    url: &str,
+    expected_size: u64,
+    expected_sha256: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    if !website::plugin_download_url(url) {
         return Err("插件下载地址不在官方受信任域名内".to_string());
     }
-    let bytes = website::fetch_bytes(url, MAX_ZIP_BYTES)
+    crate::server::core::update::assert_downloadable(url).map_err(|err| err.message)?;
+    if expected_size > MAX_ZIP_BYTES as u64 {
+        return Err("插件安装包超过 2 MB 上限".to_string());
+    }
+    let headers = vec![
+        ("User-Agent".to_string(), "agent2api-plugin".to_string()),
+        ("Accept".to_string(), "application/octet-stream".to_string()),
+    ];
+    let response = website::request(url, &headers, None)
         .await
         .map_err(|err| format!("下载定时任务插件失败：{}", err.message))?;
-    if let Some(expected) = expected_sha256 {
+    if response.status().as_u16() != 200 {
+        return Err(format!(
+            "下载定时任务插件失败：官网返回 HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let bytes = read_zip_download(response, expected_size).await?;
+    if let Some(expected) = expected_sha256
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        if !actual.eq_ignore_ascii_case(expected.trim()) {
+        if !actual.eq_ignore_ascii_case(expected) {
             return Err("插件下载包 SHA-256 校验不一致".to_string());
         }
+    }
+    Ok(bytes)
+}
+
+async fn read_zip_download(
+    response: reqwest::Response,
+    expected_size: u64,
+) -> Result<Vec<u8>, String> {
+    let declared = response.content_length().unwrap_or(0);
+    if declared > MAX_ZIP_BYTES as u64 {
+        return Err("插件安装包超过 2 MB 上限".to_string());
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+            .await
+            .map_err(|_| "下载定时任务插件超时".to_string())?;
+        let Some(chunk) = chunk else { break };
+        let chunk = chunk.map_err(|err| format!("下载定时任务插件中断：{err}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_ZIP_BYTES {
+            return Err("插件安装包超过 2 MB 上限".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let received = bytes.len() as u64;
+    if received == 0
+        || (declared > 0 && received != declared)
+        || (expected_size > 0 && received != expected_size)
+    {
+        return Err("下载到的插件包不完整，已拒绝使用".to_string());
     }
     Ok(bytes)
 }
@@ -474,5 +529,29 @@ export async function onSchedule() { return { level: "success", message: "ok" };
         assert!(looks_like_task_plugin_zip(&mismatched));
         let err = prepare_zip_bytes(&mismatched, None, None).err().expect("must fail");
         assert!(err.contains("不一致"), "unexpected err: {err}");
+    }
+
+    #[tokio::test]
+    async fn download_zip_bytes_rejects_non_plugin_urls_and_oversized_assets() {
+        for bad_url in [
+            "https://example.com/downloads/plugins/demo/v1/demo.zip",
+            "https://agent2api.dev/plugin-assets/demo.png",
+            "https://cdn.agent2api.dev/advertisements/banner.png",
+            "https://cdn.agent2api.dev/agent2api/installers/aimod-cc/Agent2API/v3.6.0/abc/app.dmg",
+        ] {
+            let err = download_zip_bytes(bad_url, 1024, None)
+                .await
+                .err()
+                .expect("non-plugin url must fail");
+            assert!(err.contains("受信任域名"), "unexpected err for {bad_url}: {err}");
+        }
+
+        let valid_cdn_url = "https://cdn.agent2api.dev/agent2api/plugins/agent2api-task-newapi-login-checkin/task-newapi-login-checkin-v1.0.0-beta.1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/agent2api-task-newapi-login-checkin-1.0.0-beta.1-task-script.zip";
+        let err = download_zip_bytes(valid_cdn_url, (MAX_ZIP_BYTES as u64) + 1, None)
+            .await
+            .err()
+            .expect("oversized asset must fail before network request");
+        assert!(err.contains("超过 2 MB 上限"), "unexpected err: {err}");
+        assert!(!err.contains("图标地址无效"), "must not go through icon fetch_bytes");
     }
 }

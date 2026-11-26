@@ -100,6 +100,15 @@ pub fn download_url(value: &str) -> bool {
     })
 }
 
+pub fn plugin_download_url(value: &str) -> bool {
+    trusted_url(value) && url::Url::parse(value).is_ok_and(|url| {
+        let origin = url.origin().ascii_serialization();
+        let valid_path = (origin == ORIGIN && url.path().starts_with("/downloads/plugins/"))
+            || (origin == CDN_ORIGIN && url.path().starts_with("/agent2api/plugins/"));
+        valid_path && url.query().is_none()
+    })
+}
+
 pub fn release_page(value: &str) -> String {
     if url::Url::parse(value).is_ok_and(|url| {
         url.origin().ascii_serialization() == ORIGIN && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
@@ -148,6 +157,7 @@ pub async fn request(
     if !trusted_url(value) { return Err(UpdateError::new("更新只允许访问 Agent2API 官网")); }
     let download = download_url(value);
     let valid: fn(&str) -> bool = if api_url(value) { api_url }
+        else if plugin_download_url(value) { plugin_download_url }
         else if download_url(value) { download_url }
         else { trusted_url };
     let mut last_error = "无法连接官网更新服务".to_string();
@@ -248,4 +258,34 @@ pub async fn fetch_json_with_fallback(
         }
     }
     fetch_json(fallback_api_url, timeout_ms).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_download_url_matches_official_and_cdn_plugin_paths_only() {
+        assert!(plugin_download_url(
+            "https://cdn.agent2api.dev/agent2api/plugins/agent2api-task-newapi-login-checkin/task-newapi-login-checkin-v1.0.0-beta.1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/agent2api-task-newapi-login-checkin-1.0.0-beta.1-task-script.zip"
+        ));
+        assert!(plugin_download_url(
+            "https://agent2api.dev/downloads/plugins/agent2api-task-newapi-login-checkin/task-newapi-login-checkin-v1.0.0-beta.1/agent2api-task-newapi-login-checkin-1.0.0-beta.1-task-script.zip"
+        ));
+        assert!(!plugin_download_url(
+            "https://cdn.agent2api.dev/agent2api/installers/aimod-cc/Agent2API/v3.6.0/abc/app.dmg"
+        ));
+        assert!(!plugin_download_url(
+            "https://agent2api.dev/plugin-assets/demo.png"
+        ));
+        assert!(!plugin_download_url(
+            "https://cdn.agent2api.dev/advertisements/banner.png"
+        ));
+        assert!(!plugin_download_url(
+            "https://agent2api.dev/downloads/plugins/demo/v1/demo.zip?foo=1"
+        ));
+        assert!(!plugin_download_url(
+            "https://example.com/downloads/plugins/demo/v1/demo.zip"
+        ));
+    }
 }
