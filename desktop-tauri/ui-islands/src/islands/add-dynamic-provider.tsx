@@ -540,7 +540,7 @@ export function DynamicProviderBlock({
       const { items: batchItems, pastedExport } = resolveBatchImportItems(method, uploads, fields)
       const isBatch = batchItems.length > 1 || batchItems.some(item => item.exportKind === 'multi')
       if (isBatch) {
-        const otherFields = Object.fromEntries(Object.entries(fields).filter(([key]) => key !== fileField))
+        const otherFields = Object.fromEntries(Object.entries(fields).filter(([key]) => key !== fileField && key !== 'name'))
         const wasFirstAccount = isProviderFirstAccount(provider)
         savingRef.current = true
         setSaving(true)

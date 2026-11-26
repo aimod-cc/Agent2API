@@ -39,6 +39,16 @@ function objectOf(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+function appendBatchNotice(outcome: BatchImportOutcome, raw: string, warning = false): void {
+  if (warning) outcome.hasWarning = true
+  for (const part of raw.split('\n')) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    const line = t(trimmed)
+    if (!outcome.notices.includes(line)) outcome.notices.push(line)
+  }
+}
+
 export function buildCredentialAccountPayload({
   provider,
   method,
@@ -109,6 +119,7 @@ export async function runCredentialBatchImport({
     hasWarning: false,
   }
   const multiFiles = items.length > 1
+  const batchOtherFields = Object.fromEntries(Object.entries(otherFields).filter(([key]) => key !== 'name'))
   for (let index = 0; index < items.length; index += 1) {
     if (isCancelled()) break
     const item = items[index]
@@ -118,7 +129,7 @@ export async function runCredentialBatchImport({
       provider,
       method,
       item,
-      otherFields,
+      otherFields: batchOtherFields,
       baseSettingsPayload,
       proxyPayload,
       exportProxyFields,
@@ -159,10 +170,7 @@ export async function runCredentialBatchImport({
           outcome.failedUploadIds.add(item.id)
         }
         const notice = accountImportNotice(data)
-        if (notice) {
-          outcome.notices.push(t(notice.text))
-          if (notice.warning) outcome.hasWarning = true
-        }
+        if (notice) appendBatchNotice(outcome, notice.text, notice.warning)
       } else {
         const normalized = isExport
           ? normalizeLoginResult(raw)
@@ -170,14 +178,8 @@ export async function runCredentialBatchImport({
         if (data?.created === false) outcome.updated += 1
         else outcome.added += 1
         const notice = accountImportNotice(data)
-        if (notice) {
-          outcome.notices.push(t(notice.text))
-          if (notice.warning) outcome.hasWarning = true
-        }
-        if (normalized.warning) {
-          outcome.notices.push(normalized.warning)
-          outcome.hasWarning = true
-        }
+        if (notice) appendBatchNotice(outcome, notice.text, notice.warning)
+        if (normalized.warning) appendBatchNotice(outcome, normalized.warning, true)
       }
     } catch (failure) {
       outcome.failed += 1
@@ -207,7 +209,7 @@ export function formatBatchImportToast(label: string, outcome: BatchImportOutcom
   const head = outcome.failed || outcome.hasWarning
     ? t('{label}导入完成：{summary}', { label, summary: detail })
     : t('✅ {label}导入完成：{summary}', { label, summary: detail })
-  const notice = outcome.notices.filter(Boolean).slice(0, 2).join('\n')
+  const notice = Array.from(new Set(outcome.notices.map(item => item.trim()).filter(Boolean))).slice(0, 2).join('\n')
   const message = notice ? `${head}\n${notice}` : head
   const tone: 'ok' | 'warn' | 'err' = outcome.failed
     ? 'err'

@@ -179,11 +179,30 @@ pub async fn pool_remove(state: &ServerState, body: &Bytes) -> Response {
     if id.trim().is_empty() {
         return management_error(400, "缺少代理 id");
     }
+    let reset_update_proxy = payload.get("resetUpdateProxy").and_then(Value::as_bool) == Some(true);
     let exists = proxy_pool::list().iter().any(|item| item.get("id").and_then(Value::as_str) == Some(id));
     match proxy_pool::remove(id) {
         Ok(name) => {
+            let mut update_proxy_reset = false;
+            let mut update_proxy_reset_saved = true;
+            if reset_update_proxy {
+                if let Some(current) = crate::server::config::update_proxy() {
+                    if proxy_pool::usage::pool_reference_id(&current) == Some(id) {
+                        update_proxy_reset_saved = crate::server::config::set_update_proxy(None);
+                        update_proxy_reset = true;
+                        state.update().clear_check_cooldown();
+                        state.update().reset_policy_cache();
+                        crate::server::core::plugin_host::update::clear_cooldown();
+                        logging::log("[Update]", &format!("🔄 已随删除代理「{name}」将更新出网线路恢复为默认线路"));
+                    }
+                }
+            }
             let mut data = pool_payload(state);
             data["removed"] = json!(name);
+            if update_proxy_reset {
+                data["updateProxyReset"] = json!(true);
+                data["updateProxyResetSaved"] = json!(update_proxy_reset_saved);
+            }
             ok_json(data)
         }
         Err(message) => management_error(if exists { 400 } else { 404 }, message),

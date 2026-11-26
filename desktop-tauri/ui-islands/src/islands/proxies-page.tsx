@@ -11,11 +11,12 @@ import {
 } from '@ui'
 import { poolItemAddress } from './accounts-shared'
 import {
-  batchRemove, batchTest, clearSelection, durationText, formatTime, getSnapshot,
-  isPicked, items, loadPanel, removeItem, setAllPicked, subscribe, syncClash, testItem,
-  toggleItem, togglePick, wb, type ProxyPoolItem,
+  batchTest, canRemoveItem, clearSelection, durationText, executeBatchRemove,
+  executeRemoveItem, formatTime, getSnapshot, isPicked, items, loadPanel,
+  prepareBatchRemove, setAllPicked, subscribe, syncClash, testItem, toggleItem,
+  togglePick, wb, type ProxyPoolItem,
 } from './proxies-state'
-import { ProxyModal, ProxySettingsModal } from './proxies-dialogs'
+import { ProxyDeleteDialog, ProxyModal, ProxySettingsModal, type ProxyDeleteTarget } from './proxies-dialogs'
 import { COL_CLASS, closeColumnPanel, repaintColumnWidths, setupColumns, visibleColumns } from './proxies-columns'
 import { TableFooter, useClientPaging } from './table-shell'
 import { t } from '../i18n'
@@ -39,6 +40,7 @@ function ProxiesPage() {
   }, () => noticeRevision)
   const [noticeOpen, setNoticeOpen] = React.useState(false)
   const [modal, setModal] = React.useState<{ item: ProxyPoolItem | null } | null>(null)
+  const [deleteTarget, setDeleteTarget] = React.useState<ProxyDeleteTarget | null>(null)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
   const [filterOpen, setFilterOpen] = React.useState(false)
   const [keyword, setKeyword] = React.useState('')
@@ -49,6 +51,8 @@ function ProxiesPage() {
   const copyTimer = React.useRef<number | null>(null)
   const [, forceTick] = React.useReducer((tick: number) => tick + 1, 0)
   const rows = items()
+  const activeCount = rows.filter(item => item.enabled !== false && !item.resolveError).length
+  const invalidCount = rows.filter(item => item.enabled !== false && Boolean(item.resolveError)).length
   const ready = snapshot.data !== null
   const selectedCount = snapshot.selected.size
   const progress = snapshot.batchProgress
@@ -57,7 +61,7 @@ function ProxiesPage() {
   const query = keyword.trim().toLowerCase()
   const shown = rows.filter(item => (protocol === 'all' || (item.resolved?.protocol || item.protocol) === protocol)
     && (status === 'all' || stateOf(item) === status)
-    && (!query || [item.name, poolItemAddress(item), item.host, item.protocol, item.port].join(' ').toLowerCase().includes(query)))
+    && (!query || [item.name, poolItemAddress(item), item.host, item.protocol, item.port, item.resolveError].join(' ').toLowerCase().includes(query)))
   const shownIds = shown.map(item => item.id)
   const allPicked = shownIds.length > 0 && shownIds.every(id => snapshot.selected.has(id))
   const somePicked = shownIds.some(id => snapshot.selected.has(id)) && !allPicked
@@ -95,19 +99,29 @@ function ProxiesPage() {
         return <Checkbox checked={isPicked(item.id)} disabled={locked}
           aria-label={t('勾选「{name}」', { name: item.name || t('未命名') })}
           onCheckedChange={next => togglePick(item.id, next)} />
-      case 'name':
+      case 'name': {
         /* 名称一行、说明一行：说明不套彩色标签，只用一档灰字 ——
            标签盒子一多，整张表就从「列表」变成「仪表盘」 */
+        const protocolText = (item.resolved?.protocol || item.protocol || '').toUpperCase()
+        const clashSynced = item.source === 'clash' && !canRemoveItem(item)
         return <div className='flex min-w-0 flex-col gap-0.5'>
           <span className='truncate text-[12.5px] font-medium' title={item.name || t('未命名')}>{item.name || t('未命名')}</span>
           <span className='flex min-w-0 items-center gap-1.5 text-[10.5px] text-muted-foreground'>
-            <span className='shrink-0 font-mono'>{(item.resolved?.protocol || item.protocol || 'http').toUpperCase()}</span>
-            <span className='opacity-45' aria-hidden='true'>·</span>
+            {protocolText ? <>
+              <span className='shrink-0 font-mono'>{protocolText}</span>
+              <span className='opacity-45' aria-hidden='true'>·</span>
+            </> : null}
             {item.source === 'clash'
-              ? <span className='inline-flex min-w-0 items-center gap-1' title={t('只读：在 EasyClash 里改')}>
-                <LockIcon />
-                <span className='truncate'>EasyClash</span>
-              </span>
+              ? clashSynced
+                ? <span className='inline-flex min-w-0 items-center gap-1' title={t('只读：在 EasyClash 里改')}>
+                  <LockIcon />
+                  <span className='truncate'>EasyClash</span>
+                </span>
+                : <span className='inline-flex min-w-0 items-center gap-1' title={item.resolveError || undefined}>
+                  <span className='truncate'>EasyClash</span>
+                  <span className='opacity-45' aria-hidden='true'>·</span>
+                  <span className='shrink-0 text-destructive'>{t('已失效')}</span>
+                </span>
               : <span className='truncate'>{t('手动添加')}</span>}
             {item.nonDirect ? <>
               <span className='opacity-45' aria-hidden='true'>·</span>
@@ -119,8 +133,16 @@ function ProxiesPage() {
             </> : null}
           </span>
         </div>
+      }
       case 'addr': {
         const address = poolItemAddress(item)
+        if (!address && item.resolveError) {
+          return <div className='flex min-w-0 items-center gap-1.5'>
+            <span className='min-w-0 truncate text-xs leading-[1.5] text-destructive' title={item.resolveError}>
+              {item.resolveError}
+            </span>
+          </div>
+        }
         /* 协议前缀压淡、主机端口保持正常色：一列地址扫起来先认端口。
            另：原写法用的 text-text-2 从未定义过（等于没上色），换成真令牌 text-subtle。
            只有真拆出前缀时才上灰色，'http://' 这种只有前缀的残缺值原样显示 */
@@ -157,17 +179,35 @@ function ProxiesPage() {
           {!accountLine && !services.length ? <span className='text-[11.5px] text-muted-foreground'>{t('暂未使用')}</span> : null}
         </div>
       }
-      case 'state':
+      case 'state': {
+        const clashBroken = item.source === 'clash' && canRemoveItem(item)
         return <Switch checked={item.enabled !== false} disabled={locked || item.source === 'clash' && item.sourceEnabled === false}
           title={item.source === 'clash'
             ? item.sourceEnabled === false ? t('这条在 EasyClash 里是停用的，本页启用不生效 —— 到 EasyClash 里打开它')
-              : t('禁用后本端不再用它（引用它的账号回退直连）；端口在 EasyClash 侧，不受影响')
+              : clashBroken ? t('未检测到对应的 EasyClash 端口；可关闭开关或直接删除清理')
+                : t('禁用后本端不再用它（引用它的账号回退直连）；端口在 EasyClash 侧，不受影响')
             : undefined}
           aria-label={t('启用「{name}」', { name: item.name || t('未命名') })}
           onCheckedChange={next => void toggleItem(item, next)} />
+      }
       case 'test': {
         if (snapshot.testing === item.id) return <span className='flex items-center gap-1.5 text-[11.5px] text-muted-foreground'><Spinner />{t('测试中…')}</span>
         const last = item.lastTest
+        if (item.resolveError) {
+          return <div className='flex min-w-0 flex-col gap-0.5'>
+            <span className='flex items-baseline gap-1.5'>
+              <StatusDot variant='destructive' className='translate-y-[-1px]' />
+              <span className='text-[12px] text-destructive'>{t('不可用')}</span>
+            </span>
+            {last?.at ? <span className='flex min-w-0 items-baseline gap-1 text-[10.5px] text-muted-foreground'>
+              <span className='shrink-0 font-mono'>{formatTime(last.at)}</span>
+              {last.success && last.ip ? <>
+                <span className='opacity-45' aria-hidden='true'>·</span>
+                <span className='truncate font-mono' title={last.ip}>{last.ip}</span>
+              </> : null}
+            </span> : null}
+          </div>
+        }
         if (!last?.at) return <span className='flex items-center gap-1.5 text-[11.5px] text-muted-foreground'>
           <StatusDot variant='muted' />{t('未检测')}</span>
         /* 颜色只落在状态点上、文字是常规色：结果一眼能扫，整列却不吵。
@@ -192,14 +232,16 @@ function ProxiesPage() {
         /* 「测试」压在最右边：整列右对齐，于是它永远贴着表格右缘 ——
            编辑 / 删除留在它左边，统一等高带框，默认清晰可辨 */
         return <div className='row-actions'>
-          {item.source !== 'clash' ? <>
+          {item.source !== 'clash' ? (
             <Button size='icon-sm' variant='outline' className='size-7 rounded-sm' disabled={locked}
               title={t('编辑')} aria-label={t('编辑')} onClick={() => setModal({ item })}><EditIcon /></Button>
+          ) : null}
+          {canRemoveItem(item) ? (
             <Button size='icon-sm' variant='outline'
               className='size-7 rounded-sm hover:border-destructive-bd hover:bg-destructive-soft hover:text-destructive'
               disabled={locked} title={t('删除')} aria-label={t('删除')}
-              onClick={() => void removeItem(item)}><TrashIcon /></Button>
-          </> : null}
+              onClick={() => setDeleteTarget({ mode: 'single', items: [item], skipped: 0 })}><TrashIcon /></Button>
+          ) : null}
           <Button size='sm' variant='outline' className='h-7 gap-1.5 rounded-sm px-2.5' disabled={locked}
             onClick={() => void testItem(item)}><PlayIcon />{t('测试')}</Button>
         </div>
@@ -211,7 +253,11 @@ function ProxiesPage() {
     <Card render={<section />} className='panel'>
       <CardHeader className='panel-head'>
         <h2>{t('代理列表')}</h2><Badge variant='secondary' shape='tag'>{rows.length}</Badge>
-        <span className='panel-sub'>{ready ? t('已启用 {n} 个', { n: rows.filter(item => item.enabled !== false).length }) : t('加载中…')}</span>
+        <span className='panel-sub'>
+          {!ready ? t('加载中…')
+            : invalidCount > 0 ? t('已启用 {n} 个 · {invalid} 个失效', { n: activeCount, invalid: invalidCount })
+              : t('已启用 {n} 个', { n: activeCount })}
+        </span>
         <div className='head-actions'>
           {/* 全部实感化，与列设置同一套边框与高度；主操作与工具动作间在宽屏留出轻分隔 */}
           <Button disabled={locked} onClick={() => setModal({ item: null })}><PlusIcon />{t('新增代理')}</Button>
@@ -232,7 +278,10 @@ function ProxiesPage() {
         <span className='batch-count'>{t('已选')} <b>{selectedCount}</b> {t('个')}</span>
         <div className='batch-actions'>
           <Button variant='outline' disabled={locked} onClick={() => void batchTest()}>{progress ? t('测试中 {done}/{total}', { done: progress.done, total: progress.total }) : t('批量测试')}</Button>
-          <Button variant='destructive' disabled={locked} onClick={() => void batchRemove()}>{t('批量删除')}</Button>
+          <Button variant='destructive' disabled={locked} onClick={() => {
+            const prepared = prepareBatchRemove()
+            if (prepared) setDeleteTarget({ mode: 'batch', items: prepared.deletable, skipped: prepared.skipped })
+          }}>{t('批量删除')}</Button>
           <Button variant='outline' disabled={locked} onClick={clearSelection}>{t('取消选择')}</Button>
         </div>
       </div> : <ResponsiveSheet open={filterOpen} onOpenChange={setFilterOpen} title={t('筛选')}
@@ -278,12 +327,22 @@ function ProxiesPage() {
     </Card>
     {modal ? <ProxyModal item={modal.item} onClose={() => setModal(null)} /> : null}
     {settingsOpen ? <ProxySettingsModal onClose={() => setSettingsOpen(false)} /> : null}
+    {deleteTarget ? <ProxyDeleteDialog target={deleteTarget}
+      onClose={() => setDeleteTarget(null)}
+      onConfirm={async options => {
+        if (deleteTarget.mode === 'single' && deleteTarget.items.length === 1) {
+          await executeRemoveItem(deleteTarget.items[0], options)
+        } else {
+          await executeBatchRemove(deleteTarget.items, deleteTarget.skipped, options)
+        }
+      }} /> : null}
     <ProxyRetirementDialog open={noticeOpen} onClose={() => setNoticeOpen(false)} t={t} />
   </>
 }
 
 function stateOf(item: ProxyPoolItem): string {
   if (item.enabled === false) return 'off'
+  if (item.resolveError) return 'fail'
   if (!item.lastTest?.at) return 'none'
   return item.lastTest.success ? 'ok' : 'fail'
 }

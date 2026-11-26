@@ -367,11 +367,11 @@ export function TaskJobHistorySheet({
   return (
     <Sheet open={job !== null} onOpenChange={open => { if (!open) onClose() }}>
       <SheetContent side='right' className='w-[min(560px,92vw)] text-foreground'>
-        <SheetHeader>
-          <SheetTitle>{t('运行记录')} · {job?.name}</SheetTitle>
-          <SheetDescription>{t('最多保留最近 50 条执行日志')}</SheetDescription>
+        <SheetHeader className='flex-col items-start gap-1'>
+          <SheetTitle className='m-0'>{t('运行记录')} · {job?.name}</SheetTitle>
+          <SheetDescription className='m-0 text-xs leading-relaxed text-muted-foreground'>{t('最多保留最近 50 条执行日志')}</SheetDescription>
         </SheetHeader>
-        <div className='flex items-center justify-end gap-2 px-4 pb-2'>
+        <div className='flex items-center justify-end gap-2 px-4 pt-3 pb-2'>
           <Button size='xs' variant='outline' disabled={loading} onClick={onRefresh}>
             {t('刷新')}
           </Button>
@@ -448,16 +448,17 @@ export function TaskJobDeleteDialog({
 }) {
   return (
     <AlertDialog open={target !== null} onOpenChange={open => { if (!open) onClose() }}>
-      <AlertDialogContent>
+      <AlertDialogContent className='text-foreground'>
         <AlertDialogHeader>
           <AlertDialogTitle>{t('删除定时任务')}</AlertDialogTitle>
-          <AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogBody>
+          <AlertDialogDescription className='m-0 text-[13px] leading-relaxed text-foreground'>
             {t('确定删除任务「{name}」吗？它的加密参数、登录态缓存与运行日志都会一并清除，且无法恢复。', {
               name: target?.name || '',
             })}
           </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogBody />
+        </AlertDialogBody>
         <AlertDialogFooter>
           <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
           <Button variant='destructive' onClick={onConfirm}>{t('确认删除')}</Button>

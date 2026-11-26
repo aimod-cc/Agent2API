@@ -33,7 +33,7 @@ export function PluginTasks({ request, t, active = true }: { request: PluginTask
   }, [load, open, active])
 
   return <>
-    <Button variant='ghost' onClick={() => setOpen(true)}>{t('插件维护任务')}</Button>
+    <Button variant='outline' size='sm' onClick={() => setOpen(true)}>{t('插件维护任务')}</Button>
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className='max-h-[85dvh] max-w-2xl text-foreground'>
         <DialogHeader><DialogTitle>{t('插件维护任务')}</DialogTitle></DialogHeader>

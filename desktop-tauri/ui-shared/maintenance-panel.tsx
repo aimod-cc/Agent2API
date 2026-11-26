@@ -15,13 +15,12 @@ const initialQuery: MaintenanceQuery = { taskId: '', source: '', status: '', key
 /**
  * 自动维护页。
  *
- * ── 版面（这次改动的重点）──────────────────────────────────────
- * 一屏三段，只有中间那段滚：页头固定 → 概览条（两类维护各一行，约 90px）→
- * 执行记录占满剩余高度、表格在自己卡内滚动。原来两张概览卡就要吃掉首屏一半高度，
- * 记录只剩三四行可见；这一页真正要看的是记录，所以概览只保留「是否正常、下次什么时候跑」。
+ * ── 版面（左右分栏主从联动）──────────────────────────────────
+ * 左侧「维护项目」清单负责总览全部自动维护任务的健康度、调度与单任务执行，
+ * 点选任意项目直接联动筛选右侧「执行记录」；中窄屏下自动退化为上下排列。
  *
  * ── 明细 ─────────────────────────────────────────────────────
- * 点「查看明细」开弹窗（高度固定，不随条数变化），不再在行内展开。
+ * 点「查看结果 / 查看明细」开弹窗（高度固定，不随条数变化），不再在行内展开。
  *
  * 其余数据流一律不动：20 秒静默轮询 + 页面可见性、搜索 300ms 防抖、明细按 id 缓存
  * （保留最近 20 条）、执行中的记录跑完自动重取、翻页越界回退、busy 互斥。
@@ -150,8 +149,9 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
       if (!mounted.current) return
       setDetails(previous => ({ ...Object.fromEntries(Object.entries(previous).slice(-19)), [detail.id]: detail }))
       setExpanded(detail.id)
-      setQuery(initialQuery)
-      currentQuery.current = initialQuery
+      const nextQuery: MaintenanceQuery = { ...initialQuery, taskId: currentQuery.current.taskId }
+      setQuery(nextQuery)
+      currentQuery.current = nextQuery
       setSearch('')
       latestNotify.current?.(detail.status === 'running' ? t('维护已开始，结果会自动更新，可离开此页') : hasFailures(detail) ? t('维护已结束，有失败项，请查看明细') : t('维护已完成，结果已保存'), hasFailures(detail) ? 'err' : 'ok')
       await load(true)
@@ -194,8 +194,8 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
       </div>
       <div className='maintenance-heading-actions'>
         {pluginTaskRequest ? <PluginTasks request={pluginTaskRequest} t={t} active={active} /> : null}
-        <Button variant='ghost' disabled={loading} onClick={() => void load()}>{loading ? <Spinner /> : null}{loading ? t('加载中…') : t('刷新记录')}</Button>
-        <Button variant='ghost' disabled={!overview?.tasks.length} onClick={() => setSettingsOpen(true)}>{t('维护设置')}</Button>
+        <Button variant='outline' size='sm' disabled={loading} onClick={() => void load()}>{loading ? <Spinner /> : null}{loading ? t('加载中…') : t('刷新记录')}</Button>
+        <Button variant='outline' size='sm' disabled={!overview?.tasks.length} onClick={() => setSettingsOpen(true)}>{t('维护设置')}</Button>
       </div>
     </div>
 
@@ -208,9 +208,16 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
     </Alert> : null}
     {!overview && loading ? <Empty><Spinner />{t('正在读取维护记录…')}</Empty> : null}
 
-    {overview ? <>
-      <MaintenanceSummary tasks={overview.tasks} latest={overview.latest} busy={busy} compact={compact}
-        onRun={id => void execute(id)} onShowLatest={showLatest} />
+    {overview ? <div className='maintenance-workspace'>
+      <MaintenanceSummary
+        tasks={overview.tasks}
+        latest={overview.latest}
+        busy={busy}
+        selectedTaskId={query.taskId}
+        onSelectTask={taskId => changeQuery({ taskId })}
+        onRun={id => void execute(id)}
+        onShowLatest={showLatest}
+      />
       <MaintenanceRecords
         compact={compact}
         loading={loading}
@@ -235,7 +242,7 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
         onRetry={(runId, itemId) => { const run = runs.find(item => item.id === runId); if (run) void execute(run.taskId, runId, itemId) }}
         onAccount={onAccount}
       />
-    </> : null}
+    </div> : null}
 
     {settingsOpen && overview ? <MaintenanceSettings tasks={overview.tasks} api={api} onClose={() => setSettingsOpen(false)} onSaved={() => void load(true)} /> : null}
   </div>

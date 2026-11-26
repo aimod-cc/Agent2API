@@ -18,8 +18,9 @@
 //! 已装旧版的用户覆盖安装后，有两个遗留问题要在**新版首次启动**时自动处理：
 //!   1. 旧版拉起的 node 子进程变孤儿继续监听 3065 → `reclaim_port_from_legacy`
 //!      在确认是「自家旧版网关」后自动结束它（判定链见函数注释）；
-//!   2. 旧版安装目录里残留的 resources\node.exe（88MB）+ server.cjs →
-//!      `cleanup_legacy_resources` 在服务就绪后清掉。
+//!   2. 旧版安装目录里残留的 resources\node.exe（88MB）+ server.cjs 及 _up_\ui →
+//!      Windows 安装版由 NSIS 钩子在提权安装/升级阶段清理；`cleanup_legacy_resources`
+//!      仅作为普通可写目录的启动期兜底（无写入权限时静默跳过，不再报错）。
 //! 两个都只在升级后的第一次启动有实际动作，正常启动零开销。
 
 pub(crate) mod lifecycle;
@@ -685,15 +686,12 @@ fn inside_system_dir(candidate: &str) -> bool {
     target.starts_with(root)
 }
 
-/// 清理旧版安装目录里残留的 Node 运行时。
+/// 清理旧版安装目录里残留的 Node 运行时与磁盘界面副本（启动期兜底）。
 ///
-/// NSIS 覆盖安装只覆盖同名文件，旧版多出来的 resources\node.exe（约 88MB）
-/// 与 resources\server.cjs 会一直躺在安装目录占磁盘。这里在服务就绪后清一次；
-/// 删除失败（被占用/权限不足）只记日志，下次启动再试。
-///
-/// 以当前可执行文件的父目录推导安装目录（而不是 Tauri 的 resource_dir，
-/// 后者可能带 `\\?\` verbatim 前缀，与磁盘上的真实路径形态不一致）。
-/// 开发态（target/debug 下）不存在 resources 子目录，天然跳过。
+/// Windows 系统盘安装目录（Program Files）平时对普通进程只读，清理主要由
+/// NSIS 安装/升级钩子在提权阶段完成；本函数主要覆盖普通可写目录场景。
+/// 遇到无写入权限（`PermissionDenied`）时安静跳过且仅写调试日志，避免每次
+/// 启动都在系统事件里刷出「拒绝访问」红色错误。
 fn cleanup_legacy_resources() {
     let Some(install_dir) = std::env::current_exe()
         .ok()
@@ -701,39 +699,53 @@ fn cleanup_legacy_resources() {
     else {
         return;
     };
+    cleanup_legacy_resources_in(&install_dir);
+}
+
+fn cleanup_legacy_resources_in(install_dir: &Path) {
     let resources = install_dir.join("resources");
+    let mut removed_resource = false;
     for name in ["node.exe", "server.cjs"] {
         let target = resources.join(name);
         if !target.exists() {
             continue;
         }
-        match std::fs::remove_file(&target) {
-            Ok(()) => {
-                server::logging::log("[Server]", &format!("已清理旧版残留的资源文件（升级迁移）: {name}"))
-            }
-            Err(error) => {
-                server::logging::log(
-                    "[Server]",
-                    &format!("清理旧版残留 {name} 失败（下次启动再试）: {error}"),
-                )
-            }
+        let ok_msg = format!("已清理旧版残留的资源文件（升级迁移）: {name}");
+        match remove_legacy_target(&target, false, &ok_msg, &format!("旧版残留 {name}")) {
+            Ok(()) => removed_resource = true,
+            Err(true) => return,
+            Err(false) => {}
         }
     }
-    // 旧版曾通过 bundle.resources 把 ../ui 拷贝到 _up_/ui；改走内嵌资源后覆盖安装顺手清理旧副本。
+    if removed_resource {
+        let _ = std::fs::remove_dir(&resources);
+    }
+
+    // 旧版曾把 ../ui 拷贝到 _up_/ui；外层还含新版协议（_up_/_up_），仅在空时移除 _up_。
     let legacy_up = install_dir.join("_up_");
     let legacy_ui = legacy_up.join("ui");
-    if legacy_ui.is_dir() {
-        match std::fs::remove_dir_all(&legacy_ui) {
-            Ok(()) => {
-                let _ = std::fs::remove_dir(&legacy_up);
-                server::logging::log("[Server]", "已清理旧版残留的磁盘界面副本（_up_/ui）");
-            }
-            Err(error) => {
-                server::logging::log(
-                    "[Server]",
-                    &format!("清理旧版磁盘界面副本失败（下次启动再试）: {error}"),
-                )
-            }
+    if legacy_ui.is_dir()
+        && remove_legacy_target(&legacy_ui, true, "已清理旧版残留的磁盘界面副本（_up_/ui）", "旧版磁盘界面副本（_up_/ui）").is_ok()
+    {
+        let _ = std::fs::remove_dir(&legacy_up);
+    }
+}
+
+/// 删除单个旧版残留目标；无权限返回 `Err(true)`（调用方可早退），其余错误返回 `Err(false)`。
+fn remove_legacy_target(target: &Path, is_dir: bool, ok_msg: &str, label: &str) -> Result<(), bool> {
+    let result = if is_dir { std::fs::remove_dir_all(target) } else { std::fs::remove_file(target) };
+    match result {
+        Ok(()) => {
+            server::logging::log("[Server]", ok_msg);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            server::logging::verbose("[Server]", &format!("跳过清理{label}（当前进程无写入权限，将在下次安装或升级时自动清理）"));
+            Err(true)
+        }
+        Err(error) => {
+            server::logging::verbose("[Server]", &format!("暂未清理{label}（下次启动或升级再试）: {error}"));
+            Err(false)
         }
     }
 }
@@ -753,4 +765,36 @@ pub async fn shutdown_and_wait(state: &AppState) -> Result<(), String> {
 #[allow(dead_code)]
 pub fn running_port(state: &AppState) -> Option<u16> {
     lifecycle::running_port(&state.backend)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_legacy_resources_in;
+
+    #[test]
+    fn cleanup_legacy_resources_cleans_legacy_and_preserves_licenses() {
+        let root = std::env::temp_dir().join(format!("agent2api-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let resources = root.join("resources");
+        let legacy_ui = root.join("_up_").join("ui");
+        let keep_licenses = root.join("_up_").join("_up_");
+        for dir in [&resources, &legacy_ui, &keep_licenses] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(resources.join("node.exe"), b"stub").unwrap();
+        std::fs::write(resources.join("server.cjs"), b"stub").unwrap();
+        std::fs::write(legacy_ui.join("index.html"), b"<html></html>").unwrap();
+        std::fs::write(keep_licenses.join("LICENSE"), b"AGPL").unwrap();
+
+        cleanup_legacy_resources_in(&root);
+        assert!(!resources.exists() && !legacy_ui.exists() && keep_licenses.join("LICENSE").is_file());
+
+        std::fs::remove_dir_all(&keep_licenses).unwrap();
+        std::fs::create_dir_all(&legacy_ui).unwrap();
+        std::fs::write(legacy_ui.join("app.js"), b"console.log(1)").unwrap();
+        cleanup_legacy_resources_in(&root);
+        assert!(!root.join("_up_").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -55,6 +55,7 @@ export function UpdateNetworkSettings({ plugin = false }: { plugin?: boolean }) 
           </SelectItem>)}
         </SelectContent>
       </Select>
+      {pick.broken ? <p className='mt-1.5 text-xs text-destructive'>{pick.title}</p> : null}
     </div>
   </div>
 }

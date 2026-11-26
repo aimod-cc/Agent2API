@@ -15,6 +15,14 @@ export function LogsList({ groups, empty, loading, listRef, onDetail }: {
   listRef: React.RefObject<HTMLDivElement | null>
   onDetail: (group: LogGroup) => void
 }) {
+  const handleRowClick = (event: React.MouseEvent, group: LogGroup) => {
+    const target = event.target as HTMLElement | null
+    if (target?.closest('button, a')) return
+    const selection = window.getSelection?.()?.toString()
+    if (selection && selection.trim().length > 0) return
+    onDetail(group)
+  }
+
   return (
     <div className='log-list event-log-list' id='log-list' ref={listRef} aria-busy={loading}>
       <div className='event-log-head' aria-hidden='true'>
@@ -27,7 +35,7 @@ export function LogsList({ groups, empty, loading, listRef, onDetail }: {
         const summary = logSummary(entry, t)
         const source = logSource(entry, t)
         return (
-          <div className={`event-log-row ${entry.level || 'info'}`} key={group.id}>
+          <div className={`event-log-row is-clickable ${entry.level || 'info'}`} key={group.id} onClick={event => handleRowClick(event, group)}>
             <time className='event-log-time' dateTime={entry.ts ? new Date(entry.ts).toISOString() : undefined} title={groupTime(group)}>
               {formatLogTime(group.lastTs)}
               {group.count > 1 ? <span>{formatLogTime(group.firstTs, true)}–{formatLogTime(group.lastTs, true)}</span> : null}

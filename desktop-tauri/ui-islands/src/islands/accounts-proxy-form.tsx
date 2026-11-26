@@ -189,7 +189,7 @@ export function ProxyForm({
    */
   function rotateCandidateIds(): string[] {
     if (draft.rotateAll) {
-      return (pool ?? []).filter(item => item.enabled !== false).map(item => item.id)
+      return (pool ?? []).filter(item => item.enabled !== false && !item.resolveError).map(item => item.id)
     }
     return [...draft.rotateIds]
   }

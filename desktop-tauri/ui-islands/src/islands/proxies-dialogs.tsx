@@ -19,7 +19,7 @@ import {
   Switch,
 } from '@ui'
 import {
-  durationText, errorMessage, loadSettings, saveItem, saveSettings, toast, wb,
+  durationText, errorMessage, itemName, loadSettings, saveItem, saveSettings, toast, wb,
   type ProxyPoolItem,
 } from './proxies-state'
 import { t } from '../i18n'
@@ -27,6 +27,7 @@ import { openExternal } from './update-shared'
 import { ProxySponsorCards } from '../../../ui-shared/proxy-sponsor-cards'
 import { ProxyBatchEditor, type ProxyBatchHandle } from '../../../ui-shared/proxy-batch-editor'
 import { proxyHost, type ProxyImportDraft, type ProxyImportReport } from '../../../ui-shared/proxy-import'
+import { proxyServiceLabels } from '../../../ui-shared/proxy-usage'
 
 /* ─── 新增 / 编辑弹窗 ───────────────────────── */
 
@@ -330,4 +331,108 @@ export function ProxySettingsModal({ onClose }: { onClose: () => void }) {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+}
+
+/* ─── 删除确认弹窗 ───────────────────────── */
+
+export type ProxyDeleteTarget = {
+  mode: 'single' | 'batch'
+  items: ProxyPoolItem[]
+  skipped: number
+}
+
+export function ProxyDeleteDialog({
+  target,
+  onClose,
+  onConfirm,
+}: {
+  target: ProxyDeleteTarget
+  onClose: () => void
+  onConfirm: (options: { resetUpdateProxy: boolean }) => Promise<void>
+}) {
+  const [resetUpdateProxy, setResetUpdateProxy] = React.useState(false)
+  const [deleting, setDeleting] = React.useState(false)
+  const isSingle = target.mode === 'single' && target.items.length === 1
+  const single = isSingle ? target.items[0] : null
+  const usedAccounts = single ? (single.usedBy || []) : []
+  const usedProxyCount = target.items.filter(item => (item.usedBy || []).length > 0).length
+  const services = [...new Set(target.items.flatMap(item => proxyServiceLabels(item, t)))]
+  const hasUpdateService = target.items.some(item => (item.usedByServices || []).includes('update'))
+  const previewNames = target.items.slice(0, 8).map(itemName).join(t('、'))
+  const namesSummary = target.items.length > 8
+    ? t('{names} 等 {n} 条', { names: previewNames, n: target.items.length })
+    : previewNames
+
+  async function submit(): Promise<void> {
+    if (deleting) return
+    setDeleting(true)
+    try {
+      await onConfirm({ resetUpdateProxy: hasUpdateService && resetUpdateProxy })
+      onClose()
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open, details) => {
+      if (open) return
+      if (deleting) { details.cancel(); return }
+      onClose()
+    }}>
+      <DialogContent className='max-w-[480px]'>
+        <DialogHeader>
+          <DialogTitle>{isSingle ? t('删除代理') : t('批量删除代理')}</DialogTitle>
+        </DialogHeader>
+        <DialogBody className='gap-3 text-[13px] leading-relaxed'>
+          {single ? (
+            <p>{t('确定删除「{name}」？', { name: itemName(single) })}</p>
+          ) : (
+            <>
+              <p>{t('确定删除选中的 {n} 个代理？', { n: target.items.length })}</p>
+              {namesSummary ? <p className='text-xs text-subtle break-words'>{namesSummary}</p> : null}
+            </>
+          )}
+          {single && usedAccounts.length > 0 ? (
+            <p className='text-xs text-subtle'>
+              {t('有 {n} 个账号正在使用它（{names}）—— 删除后需重新设置这些账号的代理，不会自动直连。', {
+                n: usedAccounts.length,
+                names: usedAccounts.map(entry => String(entry.name || entry.id || '')).join(t('、')),
+              })}
+            </p>
+          ) : null}
+          {!single && usedProxyCount > 0 ? (
+            <p className='text-xs text-subtle'>
+              {t('其中 {n} 条正被账号使用 —— 删除后需重新设置相关账号的代理，不会自动直连。', { n: usedProxyCount })}
+            </p>
+          ) : null}
+          {services.length > 0 ? (
+            <p className='text-xs text-subtle'>
+              {single
+                ? t('此代理用于{services}；删除后这些线路将不可用，不会自动回退直连。', { services: services.join(t('、')) })
+                : t('选中的代理用于{services}；删除后这些线路将不可用，不会自动回退直连。', { services: services.join(t('、')) })}
+            </p>
+          ) : null}
+          {hasUpdateService ? (
+            <Label className='flex cursor-pointer items-center gap-2 rounded-sm border border-border bg-surface-2 px-3 py-2 text-xs font-normal'>
+              <Checkbox checked={resetUpdateProxy} disabled={deleting}
+                onCheckedChange={value => setResetUpdateProxy(value === true)} />
+              <span>{t('同时将「软件 / 插件更新」出网线路恢复为默认线路')}</span>
+            </Label>
+          ) : null}
+          {target.skipped > 0 ? (
+            <p className='text-xs text-subtle'>
+              {t('另有 {n} 条正在与 EasyClash 同步，将跳过（请到 EasyClash 里删）。', { n: target.skipped })}
+            </p>
+          ) : null}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant='outline' disabled={deleting} onClick={onClose}>{t('取消')}</Button>
+          <Button variant='destructive' disabled={deleting} onClick={() => void submit()}>
+            {deleting ? t('删除中…') : t('删除')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }

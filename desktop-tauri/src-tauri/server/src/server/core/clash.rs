@@ -67,6 +67,20 @@ impl ClashSnapshot {
             error: Some(error.to_string()),
         }
     }
+
+    /// 判断某个 `listenerUid` 当前是否仍存在于 EasyClash 实时配置中。
+    /// - EasyClash 不可用（未安装 / 找不到 store.json / 配置不可读）→ `false`
+    /// - `__mixed__` → `self.mixed_port.is_some()`
+    /// - 其它 uid → `self.listeners` 中存在同 uid 项（不论该项在 EasyClash 中启停）
+    pub fn contains_listener(&self, listener_uid: &str) -> bool {
+        if !self.available {
+            return false;
+        }
+        if listener_uid == CLASH_MIXED_UID {
+            return self.mixed_port.is_some();
+        }
+        self.listeners.iter().any(|listener| listener.uid == listener_uid)
+    }
 }
 
 /// EasyClash 的一个节点独立混合端口映射
@@ -324,4 +338,48 @@ pub fn clash_proxy_options() -> Value {
         "dir": snapshot.dir,
         "options": options,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_listener(uid: &str, enabled: bool) -> ClashListener {
+        ClashListener {
+            uid: uid.to_string(),
+            name: uid.to_string(),
+            proxy: uid.to_string(),
+            port: 18001,
+            profile_uid: None,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn contains_listener_handles_unavailable_and_present_endpoints() {
+        let unavailable = ClashSnapshot::unavailable(CLASH_UNAVAILABLE, None);
+        assert!(!unavailable.contains_listener(CLASH_MIXED_UID));
+        assert!(!unavailable.contains_listener("node-a"));
+
+        let available_no_mixed = ClashSnapshot {
+            available: true,
+            dir: Some("/tmp/easyclash".to_string()),
+            mixed_port: None,
+            socks_port: None,
+            http_port: None,
+            listeners: vec![sample_listener("node-a", true), sample_listener("node-off", false)],
+            current_profile_uid: None,
+            error: None,
+        };
+        assert!(!available_no_mixed.contains_listener(CLASH_MIXED_UID));
+        assert!(available_no_mixed.contains_listener("node-a"));
+        assert!(available_no_mixed.contains_listener("node-off"));
+        assert!(!available_no_mixed.contains_listener("missing"));
+
+        let available_with_mixed = ClashSnapshot {
+            mixed_port: Some(7890),
+            ..available_no_mixed
+        };
+        assert!(available_with_mixed.contains_listener(CLASH_MIXED_UID));
+    }
 }

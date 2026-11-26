@@ -78,3 +78,90 @@ fn migration_failure_does_not_advance_the_version_and_can_be_retried() {
     migrate(&conn).unwrap();
     assert_eq!(version(&conn), SCHEMA_VERSION);
 }
+
+#[test]
+fn v36_migrates_local_direct_antigravity_requests_and_daily_provider_stats() {
+    let conn = Connection::open_in_memory().unwrap();
+    let mut cleaned = 0;
+    for v in 1..=35 {
+        apply_version(&conn, v, &mut cleaned).unwrap();
+    }
+    conn.pragma_update(None, "user_version", 35).unwrap();
+
+    conn.execute(
+        "INSERT INTO requests (id, ts, model, account_id, account_name, status, provider, client, origin) \
+         VALUES ('req-ld-1', 1760000000000, 'gemini-4-neon', 'local-direct', '本机直连', 200, 'local-direct', 'Antigravity', 'local_direct')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO local_direct_refs (request_id, agent_id, root_kind, source_key, ts) \
+         VALUES ('req-ld-1', 'antigravity', 'desktop', 'k-1', 1760000000000)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO requests (id, ts, model, account_id, account_name, status, provider, client, origin) \
+         VALUES ('req-ld-2', 1760000001000, 'gemini-4-neon', 'local-direct:antigravity:custom@example.com', '我的号', 200, 'local-direct', 'Antigravity', 'local_direct')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO local_direct_refs (request_id, agent_id, root_kind, source_key, ts) \
+         VALUES ('req-ld-2', 'antigravity', 'cli', 'k-2', 1760000001000)",
+        [],
+    )
+    .unwrap();
+
+    let daily_stats = serde_json::json!([
+        {"provider": "antigravity", "requests": 2, "successful": 2, "tokens": 100, "costUsd": 0.1, "unpricedRequests": 0},
+        {"provider": "local-direct", "requests": 3, "successful": 3, "tokens": 250, "costUsd": 0.25, "unpricedRequests": 1}
+    ])
+    .to_string();
+    conn.execute(
+        "INSERT INTO request_daily (date, requests, successful, tokens, provider_stats) \
+         VALUES ('2026-11-26', 5, 5, 350, ?1)",
+        [daily_stats],
+    )
+    .unwrap();
+
+    migrate(&conn).unwrap();
+    assert_eq!(version(&conn), SCHEMA_VERSION);
+
+    let (p1, aid1, aname1): (String, String, String) = conn
+        .query_row(
+            "SELECT provider, account_id, account_name FROM requests WHERE id='req-ld-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(p1, "antigravity");
+    assert_eq!(aid1, "local-direct:antigravity:desktop");
+    assert_eq!(aname1, "桌面版");
+
+    let (p2, aid2, aname2): (String, String, String) = conn
+        .query_row(
+            "SELECT provider, account_id, account_name FROM requests WHERE id='req-ld-2'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(p2, "antigravity");
+    assert_eq!(aid2, "local-direct:antigravity:custom@example.com");
+    assert_eq!(aname2, "我的号");
+
+    let merged_raw: String = conn
+        .query_row(
+            "SELECT provider_stats FROM request_daily WHERE date='2026-11-26'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let merged: Vec<serde_json::Value> = serde_json::from_str(&merged_raw).unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0]["provider"], "antigravity");
+    assert_eq!(merged[0]["requests"], 5);
+    assert_eq!(merged[0]["successful"], 5);
+    assert_eq!(merged[0]["tokens"], 350);
+    assert_eq!(merged[0]["unpricedRequests"], 1);
+}

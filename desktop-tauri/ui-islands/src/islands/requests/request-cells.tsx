@@ -395,6 +395,13 @@ export function RequestCell({
       const fromBackend = String(entry.providerLabel ?? '').trim()
       const provider = fromBackend ? t(fromBackend) : (id ? providerLabelOf(id) : '')
       const providerTitle = id && id !== provider ? t('{name}（{id}）', { name: provider, id }) : provider
+      const rawAccountId = String(entry.accountId ?? '')
+      const localDirectTail = rawAccountId.startsWith('local-direct:')
+        ? rawAccountId.split(':').slice(2).join(':')
+        : ''
+      const accountTitle = localDirectTail
+        ? (localDirectTail.includes('@') ? localDirectTail : entry.accountName)
+        : (entry.accountId || entry.accountName)
       return (
         <span key={key} className={className}>
           {provider ? (
@@ -404,7 +411,7 @@ export function RequestCell({
               title={t('这条明细没有记录提供商（旧数据或请求未走到转发）')}>—</span>
           )}
           {entry.accountName ? (
-            <span className='req-acct req-sub-indent' title={namesHidden ? undefined : entry.accountId || entry.accountName}>
+            <span className='req-acct req-sub-indent' title={namesHidden ? undefined : accountTitle}>
               {namesHidden ? maskName(entry.accountName) : entry.accountName}
             </span>
           ) : (

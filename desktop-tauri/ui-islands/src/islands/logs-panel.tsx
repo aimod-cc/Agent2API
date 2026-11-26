@@ -1,20 +1,16 @@
 import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
-import {
-  Badge, Button, InputGroup, InputGroupAddon, InputGroupInput,
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-  SegmentedControl, Switch,
-  Card, CardHeader, CardContent, Label } from '@ui'
+import { Button, Card, CardContent, TooltipProvider } from '@ui'
 import { SERVER_PAGE_SIZES, TableFooter, readPageSize, writePageSize, type PageSizeChoice } from './table-shell'
 import { t } from '../i18n'
 import {
-  errorMessage, LEVEL_OPTIONS, logCategory, logGroups, persistFilters,
-  queryFor, RANGE_OPTIONS, readFilters, shared, toast, VIEW_OPTIONS,
+  errorMessage, logGroups, persistFilters,
+  queryFor, readFilters, shared, toast,
   type Filters, type IntervalTask, type LoadOptions, type LogGroup, type LogPage, type LogStats,
 } from './logs-model'
 import { LogDetail, LogsList } from './logs-list'
-import { DateRangeFields } from './date-range-fields'
+import { LogsToolbar } from './logs-toolbar'
 import { PageAutoRefresh, pageRefreshStore, usePageAutoRefresh } from './page-auto-refresh'
 import { requestDirect } from './assistant-api'
 import { subscribeScopedLiveRefresh, type ScopedRefreshController } from '../../../ui-shared/page-live-refresh'
@@ -264,59 +260,39 @@ function LogsPanel() {
     })
   }
 
-  const levelLabel = LEVEL_OPTIONS.find(option => option.value === filters.level)?.label || t('全部级别')
   const counts = data.byLevel || {}
   const empty = !loaded && !error ? t('正在加载日志…') : Number(data.total) ? t('没有符合筛选条件的日志') : t('暂无日志')
 
   return (
-    <Card render={<section />} className='panel' id='logs-panel-events'>
-      <PageAutoRefresh id='logsAutoRefresh' settings={auto} onRefresh={() => loadPanel({ silent: true })} disabled={busy !== null || loading} />
-      <CardHeader className='panel-head'>
-        <h2>{t('系统事件')}</h2><Badge id='logs-badge' variant='outline' data-tone=''>{loaded ? badgeText : '—'}</Badge>
-        <div className='head-actions'>
-          <Button id='btn-logs-export' variant='outline' disabled={busy !== null || loading || Boolean(error)} onClick={() => void exportLogs()}>
-            {busy === 'export' ? t('导出中…') : t('导出当前筛选')}</Button>
-          <Button id='btn-logs-clear' variant='destructive' disabled={busy !== null || loading || Boolean(error) || !matched} onClick={() => void clearLogs()}>
-            {busy === 'clear' ? t('清空中…') : t('清空当前筛选')}</Button>
-        </div>
-      </CardHeader>
-      <CardContent className='panel-body'>
-        <div className='event-log-toolbar'>
-          <SegmentedControl options={VIEW_OPTIONS} value={filters.view} onValueChange={view => changeFilters({ view })} aria-label={t('日志视图')} />
-          <Label className='event-log-aggregate'><Switch checked={filters.aggregate} onCheckedChange={aggregate => changeFilters({ aggregate })} aria-label={t('折叠重复日志')} />{t('折叠重复日志')}</Label>
-        </div>
-        <div className='log-filters'>
-          <SegmentedControl options={RANGE_OPTIONS} value={filters.range} onValueChange={range => changeFilters({ range })} aria-label={t('事件日志时间范围')} className='shrink-0' />
-          {filters.range === 'custom' ? <DateRangeFields dates={filters.dates}
-            onChange={dates => changeFilters({ dates })} onClear={() => changeFilters({ range: 'today' })} /> : null}
-          {filters.view !== 'debug' ? <Select value={filters.level} onValueChange={value => changeFilters({ level: String(value ?? '') })}>
-            <SelectTrigger className='min-w-[120px]' aria-label={t('按最低级别筛选')}><SelectValue>{levelLabel}</SelectValue></SelectTrigger>
-            <SelectContent>{LEVEL_OPTIONS.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-          </Select> : null}
-          <Select value={filters.category} onValueChange={value => changeFilters({ category: String(value ?? '') })}>
-            <SelectTrigger className='min-w-[120px]' aria-label={t('按分类筛选')}><SelectValue>{filters.category ? logCategory(filters.category, t) : t('全部分类')}</SelectValue></SelectTrigger>
-            <SelectContent><SelectItem value=''>{t('全部分类')}</SelectItem>{Object.keys(data.categories || {}).map(category =>
-              <SelectItem key={category} value={category}>{logCategory(category, t)}</SelectItem>)}</SelectContent>
-          </Select>
-          <InputGroup className='w-auto flex-auto'><InputGroupInput type='search' placeholder={t('搜索插件、消息、提供商或账号…')}
-            aria-label={t('搜索插件、消息、提供商或账号')} autoComplete='off' value={filters.keyword}
-            onChange={event => changeFilters({ keyword: event.currentTarget.value }, true)} /><InputGroupAddon aria-hidden='true'>⌕</InputGroupAddon></InputGroup>
-        </div>
-        <div className='event-log-overview'>
-          <span>{t('显示 {groups} 组 · 原始记录 {entries} 条', { groups: totalGroups, entries: matched })}</span>
-          <span className='event-log-errors'>{t('错误 {n}', { n: counts.error || 0 })}</span>
-          <span className='event-log-warnings'>{t('警告 {n}', { n: counts.warn || 0 })}</span>
-          {filters.view !== 'important' ? <span>{t('调试 {n}', { n: counts.debug || 0 })}</span> : null}
-        </div>
-        {filters.view === 'debug' && !data.debugEnabled ? <div className='event-log-note'>{t('调试采集未开启，仅显示已保留的记录。可在设置中开启调试模式。')}</div> : null}
-        {error ? <div className='event-log-error' role='status'>{error}<Button variant='ghost' size='xs' onClick={() => void loadPanel()}>{t('重试')}</Button></div> : null}
-        <LogsList groups={groups} empty={empty} loading={loading} listRef={listRef} onDetail={setDetail} />
-      </CardContent>
-      <TableFooter total={totalGroups} page={page} pageCount={pageCount} size={size} sizes={SERVER_PAGE_SIZES}
-        disabled={loading || busy !== null} range={{ start: groups.length ? (page - 1) * size + 1 : 0, end: (page - 1) * size + groups.length }}
-        leading={<span className='event-log-footer-note'>{t('分页按折叠后的组数计算')}</span>} onSizeChange={changeSize} onPageChange={gotoPage} />
-      <LogDetail group={detail} onClose={() => setDetail(null)} />
-    </Card>
+    <TooltipProvider delay={200}>
+      <Card render={<section />} className='panel event-log-panel' id='logs-panel-events'>
+        <PageAutoRefresh id='logsAutoRefresh' settings={auto} onRefresh={() => loadPanel({ silent: true })} disabled={busy !== null || loading} />
+        {/* 供顶栏状态镜像读取当前筛选条数，不额外占卡片顶部一行 */}
+        <span id='logs-badge' hidden data-tone=''>{loaded ? badgeText : '—'}</span>
+        <LogsToolbar
+          filters={filters}
+          categories={Object.keys(data.categories || {})}
+          counts={counts}
+          matched={matched}
+          busy={busy}
+          loading={loading}
+          hasError={Boolean(error)}
+          onChange={changeFilters}
+          onExport={() => void exportLogs()}
+          onClear={() => void clearLogs()}
+        />
+        <CardContent className='panel-body event-log-body'>
+          {filters.view === 'debug' && !data.debugEnabled ? <div className='event-log-note'>{t('调试采集未开启，仅显示已保留的记录。可在设置中开启调试模式。')}</div> : null}
+          {error ? <div className='event-log-error' role='status'>{error}<Button variant='ghost' size='xs' onClick={() => void loadPanel()}>{t('重试')}</Button></div> : null}
+          <LogsList groups={groups} empty={empty} loading={loading} listRef={listRef} onDetail={setDetail} />
+        </CardContent>
+        <TableFooter total={totalGroups} page={page} pageCount={pageCount} size={size} sizes={SERVER_PAGE_SIZES}
+          disabled={loading || busy !== null} range={{ start: groups.length ? (page - 1) * size + 1 : 0, end: (page - 1) * size + groups.length }}
+          leading={loaded ? <span className='event-log-footer-note'>{t('显示 {groups} 组 · 原始记录 {entries} 条', { groups: totalGroups, entries: matched })}</span> : null}
+          onSizeChange={changeSize} onPageChange={gotoPage} />
+        <LogDetail group={detail} onClose={() => setDetail(null)} />
+      </Card>
+    </TooltipProvider>
   )
 }
 

@@ -118,6 +118,7 @@ function logComponent(component: string, t: Translate): string {
     case 'Maintenance': return t('系统维护')
     case 'Update': return t('软件版本检查')
     case 'Plugin': return t('插件')
+    case 'LocalDirect': return t('本机采集')
     default: return component
   }
 }

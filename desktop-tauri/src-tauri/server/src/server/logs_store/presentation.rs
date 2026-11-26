@@ -140,6 +140,14 @@ pub fn prepare(mut entry: LogEntry) -> LogEntry {
         && text == "Wasm 插件计算用量"
         && data.contains_key("compute")
         && data.get("reason").is_none_or(Value::is_null);
+    // 历史库里每轮定期扫描写入的正常 `[LocalDirect] 已导入 N 条本机直连请求` 按常规后台事件还原，避免刷屏重要事件。
+    let local_direct_import = tags.contains(&"LocalDirect")
+        && entry.level == "info"
+        && text.starts_with("已导入 ")
+        && text.contains("本机直连请求");
+    if local_direct_import {
+        data.entry("routine").or_insert(Value::Bool(true));
+    }
     let legacy_detail = (plugin
         && (http_request.is_some()
             || text.contains("出站归一：")
@@ -335,4 +343,41 @@ pub fn groups_paged(
         });
     }
     (states.len(), page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_direct_import_info_is_marked_routine_and_hidden_from_important_view() {
+        let legacy = prepare(LogEntry {
+            id: 1,
+            ts: 1_760_000_000_000,
+            level: "info".to_string(),
+            category: "server".to_string(),
+            message: "[LocalDirect] 已导入 5 条本机直连请求（去重网关同源 0 条）".to_string(),
+            data: None,
+        });
+        assert_eq!(
+            legacy.data.as_ref().and_then(|d| d.get("routine")).and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            legacy.data.as_ref().and_then(|d| d.get("component")).and_then(Value::as_str),
+            Some("LocalDirect")
+        );
+        assert!(!LogView::Important.matches(&legacy));
+        assert!(LogView::All.matches(&legacy));
+
+        let err = prepare(LogEntry {
+            id: 2,
+            ts: 1_760_000_001_000,
+            level: "error".to_string(),
+            category: "server".to_string(),
+            message: "[LocalDirect] 本机直连扫描任务异常: test".to_string(),
+            data: None,
+        });
+        assert!(LogView::Important.matches(&err));
+    }
 }

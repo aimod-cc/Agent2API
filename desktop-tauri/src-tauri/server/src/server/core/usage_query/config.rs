@@ -38,7 +38,12 @@ fn connection(proxy: &Value) -> Value {
         let all = proxy.get("all").and_then(Value::as_bool) != Some(false);
         let ids = proxy.get("proxyIds").and_then(Value::as_array);
         let candidates: Vec<_> = proxy_pool::raw_items().into_iter().filter(|item| {
-            proxy_pool::is_enabled(item) && (all || ids.is_some_and(|ids| ids.iter().any(|id| Some(id) == item.get("id"))))
+            proxy_pool::is_enabled(item)
+                && (if all {
+                    crate::server::core::proxy_rotate::entry_ready(item).is_ok()
+                } else {
+                    ids.is_some_and(|ids| ids.iter().any(|id| Some(id) == item.get("id")))
+                })
         }).map(|item| connection(&json!({ "source": "pool", "proxyId": item["id"] }))).collect();
         return json!({ "source": "rotate", "candidates": candidates });
     }

@@ -66,6 +66,9 @@ use rusqlite::Connection;
 #[path = "schema_tests.rs"]
 mod tests;
 
+#[path = "schema_local_direct_v36.rs"]
+mod local_direct_v36;
+
 /// `kv` 表里**不属于网关配置**的固定键名（模块头「两类键名绝不能相撞」讲的
 /// 就是它与配置顶层键的关系）。
 ///
@@ -363,7 +366,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 35;
+pub const SCHEMA_VERSION: i64 = 36;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1109,6 +1112,7 @@ fn apply_version(
         33 => conn.execute_batch(include_str!("schema_task_plugins.sql")),
         34 => conn.execute_batch(include_str!("schema_privacy_redaction.sql")),
         35 => conn.execute_batch(include_str!("schema_local_direct.sql")),
+        36 => local_direct_v36::migrate_local_direct_antigravity(conn),
         _ => Ok(()),
     }
 }

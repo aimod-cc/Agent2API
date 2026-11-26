@@ -1,6 +1,6 @@
 import { t } from '../i18n'
-import { proxyServiceLabels, type ProxyUsage } from '../../../ui-shared/proxy-usage'
 import { acceptProxyPool } from './proxy-pool-cache'
+import type { ProxyUsage } from '../../../ui-shared/proxy-usage'
 import type { ClashProxySnapshot } from '../../../ui-shared/clash-proxy'
 
 /* ─── 后端形态 ───────────────────────────────── */
@@ -12,6 +12,7 @@ export type ProxyPoolItem = ProxyUsage & {
   enabled: boolean
   sourceEnabled?: boolean
   localDisabled?: boolean
+  deletable?: boolean
   listenerUid?: string
   protocol: string
   host: string
@@ -35,6 +36,8 @@ export type ProxyPoolItem = ProxyUsage & {
 export type ProxyPoolPayload = {
   items?: ProxyPoolItem[]
   removed?: string
+  updateProxyReset?: boolean
+  updateProxyResetSaved?: boolean
   clash?: ClashProxySnapshot
   changes?: number
   syncError?: string | null
@@ -64,7 +67,7 @@ export type ProxyPoolBridge = {
   createProxyPoolItem?: (payload: Record<string, unknown>) => Promise<ProxyPoolPayload | null | undefined>
   updateProxyPoolItem?: (payload: Record<string, unknown>) => Promise<ProxyPoolPayload | null | undefined>
   setProxyPoolItemEnabled?: (payload: { id: string; enabled: boolean }) => Promise<ProxyPoolPayload | null | undefined>
-  removeProxyPoolItem?: (id: string) => Promise<ProxyPoolPayload | null | undefined>
+  removeProxyPoolItem?: (id: string, options?: { resetUpdateProxy?: boolean }) => Promise<ProxyPoolPayload | null | undefined>
   testProxyPoolItem?: (id: string) => Promise<ProxyTestResult | null | undefined>
   syncClashToProxyPool?: () => Promise<ProxyPoolPayload | null | undefined>
   /** 测**未保存**的表单内容（弹窗里的「测试出口」，payload 是 `{proxy}`） */
@@ -81,9 +84,6 @@ export type ProxySharedWindow = {
     formatTime?: (value: unknown) => string
     /** 当前页标识：首屏只在用户正看着本页时才自拉一次 */
     readonly currentPage?: string
-  }
-  wbConfirm?: {
-    ask?: (options: { title?: string; html?: string; okText?: string; okClass?: string }) => Promise<boolean>
   }
 }
 
@@ -110,15 +110,12 @@ export function durationText(value: unknown): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
-/** 确认框 / 提示里的 HTML 转义（值来自用户输入的名称） */
-export function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, char => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char] || char
-  ))
-}
-
 export function itemName(item: ProxyPoolItem | null | undefined): string {
   return String(item?.name || item?.id || '')
+}
+
+export function canRemoveItem(item: ProxyPoolItem): boolean {
+  return typeof item.deletable === 'boolean' ? item.deletable : item.source !== 'clash'
 }
 
 /* ─── store ─────────────────────────────────── */
@@ -309,43 +306,33 @@ export async function toggleItem(item: ProxyPoolItem, enabled: boolean): Promise
   }
 }
 
-export async function removeItem(item: ProxyPoolItem): Promise<void> {
-  if (item.source === 'clash') {
-    toast(t('只读：在 EasyClash 里改'), 'err')
-    return
+export async function executeRemoveItem(
+  item: ProxyPoolItem,
+  options?: { resetUpdateProxy?: boolean },
+): Promise<boolean> {
+  if (!canRemoveItem(item)) {
+    toast(t('该代理正在与 EasyClash 同步，不能删除（请到 EasyClash 里删）'), 'err')
+    return false
   }
   const bridge = wb().workbuddyDesktop
-  if (typeof bridge?.removeProxyPoolItem !== 'function') return
-  const used = item.usedBy || []
-  const usedHtml = used.length
-    ? `<p style="margin-top:6px">${t('有 <strong>{n}</strong> 个账号正在使用它（{names}）—— 删除后需重新设置这些账号的代理，不会自动直连。', {
-        n: used.length,
-        names: used.map(entry => escapeHtml(String(entry.name || entry.id || ''))).join(t('、')),
-      })}</p>`
-    : ''
-  const services = proxyServiceLabels(item, t)
-  const serviceHtml = services.length
-    ? `<p style="margin-top:6px">${t('此代理用于{services}；删除后这些线路将不可用，不会自动回退直连。', { services: services.map(escapeHtml).join(t('、')) })}</p>`
-    : ''
-  const ok = await wb().wbConfirm?.ask?.({
-    title: t('删除代理'),
-    html: t('确定删除「<strong>{name}</strong>」？{used}', {
-      name: escapeHtml(itemName(item)),
-      used: usedHtml + serviceHtml,
-    }),
-    okText: t('删除'),
-    okClass: 'danger',
-  })
-  if (!ok) return
+  if (typeof bridge?.removeProxyPoolItem !== 'function') return false
   const pending = new Set(state.pending)
   pending.add(item.id)
   patch({ pending })
   try {
-    const data = await bridge.removeProxyPoolItem(item.id)
+    const data = await bridge.removeProxyPoolItem(item.id, options)
     accept(data)
-    toast(t('已删除「{name}」', { name: itemName(item) }))
+    if (data?.updateProxyReset && data.updateProxyResetSaved === false) {
+      toast(t('已删除「{name}」；更新出网线路已切回默认线路，但写入磁盘失败', { name: itemName(item) }), 'err')
+    } else if (data?.updateProxyReset) {
+      toast(t('已删除「{name}」，更新出网线路已恢复为默认线路', { name: itemName(item) }))
+    } else {
+      toast(t('已删除「{name}」', { name: itemName(item) }))
+    }
+    return true
   } catch (error) {
     toast(t('删除失败：{reason}', { reason: errorMessage(error) }), 'err')
+    return false
   } finally {
     const next = new Set(state.pending)
     next.delete(item.id)
@@ -388,51 +375,46 @@ export async function batchTest(): Promise<void> {
   if (saveError) toast(t('部分测试结果没能记下：{reason}', { reason: saveError }), 'err')
 }
 
-export async function batchRemove(): Promise<void> {
+export function prepareBatchRemove(): { deletable: ProxyPoolItem[]; skipped: number } | null {
   const bridge = wb().workbuddyDesktop
-  if (typeof bridge?.removeProxyPoolItem !== 'function') return
+  if (typeof bridge?.removeProxyPoolItem !== 'function') return null
   // 与批量测试互斥（一条在测时删它，测试结果回来会报「条目不存在」）；
   // 行内启停 / 单条测试同理 —— 视图侧按钮也按同一组条件禁用
-  if (state.batchBusy || state.testing) return
+  if (state.batchBusy || state.testing) return null
   const picked = items().filter(item => state.selected.has(item.id))
-  const deletable = picked.filter(item => item.source !== 'clash')
+  const deletable = picked.filter(canRemoveItem)
   const skipped = picked.length - deletable.length
   if (!deletable.length) {
-    if (skipped) toast(t('选中的 {n} 条都来自 EasyClash 同步，不能删除（请到 EasyClash 里删）', { n: skipped }), 'err')
-    return
+    if (skipped) toast(t('选中的 {n} 条正在与 EasyClash 同步，不能删除（请到 EasyClash 里删）', { n: skipped }), 'err')
+    return null
   }
-  const names = deletable.slice(0, 8).map(item => escapeHtml(itemName(item))).join(t('、'))
-  const namesText = deletable.length > 8
-    ? t('{names} 等 {n} 条', { names, n: deletable.length })
-    : names
-  const usedCount = deletable.filter(item => (item.usedBy || []).length).length
-  const usedHtml = usedCount
-    ? `<p style="margin-top:6px">${t('其中 <strong>{n}</strong> 条正被账号使用 —— 删除后需重新设置相关账号的代理，不会自动直连。', { n: usedCount })}</p>`
-    : ''
-  const services = [...new Set(deletable.flatMap(item => proxyServiceLabels(item, t)))]
-  const serviceHtml = services.length
-    ? `<p style="margin-top:6px">${t('选中的代理用于{services}；删除后这些线路将不可用，不会自动回退直连。', { services: services.map(escapeHtml).join(t('、')) })}</p>`
-    : ''
-  const skippedHtml = skipped
-    ? `<p style="margin-top:6px">${t('另有 {n} 条来自 EasyClash 同步，将跳过（请到 EasyClash 里删）。', { n: skipped })}</p>`
-    : ''
-  const ok = await wb().wbConfirm?.ask?.({
-    title: t('批量删除代理'),
-    html: `${t('确定删除选中的 <strong>{n}</strong> 个代理？', { n: deletable.length })}<p style="margin-top:6px">${namesText}</p>${usedHtml}${serviceHtml}${skippedHtml}`,
-    okText: t('删除'),
-    okClass: 'danger',
-  })
-  if (!ok) return
+  return { deletable, skipped }
+}
+
+export async function executeBatchRemove(
+  deletable: ProxyPoolItem[],
+  skipped: number,
+  options?: { resetUpdateProxy?: boolean },
+): Promise<void> {
+  const bridge = wb().workbuddyDesktop
+  if (typeof bridge?.removeProxyPoolItem !== 'function') return
+  if (state.batchBusy || state.testing || !deletable.length) return
   patch({ batchBusy: true, batchProgress: { done: 0, total: deletable.length } })
   let done = 0
   let failed = 0
   let firstError = ''
+  let updateProxyReset = false
+  let updateProxyResetSaveFailed = false
   for (const [index, item] of deletable.entries()) {
     patch({ batchProgress: { done: index, total: deletable.length } })
     try {
-      const data = await bridge.removeProxyPoolItem(item.id)
+      const data = await bridge.removeProxyPoolItem(item.id, options)
       accept(data)
       done += 1
+      if (data?.updateProxyReset) {
+        updateProxyReset = true
+        if (data.updateProxyResetSaved === false) updateProxyResetSaveFailed = true
+      }
     } catch (error) {
       failed += 1
       if (!firstError) firstError = errorMessage(error)
@@ -440,9 +422,13 @@ export async function batchRemove(): Promise<void> {
   }
   patch({ batchBusy: false, batchProgress: null })
   const parts = [t('已删除 {n} 个代理', { n: done })]
+  if (updateProxyReset) parts.push(t('更新出网线路已恢复为默认线路'))
   if (skipped) parts.push(t('跳过 {n} 个（EasyClash 同步）', { n: skipped }))
   if (failed) parts.push(t('失败 {n} 个（{reason}）', { n: failed, reason: firstError }))
   toast(failed ? parts.join(t('，')) : `✅ ${parts.join(t('，'))}`, failed ? 'err' : 'ok')
+  if (updateProxyResetSaveFailed) {
+    toast(t('更新出网线路已切回默认线路，但写入磁盘失败（重启后会恢复原线路）'), 'err')
+  }
 }
 
 /** 新建 / 编辑提交（表单已在弹窗里校验过形状） */

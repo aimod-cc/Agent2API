@@ -17,6 +17,7 @@ pub const KV_KEY: &str = "proxyPool";
 pub const RETIRED_HINT: &str = "代理订阅与内置代理内核功能已下线，请在「网络代理」页添加 HTTP / SOCKS5 地址或同步 EasyClash，并重新选择代理";
 
 const CLASH_READONLY_HINT: &str = "该代理来自 EasyClash 同步，请到 EasyClash 中修改名称或端口；本页可启停和测试";
+const CLASH_SYNCING_REMOVE_HINT: &str = "该代理正在与 EasyClash 同步，不能删除（请到 EasyClash 里删；也可在本页关闭启用）";
 
 const MAX_NAME_LENGTH: usize = 60;
 const MAX_LABEL_LENGTH: usize = 100;
@@ -244,7 +245,17 @@ fn resolve_entry(
     }
 }
 
-fn describe_item(item: &Value) -> Value {
+fn is_deletable_with(
+    item: &Value,
+    snapshot: &crate::server::core::clash::ClashSnapshot,
+) -> bool {
+    !is_clash(item) || !snapshot.contains_listener(&text_of(item, "listenerUid"))
+}
+
+fn describe_item_with(
+    item: &Value,
+    snapshot: &crate::server::core::clash::ClashSnapshot,
+) -> Value {
     let (resolved, resolve_error) = match resolve_item(item) {
         Some(ProxyResolution::Resolved(proxy)) => (
             json!({ "protocol": proxy.protocol, "host": proxy.host, "port": proxy.port_json(), "label": proxy.label }),
@@ -260,6 +271,7 @@ fn describe_item(item: &Value) -> Value {
         "enabled": is_enabled(item),
         "sourceEnabled": !matches!(item.get("enabled"), Some(Value::Bool(false))),
         "localDisabled": matches!(item.get("localDisabled"), Some(Value::Bool(true))),
+        "deletable": is_deletable_with(item, snapshot),
         "listenerUid": text_of(item, "listenerUid"),
         "protocol": text_of(item, "protocol"),
         "host": text_of(item, "host"),
@@ -276,7 +288,11 @@ fn describe_item(item: &Value) -> Value {
 }
 
 pub fn list() -> Vec<Value> {
-    raw_items().iter().map(describe_item).collect()
+    let snapshot = crate::server::core::clash::clash_snapshot();
+    raw_items()
+        .iter()
+        .map(|item| describe_item_with(item, &snapshot))
+        .collect()
 }
 
 fn find_raw(id: &str) -> Result<Value, String> {
@@ -369,10 +385,23 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<EnabledChange, String> {
     Ok(EnabledChange { name, enabled })
 }
 
+fn removable_index_with(
+    items: &[Value],
+    id: &str,
+    snapshot: &crate::server::core::clash::ClashSnapshot,
+) -> Result<usize, String> {
+    let index = supported_index(items, id)?;
+    if is_clash(&items[index]) && !is_deletable_with(&items[index], snapshot) {
+        return Err(CLASH_SYNCING_REMOVE_HINT.to_string());
+    }
+    Ok(index)
+}
+
 pub fn remove(id: &str) -> Result<String, String> {
+    let snapshot = crate::server::core::clash::clash_snapshot_with(true);
     let _guard = mutation_lock();
     let mut items = read_items();
-    let index = writable_index(&items, id)?;
+    let index = removable_index_with(&items, id, &snapshot)?;
     let removed = items.remove(index);
     write_items(&items)?;
     let name = text_of(&removed, "name");
@@ -476,4 +505,89 @@ pub fn record_test(id: &str, result: &TestOutcome) -> Result<(), String> {
     }));
     write_items(&items)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::core::clash::{ClashListener, ClashSnapshot, CLASH_MIXED_UID, CLASH_UNAVAILABLE};
+
+    fn clash_snapshot(available: bool, mixed_port: Option<u16>, listeners: Vec<ClashListener>) -> ClashSnapshot {
+        ClashSnapshot {
+            available,
+            dir: available.then(|| "/tmp/easyclash".to_string()),
+            mixed_port,
+            socks_port: None,
+            http_port: None,
+            listeners,
+            current_profile_uid: None,
+            error: (!available).then(|| CLASH_UNAVAILABLE.to_string()),
+        }
+    }
+
+    fn manual_item(id: &str) -> Value {
+        json!({
+            "id": id,
+            "name": "Manual",
+            "source": "manual",
+            "protocol": "http",
+            "host": "127.0.0.1",
+            "port": 7890,
+            "enabled": true,
+        })
+    }
+
+    fn clash_item(id: &str, uid: &str, enabled: bool) -> Value {
+        json!({
+            "id": id,
+            "name": format!("Clash-{uid}"),
+            "source": "clash",
+            "listenerUid": uid,
+            "enabled": enabled,
+        })
+    }
+
+    #[test]
+    fn removable_index_allows_detached_clash_and_blocks_live_sync() {
+        let items = vec![
+            manual_item("px_manual"),
+            clash_item("px_mixed", CLASH_MIXED_UID, true),
+            clash_item("px_node_off", "node-off", false),
+            clash_item("px_node_gone", "node-gone", true),
+        ];
+
+        let unavailable = clash_snapshot(false, None, Vec::new());
+        assert_eq!(removable_index_with(&items, "px_manual", &unavailable), Ok(0));
+        assert_eq!(removable_index_with(&items, "px_mixed", &unavailable), Ok(1));
+        assert_eq!(removable_index_with(&items, "px_node_off", &unavailable), Ok(2));
+        assert_eq!(describe_item_with(&items[1], &unavailable)["deletable"], json!(true));
+
+        let available_no_mixed = clash_snapshot(
+            true,
+            None,
+            vec![ClashListener {
+                uid: "node-off".to_string(),
+                name: "node-off".to_string(),
+                proxy: "node-off".to_string(),
+                port: 18001,
+                profile_uid: None,
+                enabled: false,
+            }],
+        );
+        assert_eq!(removable_index_with(&items, "px_mixed", &available_no_mixed), Ok(1));
+        assert_eq!(removable_index_with(&items, "px_node_gone", &available_no_mixed), Ok(3));
+        assert_eq!(
+            removable_index_with(&items, "px_node_off", &available_no_mixed),
+            Err(CLASH_SYNCING_REMOVE_HINT.to_string())
+        );
+        assert_eq!(describe_item_with(&items[1], &available_no_mixed)["deletable"], json!(true));
+        assert_eq!(describe_item_with(&items[2], &available_no_mixed)["deletable"], json!(false));
+
+        let available_with_mixed = clash_snapshot(true, Some(7890), Vec::new());
+        assert_eq!(
+            removable_index_with(&items, "px_mixed", &available_with_mixed),
+            Err(CLASH_SYNCING_REMOVE_HINT.to_string())
+        );
+        assert_eq!(describe_item_with(&items[1], &available_with_mixed)["deletable"], json!(false));
+    }
 }

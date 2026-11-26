@@ -22,16 +22,75 @@
 .log-empty { padding: 30px 16px; color: var(--text-3); font-size: 12.5px; text-align: center; }
 .log-list > .log-empty:last-child { margin: auto 0; }
 
-.event-log-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
+.event-log-bar {
+  padding: 8px 14px;
+  gap: 8px;
+}
+.event-log-search { min-width: 155px; }
+.event-log-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--hairline);
   flex: none;
 }
-.event-log-aggregate { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--text-2); font-size: 11.5px; }
-.event-log-overview { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; flex: none; color: var(--text-3); font-size: 11.5px; }
-.event-log-errors { color: var(--danger); }
+.event-log-stat-badge {
+  cursor: pointer;
+  transition: filter 120ms ease, box-shadow 150ms ease, opacity 150ms ease;
+}
+.event-log-stat-badge:hover { filter: brightness(1.06); }
+.event-log-stat-badge[data-active='true'] {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px currentColor;
+}
+.event-log-stat-badge[data-zero='true'] { opacity: .52; }
+.event-log-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-inset);
+  flex: none;
+}
+.event-log-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px 0 8px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+.event-log-chip > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  padding: 0 2px;
+  line-height: 1;
+}
+.event-log-chip > button:hover { color: var(--text); }
+.event-log-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+}
+.event-log-body > .event-log-list {
+  border: 0;
+  border-radius: 0;
+}
+.event-log-body > .event-log-note {
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-inset);
+}
+.event-log-body > .event-log-error { margin: 8px 14px 0; }
 .event-log-warnings { color: var(--warn); }
 .event-log-note { flex: none; color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
 .event-log-error {
@@ -63,6 +122,7 @@
   font-size: 11px;
 }
 .event-log-row { border-bottom: 1px solid var(--hairline); font-size: 12px; }
+.event-log-row.is-clickable { cursor: pointer; }
 .event-log-row:last-child { border-bottom: none; }
 .event-log-row:hover { background: var(--row-hover); }
 .event-log-time { display: flex; flex-direction: column; gap: 3px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -80,7 +140,7 @@
 .event-log-row.error { background: color-mix(in srgb, var(--danger-soft) 35%, transparent); }
 .event-log-row.warn:hover { background: var(--warn-soft); }
 .event-log-row.error:hover { background: var(--danger-soft); }
-.event-log-footer-note { color: var(--text-3); font-size: 11px; }
+.event-log-footer-note { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
 .event-log-detail-meta { color: var(--text-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 /* 视图那一行（事件详情 / 原始记录）改用组件库的 SegmentedControl 了，
    原先这里那条 `.event-log-detail-tabs { display:flex; gap:6px }` 随之删除 */
@@ -115,10 +175,9 @@
 @media (max-width: 1100px) {
   .event-log-head, .event-log-row { grid-template-columns: 128px 42px minmax(64px, 88px) minmax(0, 1fr) 38px 46px; gap: 8px; padding: 10px; }
 }
-@media (max-width: 900px) {
-  .page[data-page="logs"] .panel-head .head-actions { flex-basis: 100%; margin-left: 0; justify-content: flex-start; }
-}
 @media (max-width: 700px) {
+  .event-log-sep { display: none; }
+  .event-log-search { flex: 1 1 100%; }
   .event-log-head { display: none; }
   .event-log-row { grid-template-columns: 1fr auto auto auto; gap: 6px 10px; }
   .event-log-source { grid-column: 1; grid-row: 1; }
@@ -127,6 +186,5 @@
   .event-log-row > button { grid-column: 4; grid-row: 1; }
   .event-log-time { grid-column: 1 / -1; grid-row: 3; flex-direction: row; }
   .event-log-message { grid-column: 1 / -1; grid-row: 2; }
-  .event-log-aggregate { margin-left: 0; }
   .event-log-detail-grid { grid-template-columns: 1fr; }
 }

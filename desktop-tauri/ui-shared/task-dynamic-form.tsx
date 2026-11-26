@@ -417,12 +417,15 @@ export function TaskDynamicForm({
           if (!open) setConfirmAction(null)
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent overlayForceRender className='text-foreground'>
           <AlertDialogHeader>
             <AlertDialogTitle>{confirmAction?.label}</AlertDialogTitle>
-            <AlertDialogDescription>{confirmAction?.confirm}</AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogBody />
+          <AlertDialogBody>
+            <AlertDialogDescription className='m-0 text-[13px] leading-relaxed text-foreground'>
+              {confirmAction?.confirm}
+            </AlertDialogDescription>
+          </AlertDialogBody>
           <AlertDialogFooter>
             <Button variant='outline' onClick={() => setConfirmAction(null)}>
               {t('取消')}

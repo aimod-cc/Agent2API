@@ -7,7 +7,7 @@ import { t } from '../ui-kit/src/i18n'
 import { MaintenanceDetailDialog } from './maintenance-details'
 import { RunCounts, RunStatus, RowChevron } from './maintenance-shared'
 import { duration, maintenanceLabel, sourceLabel, stamp } from './maintenance-format'
-import type { MaintenanceDetail, MaintenanceQuery, MaintenanceRun, MaintenanceTaskId } from './maintenance-types'
+import type { MaintenanceDetail, MaintenanceQuery, MaintenanceRun } from './maintenance-types'
 
 /**
  * 执行记录：工具条 + 可滚动表格 + 底栏翻页 + 逐项明细弹窗。
@@ -38,28 +38,18 @@ export function MaintenanceRecords({ compact, loading, busy, runs, total, page, 
   onRetry(runId: string, itemId?: string): void
   onAccount?(accountId: string): void
 }) {
-  const taskOptions: Array<{ value: MaintenanceTaskId | ''; label: string }> = [
-    { value: '', label: t('全部类型') },
-    { value: 'credentialMaintenance', label: t('凭证维护') },
-    { value: 'modelRefresh', label: t('模型目录更新') },
-    { value: 'updateCheck', label: t('软件检查更新') },
-    { value: 'pluginCatalogCheck', label: t('社区插件检查') },
-    { value: 'magpiePluginCheck', label: t('Magpie 插件检查') },
-  ]
   const resultOptions = [{ value: '', label: t('全部结果') }, { value: 'failed', label: t('有失败项') }, { value: 'success', label: t('无失败项') }]
   const sourceOptions = [{ value: '', label: t('全部触发方式') }, { value: 'automatic', label: t('自动触发') }, { value: 'manual', label: t('手动触发') }]
   const filtered = Boolean(query.taskId || query.source || query.status || query.keyword)
 
   return <Card className='maintenance-records'>
     <div className='maintenance-toolbar'>
-      <span className='maintenance-toolbar-title'>{t('执行记录')}</span>
-      <span className='maintenance-toolbar-sub'>{t('自动和手动维护，统一在这里查看')}</span>
-      <Select value={query.taskId} onValueChange={value => onQuery({ taskId: (value ?? '') as MaintenanceTaskId | '' })}>
-        <SelectTrigger aria-label={t('维护类型')} className='min-w-[144px]'>
-          <SelectValue>{taskOptions.find(option => option.value === query.taskId)?.label}</SelectValue>
-        </SelectTrigger>
-        <SelectContent>{taskOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-      </Select>
+      <span className='maintenance-toolbar-title'>
+        {t('执行记录')}
+        <span className='maintenance-toolbar-scope'>
+          · {query.taskId ? maintenanceLabel(query.taskId) : t('全部维护项')}
+        </span>
+      </span>
       <Select value={query.status} onValueChange={value => onQuery({ status: (value ?? '') as MaintenanceQuery['status'] })}>
         <SelectTrigger aria-label={t('执行结果')} className='min-w-[124px]'>
           <SelectValue>{resultOptions.find(option => option.value === query.status)?.label}</SelectValue>

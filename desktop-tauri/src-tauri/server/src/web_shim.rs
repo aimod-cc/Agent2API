@@ -2084,7 +2084,11 @@ pub fn shim_js() -> &'static str {
     createProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool', payload || {}); },
     updateProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool/update', payload || {}); },
     setProxyPoolItemEnabled: function (payload) { return call('POST', '/api/proxies/pool/enable', payload || {}); },
-    removeProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/remove', { id: String(id || '') }); },
+    removeProxyPoolItem: function (id, options) {
+      var body = { id: String(id || '') };
+      if (options && options.resetUpdateProxy === true) body.resetUpdateProxy = true;
+      return call('POST', '/api/proxies/pool/remove', body);
+    },
     testProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/test', { id: String(id || '') }); },
     syncClashToProxyPool: function () { return call('POST', '/api/proxies/pool/sync-clash', {}); },
     // 代理设置（「网络代理」页的设置弹窗；与桌面壳 bridge.rs 的同名方法

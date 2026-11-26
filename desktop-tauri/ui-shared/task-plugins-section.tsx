@@ -592,14 +592,15 @@ export function TaskPluginsSection({
 
       {/* 卸载确认 */}
       <AlertDialog open={Boolean(removeTarget)} onOpenChange={open => { if (!open) setRemoveTarget(null) }}>
-        <AlertDialogContent>
+        <AlertDialogContent overlayForceRender className='text-foreground'>
           <AlertDialogHeader>
             <AlertDialogTitle>{t('卸载定时任务插件')}</AlertDialogTitle>
-            <AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogBody>
+            <AlertDialogDescription className='m-0 text-[13px] leading-relaxed text-foreground'>
               {t('确认卸载「{name}」吗？名下定时任务将暂停，填写的配置与历史记录会保留，重装后恢复。', { name: removeTarget?.name || '' })}
             </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogBody />
+          </AlertDialogBody>
           <AlertDialogFooter>
             <Button variant='outline' onClick={() => setRemoveTarget(null)}>{t('取消')}</Button>
             <Button variant='destructive' onClick={() => { if (removeTarget) void uninstall(removeTarget) }}>

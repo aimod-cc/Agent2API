@@ -456,7 +456,7 @@ export function buildProxyPick(selection: ProxySelection): {
     items.push({
       value: `${POOL_VALUE_PREFIX}${item.id}`,
       label: poolItemLabel(item),
-      disabled: item.enabled === false,
+      disabled: item.enabled === false || Boolean(item.resolveError),
     })
   }
   if (selection.pool === null) {

@@ -362,6 +362,7 @@ pub async fn update_local_direct(
     if updated.0 {
         crate::server::core::local_direct::trigger_background_sync(
             state.request_stats(),
+            Some(state.store().clone()),
             false,
             None,
         );
@@ -398,6 +399,7 @@ pub async fn sync_local_direct(
 
     match crate::server::core::local_direct::sync_now(
         state.request_stats(),
+        Some(state.store().clone()),
         force_rescan,
         agent_id,
     )

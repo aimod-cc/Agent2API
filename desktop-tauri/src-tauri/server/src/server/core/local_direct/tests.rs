@@ -1,10 +1,18 @@
+use std::collections::HashMap;
+
+use base64::Engine;
 use rusqlite::Connection;
 use serde_json::json;
 
+use crate::server::core::account_store::{AccountStore, ANTIGRAVITY_PROVIDER_ID};
 use crate::server::db::Db;
 use crate::server::request_stats::{NewRequestEntry, RequestQuery, RequestSource, RequestStats, Retention};
 
-use super::antigravity::{scan_discovered_roots, DiscoveredRoot};
+use super::antigravity::{discover_roots, scan_discovered_roots, scan_discovered_roots_with_accounts, DiscoveredRoot};
+use super::antigravity_account::{
+    detect_root_email, read_email_from_oauth_token_file, read_email_from_vscdb,
+    resolve_account_identity, RECENT_ACCOUNT_WINDOW_MS,
+};
 use super::preview::build_live_preview;
 use super::protobuf::{encode_field_bytes, encode_field_varint, strip_gemini_deployment_suffix};
 
@@ -184,6 +192,7 @@ fn desktop_db_scan_collapses_response_id_dedups_gateway_and_previews_without_raw
     assert_eq!(page["total"], 2);
     assert_eq!(page["matched"], 1);
     let entry = &page["entries"][0];
+    assert_eq!(entry["provider"], "antigravity");
     assert_eq!(entry["model"], "gemini-3.8-flash");
     assert_eq!(entry["promptTokens"], 310); // 100 uncached + 200 cache_read + 10 cache_write
     assert_eq!(entry["completionTokens"], 80); // max collapsed output across resp-1 steps
@@ -268,4 +277,206 @@ fn agy_cli_transcript_fallback_extracts_tokens_when_db_lacks_usage() {
     assert_eq!(item.entry.cache_read_tokens, 80);
     assert_eq!(item.entry.completion_tokens, 60);
     assert_eq!(item.entry.total_tokens, 560);
+}
+
+#[test]
+fn extracts_email_from_oauth_token_jwt_and_vscdb_sources() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // 1. antigravity-oauth-token JWT id_token
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(br#"{"sub":"123","email":"cli.user@example.com"}"#);
+    let jwt = format!("eyJhbGciOiJSUzI1NiJ9.{claims}.sig");
+    let tok_path = dir.path().join("antigravity-oauth-token");
+    std::fs::write(
+        &tok_path,
+        json!({ "token": "ignored-secret", "id_token": jwt }).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        read_email_from_oauth_token_file(&tok_path).as_deref(),
+        Some("cli.user@example.com")
+    );
+
+    // 2. state.vscdb with nested base64 protobuf userStatus
+    let mut inner_pb = Vec::new();
+    encode_field_bytes(3, b"desktop.user@example.com", &mut inner_pb);
+    encode_field_bytes(7, b"desktop.user@example.com", &mut inner_pb);
+    let inner_b64 = base64::engine::general_purpose::STANDARD.encode(&inner_pb);
+
+    let mut f2_msg = Vec::new();
+    encode_field_bytes(1, inner_b64.as_bytes(), &mut f2_msg);
+
+    let mut f1_msg = Vec::new();
+    encode_field_bytes(1, b"userStatusSentinelKey", &mut f1_msg);
+    encode_field_bytes(2, &f2_msg, &mut f1_msg);
+
+    let mut outer_pb = Vec::new();
+    encode_field_bytes(1, &f1_msg, &mut outer_pb);
+    let outer_b64 = base64::engine::general_purpose::STANDARD.encode(&outer_pb);
+
+    let vscdb_status = dir.path().join("status.vscdb");
+    let conn = Connection::open(&vscdb_status).unwrap();
+    conn.execute_batch("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["antigravityUnifiedStateSync.userStatus", outer_b64],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        read_email_from_vscdb(&vscdb_status).as_deref(),
+        Some("desktop.user@example.com")
+    );
+
+    // 3. state.vscdb fallback to antigravityAuthStatus JSON and lastLoginUsername
+    let vscdb_auth = dir.path().join("auth.vscdb");
+    let conn = Connection::open(&vscdb_auth).unwrap();
+    conn.execute_batch("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["antigravityAuthStatus", r#"{"email":"legacy@example.com"}"#],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        read_email_from_vscdb(&vscdb_auth).as_deref(),
+        Some("legacy@example.com")
+    );
+
+    let vscdb_user = dir.path().join("lastlogin.vscdb");
+    let conn = Connection::open(&vscdb_user).unwrap();
+    conn.execute_batch("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["agy.onboarding.lastLoginUsername", "\"quoted@example.com\""],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        read_email_from_vscdb(&vscdb_user).as_deref(),
+        Some("quoted@example.com")
+    );
+}
+
+#[test]
+fn resolves_recent_account_with_alias_and_falls_back_for_old_steps() {
+    let mut names = HashMap::new();
+    names.insert("user@example.com".to_string(), "主力谷歌号".to_string());
+    let now = 1_800_000_000_000i64;
+
+    // 近期请求使用邮箱 + 备注名映射
+    let (id_recent, name_recent) = resolve_account_identity(
+        "desktop",
+        Some("User@Example.com"),
+        &names,
+        now - 60_000,
+        now,
+    );
+    assert_eq!(id_recent, "local-direct:antigravity:user@example.com");
+    assert_eq!(name_recent, "主力谷歌号");
+
+    // 无备注映射时直接用邮箱
+    let (id_plain, name_plain) = resolve_account_identity(
+        "cli",
+        Some("other@example.com"),
+        &names,
+        now - 60_000,
+        now,
+    );
+    assert_eq!(id_plain, "local-direct:antigravity:other@example.com");
+    assert_eq!(name_plain, "other@example.com");
+
+    // 超过近期窗口的旧历史不套用当前登录账号，回 fallback
+    let (id_old, name_old) = resolve_account_identity(
+        "desktop",
+        Some("user@example.com"),
+        &names,
+        now - RECENT_ACCOUNT_WINDOW_MS - 1_000,
+        now,
+    );
+    assert_eq!(id_old, "local-direct:antigravity:desktop");
+    assert_eq!(name_old, "桌面版");
+
+    // 验证 AccountStore::antigravity_email_names + scan_discovered_roots_with_accounts 端到端串联
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("agent2api.db")).unwrap();
+    let account_json = json!({
+        "id": "ag-test-1",
+        "provider": ANTIGRAVITY_PROVIDER_ID,
+        "name": "测试Antigravity备注",
+        "priority": 1,
+        "enabled": true,
+        "addedAt": 0,
+        "pluginPublic": {
+            "email": "cli.alias@example.com"
+        },
+        "refreshToken": "1//dummy-refresh"
+    })
+    .to_string();
+    db.with_mut(|conn| {
+        conn.execute(
+            "INSERT INTO accounts(id, provider, priority, enabled, added_at, data) \
+             VALUES ('ag-test-1', ?1, 1, 1, 0, ?2)",
+            rusqlite::params![ANTIGRAVITY_PROVIDER_ID, account_json],
+        )
+    })
+    .unwrap()
+    .unwrap();
+    let store = AccountStore::with_db(Some(db));
+
+    let cli_root = dir.path().join("antigravity-cli");
+    std::fs::create_dir_all(cli_root.join("conversations")).unwrap();
+    let logs_dir = cli_root.join("brain").join("cli-acc").join(".system_generated").join("logs");
+    std::fs::create_dir_all(&logs_dir).unwrap();
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(br#"{"email":"cli.alias@example.com"}"#);
+    std::fs::write(
+        cli_root.join("antigravity-oauth-token"),
+        json!({ "id_token": format!("h.{claims}.s") }).to_string(),
+    )
+    .unwrap();
+    let recent_iso = chrono::Utc::now().to_rfc3339();
+    std::fs::write(
+        logs_dir.join("transcript_full.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "step_index": 1,
+                "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+                "created_at": recent_iso,
+                "model": "gemini-4-neon",
+                "input_tokens": 100,
+                "output_tokens": 50
+            })
+        ),
+    )
+    .unwrap();
+
+    let roots = vec![DiscoveredRoot {
+        path: cli_root.to_string_lossy().to_string(),
+        kind: "cli".to_string(),
+        kind_label: "Antigravity CLI (agy)".to_string(),
+        custom: true,
+        exists: true,
+    }];
+    let account_names = store.antigravity_email_names();
+    let batch = scan_discovered_roots_with_accounts(roots, &Default::default(), false, &account_names);
+    assert_eq!(batch.items.len(), 1);
+    assert_eq!(batch.items[0].entry.provider.as_deref(), Some("antigravity"));
+    assert_eq!(batch.items[0].entry.account_id, "local-direct:antigravity:cli.alias@example.com");
+    assert_eq!(batch.items[0].entry.account_name, "测试Antigravity备注");
+}
+
+#[test]
+fn detect_local_antigravity_accounts_smoke() {
+    let roots = discover_roots(&[]);
+    for root in roots.into_iter().filter(|r| matches!(r.kind.as_str(), "desktop" | "cli")) {
+        if let Some(email) = detect_root_email(&root) {
+            assert!(email.contains('@'), "root {} email should look valid", root.kind);
+        }
+    }
 }

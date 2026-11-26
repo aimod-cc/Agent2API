@@ -10,6 +10,7 @@ use crate::server::request_stats::{
     RequestSource,
 };
 
+use super::antigravity_account::{detect_root_email, resolve_account_identity};
 use super::protobuf::{
     decode_workspace_uri, parse_gen_metadata, parse_step_metadata, strip_gemini_deployment_suffix,
 };
@@ -267,6 +268,8 @@ fn build_ingest_item(
     summary: Option<&ConversationSummaryMeta>,
     db_path: Option<&Path>,
     transcript_path: Option<&Path>,
+    detected_email: Option<&str>,
+    account_names: &HashMap<String, String>,
     step: ExtractedStep,
 ) -> LocalDirectIngestItem {
     let now = crate::server::logging::now_ms();
@@ -308,15 +311,17 @@ fn build_ingest_item(
         format!("antigravity:{}:{}:s:{}", root.kind, conv_id, step.step_index)
     };
     let request_id = stable_request_id(&source_key);
+    let (account_id, account_name) =
+        resolve_account_identity(&root.kind, detected_email, account_names, ts, now);
 
     let mut entry = NewRequestEntry::new(model.clone(), 200);
     entry.id = request_id.clone();
     entry.ts = Some(ts);
     entry.duration_ms = duration_ms;
     entry.first_response_ms = first_response_ms;
-    entry.provider = Some("local-direct".to_string());
-    entry.account_id = "local-direct".to_string();
-    entry.account_name = "本机直连".to_string();
+    entry.provider = Some("antigravity".to_string());
+    entry.account_id = account_id;
+    entry.account_name = account_name;
     entry.client_model = client_model;
     entry.upstream_model = model;
     entry.prompt_tokens = prompt_tokens;
@@ -363,6 +368,8 @@ fn scan_conversation_db(
     conv_id: &str,
     summary: Option<&ConversationSummaryMeta>,
     transcript_path: Option<&Path>,
+    detected_email: Option<&str>,
+    account_names: &HashMap<String, String>,
     prev_state: Option<&LocalDirectFileState>,
     force_rescan: bool,
 ) -> (Vec<LocalDirectIngestItem>, Option<LocalDirectFileState>, bool) {
@@ -523,6 +530,8 @@ fn scan_conversation_db(
             summary,
             Some(db_path),
             transcript_path,
+            detected_email,
+            account_names,
             step,
         ));
     }
@@ -555,6 +564,8 @@ fn scan_transcript_fallback(
     summary: Option<&ConversationSummaryMeta>,
     db_path: Option<&Path>,
     transcript_path: &Path,
+    detected_email: Option<&str>,
+    account_names: &HashMap<String, String>,
     prev_state: Option<&LocalDirectFileState>,
     force_rescan: bool,
 ) -> (Vec<LocalDirectIngestItem>, Option<LocalDirectFileState>) {
@@ -662,6 +673,8 @@ fn scan_transcript_fallback(
             summary,
             db_path,
             Some(transcript_path),
+            detected_email,
+            account_names,
             ExtractedStep {
                 step_index,
                 model_raw,
@@ -689,11 +702,22 @@ fn scan_transcript_fallback(
     (items, Some(state))
 }
 
-/// 扫描指定发现根目录集合中的增量请求与文件水位。
+/// 扫描指定发现根目录集合中的增量请求与文件水位（不带账号备注映射的快捷入口，供测试复用）。
 pub fn scan_discovered_roots(
     roots: Vec<DiscoveredRoot>,
     file_states: &HashMap<String, LocalDirectFileState>,
     force_rescan: bool,
+) -> ScanBatch {
+    let empty_names = HashMap::new();
+    scan_discovered_roots_with_accounts(roots, file_states, force_rescan, &empty_names)
+}
+
+/// 扫描指定发现根目录集合中的增量请求与文件水位，并结合本机账号与面板备注映射补全具体账号。
+pub fn scan_discovered_roots_with_accounts(
+    roots: Vec<DiscoveredRoot>,
+    file_states: &HashMap<String, LocalDirectFileState>,
+    force_rescan: bool,
+    account_names: &HashMap<String, String>,
 ) -> ScanBatch {
     // 确保 Antigravity 客户端名已在内建目录注册（无副作用引用）。
     let _ = catalog::CLIENTS;
@@ -705,6 +729,7 @@ pub fn scan_discovered_roots(
     for root in roots.into_iter().filter(|r| r.exists) {
         let root_path = Path::new(&root.path);
         let summaries = load_conversation_summaries(root_path);
+        let detected_email = detect_root_email(&root);
         let mut handled_convs = HashSet::new();
 
         let conv_dir = root_path.join("conversations");
@@ -728,6 +753,8 @@ pub fn scan_discovered_roots(
                     &conv_id,
                     summary,
                     transcript.as_deref(),
+                    detected_email.as_deref(),
+                    account_names,
                     prev,
                     force_rescan,
                 );
@@ -746,6 +773,8 @@ pub fn scan_discovered_roots(
                             summary,
                             Some(&path),
                             tp,
+                            detected_email.as_deref(),
+                            account_names,
                             tp_prev,
                             force_rescan,
                         );
@@ -783,6 +812,8 @@ pub fn scan_discovered_roots(
                     summary,
                     None,
                     &tp,
+                    detected_email.as_deref(),
+                    account_names,
                     tp_prev,
                     force_rescan,
                 );
@@ -802,7 +833,8 @@ pub fn scan_all(
     custom_paths: &[String],
     file_states: &HashMap<String, LocalDirectFileState>,
     force_rescan: bool,
+    account_names: &HashMap<String, String>,
 ) -> ScanBatch {
     let roots = discover_roots(custom_paths);
-    scan_discovered_roots(roots, file_states, force_rescan)
+    scan_discovered_roots_with_accounts(roots, file_states, force_rescan, account_names)
 }

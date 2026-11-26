@@ -36,6 +36,21 @@ export const statusTone = (status: MaintenanceRunStatus): 'success' | 'warning' 
   status === 'completed' ? 'success' : status === 'partial' || status === 'interrupted' ? 'warning' : status === 'failed' ? 'destructive' : 'outline'
 export const resultLabel = (status: MaintenanceItem['status']): string => status === 'refreshed' ? t('成功') : status === 'failed' ? t('失败') : t('跳过')
 export const stamp = (value: number | null | undefined): string => value ? new Date(value).toLocaleString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined) : '—'
+export function shortStamp(value: number | null | undefined): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const hhmm = `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  if (
+    date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate()
+  ) {
+    return hhmm
+  }
+  return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${hhmm}`
+}
 export const duration = (value: number | null | undefined): string => value == null ? '—' : t('{n} 秒', { n: Number((value / 1000).toFixed(1)) })
 export const hasFailures = (run: MaintenanceRun): boolean => run.failed > 0 || run.metadata?.status === 'failed'
 

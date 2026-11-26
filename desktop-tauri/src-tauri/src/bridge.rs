@@ -480,7 +480,10 @@ const BRIDGE_JS: &str = r#"
     createProxyPoolItem: payload => call('POST', '/api/proxies/pool', payload || {}),
     updateProxyPoolItem: payload => call('POST', '/api/proxies/pool/update', payload || {}),
     setProxyPoolItemEnabled: payload => call('POST', '/api/proxies/pool/enable', payload || {}),
-    removeProxyPoolItem: id => call('POST', '/api/proxies/pool/remove', { id: String(id || '') }),
+    removeProxyPoolItem: (id, options) => call('POST', '/api/proxies/pool/remove', {
+      id: String(id || ''),
+      ...(options && options.resetUpdateProxy === true ? { resetUpdateProxy: true } : {}),
+    }),
     testProxyPoolItem: id => call('POST', '/api/proxies/pool/test', { id: String(id || '') }),
     syncClashToProxyPool: () => call('POST', '/api/proxies/pool/sync-clash', {}),
     // ── 代理设置（「网络代理」页的设置弹窗：测试目标网址）──

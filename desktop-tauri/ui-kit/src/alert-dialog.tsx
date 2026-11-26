@@ -108,14 +108,15 @@ function AlertDialogContent({
   )
 }
 
-/** 标题栏：与 DialogHeader 同款（左侧标题、底部发丝线、右侧留白给关闭钮） */
+/** 标题栏：纵向排布（主标题 + 可选副标题，底部发丝线；常规确认正文推荐放进 AlertDialogBody） */
 function AlertDialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
       data-slot='alert-dialog-header'
       className={cn(
-        'flex items-center gap-2.5 border-b border-hairline px-5 py-[15px]',
-        '[&_h2]:flex-1 [&_h2]:text-[14.5px] [&_h2]:font-semibold',
+        'flex flex-col gap-1 border-b border-hairline px-5 py-[15px]',
+        '[&_h2]:m-0 [&_h2]:text-[14.5px] [&_h2]:font-semibold',
+        '[&_p]:m-0 [&_p]:text-xs [&_p]:leading-relaxed [&_p]:text-muted-foreground',
         className
       )}
       {...props}

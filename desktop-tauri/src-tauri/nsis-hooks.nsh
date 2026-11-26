@@ -23,3 +23,36 @@
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "workbuddy-proxy-desktop.exe" "${PRODUCTNAME}"
 !macroend
+
+; ── 清理旧版残留（安装/升级与卸载阶段）────────────────────────
+; 桌面端采用 perMachine 安装模式，程序位于受保护的 Program Files：
+; 普通权限运行应用时无法删除旧版残留，放到安装/卸载钩子中借助管理员
+; 权限一次性清理。
+;
+; 注意：绝对不能对 $INSTDIR\_up_ 或 $INSTDIR\resources 使用 RMDir /r！
+; 当前版本的开源协议（LICENSE / licenses）就打包在 $INSTDIR\_up_\_up_ 下，
+; 仅允许精确删除废弃的子目录 _up_\ui 与旧运行环境文件，父目录只在空时移除。
+;
+; 过渡期结束后（旧版 1.x / 早期 2.x 用户基本完成覆盖升级）可撤掉此段。
+!macro CleanupLegacyInstallArtifacts
+  ${If} $INSTDIR != ""
+    RMDir /r "$INSTDIR\_up_\ui"
+    RMDir "$INSTDIR\_up_"
+    Delete "$INSTDIR\resources\node.exe"
+    Delete "$INSTDIR\resources\server.cjs"
+    RMDir "$INSTDIR\resources"
+    ClearErrors
+  ${EndIf}
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  !insertmacro CleanupLegacyInstallArtifacts
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  !insertmacro CleanupLegacyInstallArtifacts
+  ${If} $INSTDIR != ""
+    RMDir "$INSTDIR"
+    ClearErrors
+  ${EndIf}
+!macroend

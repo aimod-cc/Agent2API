@@ -788,7 +788,7 @@ impl ServerState {
         core::usage_query::spawn_sweeper(state.store.clone());
 
         // 本机直连 Agent 采集器（Antigravity 等不走网关的本地请求）：后台增量采集与去重合并。
-        core::local_direct::spawn(state.request_stats());
+        core::local_direct::spawn(state.request_stats(), Some(state.store.clone()));
 
         // ── 提供商插件（用户安装的包）─────────────────────────────
         // 后台启动：握手要 spawn 子进程，可能要等几秒。这里不 await ——

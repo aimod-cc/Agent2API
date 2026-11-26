@@ -52,16 +52,20 @@ export function ItemStatus({ status }: { status: MaintenanceResultStatus }) {
 /**
  * 本次成果：成功 / 跳过 / 失败。
  * 执行中与执行中断没有逐项结果，给一个破折号（原因在状态列与明细里），不再重复状态文字。
+ * compact 模式下若无失败项则省略「失败 0」，一旦有失败始终标红显示。
  */
-export function RunCounts({ run }: { run: MaintenanceRun }) {
+export function RunCounts({ run, compact = false }: { run: MaintenanceRun; compact?: boolean }) {
   if (run.status === 'running' || run.status === 'interrupted') {
     return <span className='maintenance-counts' title={run.status === 'running' ? t('维护正在执行，完成后会显示逐项结果') : t('该次执行未完成，没有完整明细')}>—</span>
   }
+  const showFailed = !compact || run.failed > 0
   return <div className='maintenance-counts'>
     <span>{t('成功')} <b>{run.refreshed}</b></span>
     <span className='maintenance-counts-sep'>·</span>
     <span>{t('跳过')} <b>{run.skipped}</b></span>
-    <span className='maintenance-counts-sep'>·</span>
-    <span className={run.failed ? 'maintenance-counts-bad' : undefined}>{t('失败')} <b>{run.failed}</b></span>
+    {showFailed ? <>
+      <span className='maintenance-counts-sep'>·</span>
+      <span className={run.failed ? 'maintenance-counts-bad' : undefined}>{t('失败')} <b>{run.failed}</b></span>
+    </> : null}
   </div>
 }

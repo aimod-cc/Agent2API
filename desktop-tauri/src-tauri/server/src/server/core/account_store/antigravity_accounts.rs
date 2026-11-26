@@ -16,6 +16,8 @@
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
 
+use std::collections::HashMap;
+
 use serde_json::{json, Map, Value};
 
 use super::state::StoredAccount;
@@ -97,5 +99,31 @@ impl AccountStore {
             Value::Bool(!refresh_token.trim().is_empty()),
         );
         Value::Object(public)
+    }
+
+    /// 返回 `小写邮箱 -> 账号展示名` 映射，供本机直连采集将识别到的邮箱对齐用户在面板里起的备注名。
+    pub fn antigravity_email_names(&self) -> HashMap<String, String> {
+        let guard = self.guard();
+        let mut records = self.records_for_provider(&guard, ANTIGRAVITY_PROVIDER_ID);
+        records.sort_by_key(StoredAccount::order_key);
+        let mut map = HashMap::new();
+        for record in records {
+            let Some(email) = record
+                .identity_field("email")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let display_name = record.name();
+            let name = display_name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            map.entry(email.to_ascii_lowercase())
+                .or_insert_with(|| name.to_string());
+        }
+        map
     }
 }

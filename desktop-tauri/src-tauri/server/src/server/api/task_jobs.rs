@@ -32,14 +32,18 @@ pub async fn list() -> Response {
             }
             let proxies: Vec<Value> = proxy_pool::list()
                 .into_iter()
-                .filter(|item| item.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+                .filter(|item| {
+                    item.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+                        && item.get("resolveError").is_none_or(Value::is_null)
+                })
                 .map(|item| {
+                    let resolved = item.get("resolved").filter(|value| value.is_object());
                     json!({
                         "id": item["id"],
                         "name": item["name"],
-                        "protocol": item["protocol"],
-                        "host": item["host"],
-                        "port": item["port"],
+                        "protocol": resolved.and_then(|value| value.get("protocol")).unwrap_or(&item["protocol"]),
+                        "host": resolved.and_then(|value| value.get("host")).unwrap_or(&item["host"]),
+                        "port": resolved.and_then(|value| value.get("port")).unwrap_or(&item["port"]),
                     })
                 })
                 .collect();

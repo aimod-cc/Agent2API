@@ -87,18 +87,13 @@ fn text_of(value: &Value, key: &str) -> String {
     value.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
-/// 轮询候选的条目 id（按配置取，见模块头）。
-///
-/// `all: true` → 池里**全部启用**条目（禁用项不参与：它在池里就是「先别用它」
-/// 的意思，而轮询是逐请求选路，没有「这次先跳过」的余地 —— 硬选中它只会每次
-/// 都解析失败再顺延，多绕一圈）。顺序即池的存储顺序（新加的在前）。
-pub fn candidate_ids(config: &Value) -> Vec<String> {
+fn candidate_ids_from(config: &Value, items: &[Value]) -> Vec<String> {
     if !is_all(config) {
         return configured_ids(config);
     }
-    crate::server::core::proxy_pool::raw_items()
+    items
         .iter()
-        .filter(|item| is_enabled(item))
+        .filter(|item| is_enabled(item) && entry_ready(item).is_ok())
         .filter_map(|item| {
             let id = text_of(item, "id");
             if id.is_empty() { None } else { Some(id) }
@@ -106,9 +101,22 @@ pub fn candidate_ids(config: &Value) -> Vec<String> {
         .collect()
 }
 
+/// 轮询候选的条目 id（按配置取，见模块头）。
+///
+/// `all: true` → 池里**全部启用且就绪**条目（禁用或失联未就绪的条目不参与：
+/// 失联的 EasyClash 代理没有可用端口，硬选中只会每次都解析失败再顺延，
+/// 且会在代理页被误标成被全部轮询账号引用）。顺序即池的存储顺序（新加的在前）。
+pub fn candidate_ids(config: &Value) -> Vec<String> {
+    if !is_all(config) {
+        return configured_ids(config);
+    }
+    let items = crate::server::core::proxy_pool::raw_items();
+    candidate_ids_from(config, &items)
+}
+
 /// 条目的**廉价**可用性（不发网络）：用于展示摘要里的
-/// 「可用 N 条」。真正的取用判定在解析那一步（`proxy_pool::resolve_reference`）。
-fn entry_ready(item: &Value) -> Result<(), String> {
+/// 「可用 N 条」与全部轮询候选过滤。真正的取用判定在解析那一步（`proxy_pool::resolve_reference`）。
+pub(crate) fn entry_ready(item: &Value) -> Result<(), String> {
     if item.get("source").and_then(Value::as_str) == Some("clash") {
         return match crate::server::core::proxy_pool::resolve_item(item) {
             Some(crate::server::core::proxies::ProxyResolution::Resolved(_)) => Ok(()),
@@ -156,19 +164,51 @@ fn pick_at(ids: &[String], start: usize, all: bool) -> Result<ResolvedProxy, Str
     ))
 }
 
+fn empty_all_error(items: &[Value]) -> String {
+    let mut has_enabled = false;
+    let mut first_reason: Option<String> = None;
+    for item in items.iter().filter(|item| is_enabled(item)) {
+        has_enabled = true;
+        if first_reason.is_none() {
+            if let Err(reason) = entry_ready(item) {
+                first_reason = Some(reason);
+            }
+        }
+    }
+    if !has_enabled {
+        return "轮询没有可用出口：「网络代理」页还没有启用的代理".to_string();
+    }
+    match first_reason {
+        Some(reason) => format!("轮询没有可用出口：已启用的代理当前均不可用（{reason}）"),
+        None => "轮询没有可用出口：已启用的代理当前均不可用（请检查「网络代理」页）".to_string(),
+    }
+}
+
+fn resolve_rotate(config: &Value, key: Option<&str>) -> Result<ResolvedProxy, String> {
+    let all = is_all(config);
+    let ids = if all {
+        let items = crate::server::core::proxy_pool::raw_items();
+        let ids = candidate_ids_from(config, &items);
+        if ids.is_empty() {
+            return Err(empty_all_error(&items));
+        }
+        ids
+    } else {
+        configured_ids(config)
+    };
+    let start = match key {
+        Some(k) if !ids.is_empty() && !k.is_empty() => take_cursor(k, ids.len()),
+        _ => 0,
+    };
+    pick_at(&ids, start, all)
+}
+
 /// 轮询取下一个出口（游标按 `key` 前进；`key` = 账号 id）。
 ///
 /// `key` 为空串时退化为「第一条可用」：没有可归属的账号身份就谈不上轮询进度，
 /// 此时确定性优先（同一个调用方每次拿到同一条，便于复现与排障）。
 pub fn next(config: &Value, key: &str) -> Result<ResolvedProxy, String> {
-    let ids = candidate_ids(config);
-    // 空候选时不必取号（`take_cursor` 要求 len 非 0）——直接由 pick_at 报空
-    let start = if ids.is_empty() || key.is_empty() {
-        0
-    } else {
-        take_cursor(key, ids.len())
-    };
-    pick_at(&ids, start, is_all(config))
+    resolve_rotate(config, Some(key))
 }
 
 /// 不前进游标的静态解析：给**展示**与**非转发**链路用（描述账号代理、
@@ -177,8 +217,7 @@ pub fn next(config: &Value, key: &str) -> Result<ResolvedProxy, String> {
 /// 取第一条可用条目 —— 它回答的是「这条配置现在能不能用、大概走哪儿」，
 /// 而不是「这次该走哪儿」。
 pub fn first_usable(config: &Value) -> Result<ResolvedProxy, String> {
-    let ids = candidate_ids(config);
-    pick_at(&ids, 0, is_all(config))
+    resolve_rotate(config, None)
 }
 
 // ─── 展示摘要（账号列表 / 日志文案用，不动游标）───────────────
@@ -197,19 +236,22 @@ pub struct Summary {
 
 /// 算一份摘要（读一次池，不做网络请求）。
 pub fn summary(config: &Value) -> Summary {
-    let all = is_all(config);
     let items = crate::server::core::proxy_pool::raw_items();
+    summary_from(config, &items)
+}
+
+fn summary_from(config: &Value, items: &[Value]) -> Summary {
+    let all = is_all(config);
     let mut total = 0usize;
     let mut usable = 0usize;
-    let mut consider = |item: &Value| {
-        total += 1;
-        if is_enabled(item) && entry_ready(item).is_ok() {
-            usable += 1;
-        }
-    };
+    let mut has_enabled = false;
     if all {
         for item in items.iter().filter(|item| is_enabled(item)) {
-            consider(item);
+            has_enabled = true;
+            if entry_ready(item).is_ok() && !text_of(item, "id").is_empty() {
+                total += 1;
+                usable += 1;
+            }
         }
     } else {
         for id in configured_ids(config) {
@@ -217,13 +259,20 @@ pub fn summary(config: &Value) -> Summary {
                 .iter()
                 .find(|item| text_of(item, "id") == id)
             {
-                consider(item);
+                total += 1;
+                if is_enabled(item) && entry_ready(item).is_ok() {
+                    usable += 1;
+                }
             }
         }
     }
     let error = if total == 0 {
         Some(if all {
-            "「网络代理」页还没有启用的代理".to_string()
+            if has_enabled {
+                "轮询里的代理都不可用（已禁用或未就绪）".to_string()
+            } else {
+                "「网络代理」页还没有启用的代理".to_string()
+            }
         } else {
             "轮询里选中的代理都不在了（可能已被删除）".to_string()
         })
@@ -233,4 +282,77 @@ pub fn summary(config: &Value) -> Summary {
         None
     };
     Summary { all, total, usable, error }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn manual_item(id: &str, enabled: bool) -> Value {
+        json!({
+            "id": id,
+            "name": id,
+            "source": "manual",
+            "protocol": "http",
+            "host": "127.0.0.1",
+            "port": 7890,
+            "enabled": enabled,
+        })
+    }
+
+    fn broken_clash_item(id: &str) -> Value {
+        json!({
+            "id": id,
+            "name": "Broken Clash",
+            "source": "clash",
+            "listenerUid": "__missing_listener_for_rotate_test__",
+            "enabled": true,
+        })
+    }
+
+    #[test]
+    fn rotate_all_excludes_unready_entries_while_explicit_keeps_them() {
+        let items = vec![
+            manual_item("px_ok", true),
+            manual_item("px_off", false),
+            broken_clash_item("px_broken_clash"),
+        ];
+
+        let all_cfg = json!({ "source": "rotate", "all": true });
+        assert_eq!(candidate_ids_from(&all_cfg, &items), vec!["px_ok"]);
+        let all_summary = summary_from(&all_cfg, &items);
+        assert_eq!(all_summary.total, 1);
+        assert_eq!(all_summary.usable, 1);
+        assert_eq!(all_summary.error, None);
+
+        let only_broken = vec![broken_clash_item("px_broken_clash")];
+        assert!(candidate_ids_from(&all_cfg, &only_broken).is_empty());
+        let broken_summary = summary_from(&all_cfg, &only_broken);
+        assert_eq!(broken_summary.total, 0);
+        assert_eq!(broken_summary.usable, 0);
+        assert_eq!(
+            broken_summary.error.as_deref(),
+            Some("轮询里的代理都不可用（已禁用或未就绪）")
+        );
+        assert!(empty_all_error(&only_broken).contains("已启用的代理当前均不可用"));
+
+        let empty_summary = summary_from(&all_cfg, &[]);
+        assert_eq!(
+            empty_summary.error.as_deref(),
+            Some("「网络代理」页还没有启用的代理")
+        );
+        assert!(empty_all_error(&[]).contains("还没有启用的代理"));
+
+        let explicit_cfg = json!({
+            "source": "rotate",
+            "all": false,
+            "proxyIds": ["px_broken_clash"],
+        });
+        assert_eq!(candidate_ids_from(&explicit_cfg, &items), vec!["px_broken_clash"]);
+        let explicit_summary = summary_from(&explicit_cfg, &items);
+        assert_eq!(explicit_summary.total, 1);
+        assert_eq!(explicit_summary.usable, 0);
+        assert!(explicit_summary.error.is_some());
+    }
 }
