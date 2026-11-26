@@ -1,5 +1,5 @@
 //! 指纹脱敏配置：`GET/PUT /api/sanitize`。
-//! 允许部分更新；规则 null = 恢复内置词表，规则 [] = 空词表，提供商 [] = 全部。
+//! 允许部分更新；规则 null = 恢复内置词表，规则 [] = 空词表，提供商 null = 恢复默认（WorkBuddy 国内版与国际版），提供商 [] = 全部。
 
 use std::sync::Arc;
 
@@ -78,10 +78,11 @@ fn parse_patch(payload: &Value) -> Result<SanitizePatch, String> {
             Some(Some(Arc::new(sanitize::RuleSet::compile(entries)?)))
         }
     };
-    let selected = object
-        .get(KEY_SANITIZE_PROVIDERS)
-        .map(parse_providers)
-        .transpose()?;
+    let selected = match object.get(KEY_SANITIZE_PROVIDERS) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => Some(Some(parse_providers(value)?)),
+    };
     Ok(SanitizePatch {
         enabled,
         rules,
@@ -90,9 +91,6 @@ fn parse_patch(payload: &Value) -> Result<SanitizePatch, String> {
 }
 
 fn parse_providers(value: &Value) -> Result<Vec<String>, String> {
-    if value.is_null() {
-        return Ok(Vec::new());
-    }
     let items = value
         .as_array()
         .ok_or_else(|| format!("{KEY_SANITIZE_PROVIDERS} 必须是字符串数组"))?;
@@ -141,6 +139,7 @@ fn sanitize_json() -> Value {
         KEY_SANITIZE_FINGERPRINTS: settings.enabled,
         KEY_SANITIZE_RULES: settings.rules.entries(),
         KEY_SANITIZE_PROVIDERS: settings.providers,
+        "defaultProviders": config::default_sanitize_providers(),
         "defaultRules": sanitize::default_rules().entries(),
         "customRules": settings.custom_rules,
         "providerOptions": options,

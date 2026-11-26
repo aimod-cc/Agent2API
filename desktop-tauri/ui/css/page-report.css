@@ -47,10 +47,12 @@
 .report-page-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; }
 .report-page-heading [data-slot='page-title'] { font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: 0; }
 .report-page-heading [data-slot='page-description'] { margin-top: 2px; font-size: 12px; }
-.report-period-control { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 100%; }
-.report-period-control [data-slot='segmented-control'] { flex-wrap: wrap; }
+.report-period-control { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 100%; margin-left: auto; }
+.report-period-controls { display: flex; align-items: center; flex-wrap: nowrap; gap: 8px; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.report-period-controls::-webkit-scrollbar { display: none; }
+.report-period-control [data-slot='segmented-control'] { flex-wrap: nowrap; flex-shrink: 0; }
 .report-page [data-slot='segmented-item'] { height: 24px; padding: 0 10px; }
-.report-date-caption { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.report-date-caption { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .report-date-range { display: inline-flex; align-items: center; gap: 8px; }
 .report-date-sep { color: var(--text-3); font-size: 12px; }
 .report-card, .report-overview-block { border: 1px solid var(--hairline); border-radius: var(--r-md); background: var(--ui-card); box-shadow: none; }
@@ -298,7 +300,9 @@
 @media (max-width: 767px) {
   .report-page { padding-top: 8px; }
   .report-page-heading { align-items: flex-start; flex-direction: column; gap: 12px; }
-  .report-period-control { align-items: flex-start; gap: 8px; }
+  .report-period-control { align-items: flex-start; gap: 8px; margin-left: 0; width: 100%; }
+  .report-period-controls { flex-wrap: wrap; overflow-x: visible; }
+  .report-period-control [data-slot='segmented-control'] { flex-wrap: wrap; flex-shrink: 1; }
   .report-overview-grid, .report-cache-window-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .report-stat:nth-child(3)::before { display: none; }
   .report-stat:nth-child(n+3) { border-top: 1px solid var(--hairline); }

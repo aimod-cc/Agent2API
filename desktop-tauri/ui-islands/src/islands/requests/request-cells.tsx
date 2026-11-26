@@ -80,7 +80,6 @@ function formatDurationCompact(ms: unknown): string {
 
 const SPEED_TIP = t('生成速度：输出 token ÷ 流式段用时（总用时 − 首响）；流式段不足总用时一半时按总用时计')
 const STREAM_MS_FLOOR = 500
-const LONG_OUTPUT_TOKEN_FLOOR = 100
 
 type MetricTone = 'good' | 'info' | 'warn' | 'bad' | ''
 
@@ -113,19 +112,6 @@ function ttftTone(ms: unknown): MetricTone {
   if (value < 2000) return 'good'
   if (value < 5000) return 'info'
   if (value < 10_000) return 'warn'
-  return 'bad'
-}
-
-function durationTone(entry: RequestEntry, ok: boolean, speedRate: number | null): MetricTone {
-  if (!ok) return ''
-  const ms = Number(entry.durationMs) || 0
-  if (ms <= 0) return ''
-  const completion = Number(entry.completionTokens) || 0
-  if (completion >= LONG_OUTPUT_TOKEN_FLOOR && speedRate !== null) return speedTone(speedRate)
-  const sec = ms / 1000
-  if (sec < 5) return 'good'
-  if (sec < 15) return 'info'
-  if (sec < 30) return 'warn'
   return 'bad'
 }
 
@@ -467,8 +453,6 @@ export function RequestCell({
         )
       }
       const first = formatFirstResponseCompact(entry.firstResponseMs)
-      const speedRate = ok ? tokensPerSecondNumber(entry) : null
-      const durCls = `req-dur-line${toneClass(durationTone(entry, ok, speedRate))}`
       const firstCls = `req-dur-line sub${ok ? toneClass(ttftTone(entry.firstResponseMs)) : ''}`
       const tipLines = [
         `${t('总耗时')}：${formatDurationExact(entry.durationMs)}`,
@@ -476,7 +460,7 @@ export function RequestCell({
       ].filter(Boolean)
       return (
         <span key={key} className={className} title={tipLines.join('\n')}>
-          <span className={durCls}>{formatDurationCompact(entry.durationMs)}</span>
+          <span className='req-dur-line'>{formatDurationCompact(entry.durationMs)}</span>
           {first ? <span className={firstCls}>{t('首字 {time}', { time: first })}</span> : null}
         </span>
       )

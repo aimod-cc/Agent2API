@@ -425,10 +425,12 @@ function ReportPage() {
           <div><PageTitle>{t('统计报表')}</PageTitle><PageDescription>{t('查看用量、调用来源与缓存表现')}</PageDescription></div>
           <div className='report-period-control'>
             <div className='report-date-caption' id='report-range-label'>{summary ? `${summary.startDate || '—'} — ${summary.endDate || '—'}` : RANGE_LABEL[rangeKey]} <TipQ text={TIP_RANGE} /></div>
-            {rawSummary?.hasLocalDirect || origin !== 'all' ? (
-              <SegmentedControl options={ORIGIN_OPTIONS} value={origin} onValueChange={changeOrigin} aria-label={t('统计数据来源')} />
-            ) : null}
-            <SegmentedControl options={RANGE_OPTIONS} value={range} onValueChange={changeRange} aria-label={t('报表时间范围')} />
+            <div className='report-period-controls'>
+              {rawSummary?.hasLocalDirect || origin !== 'all' ? (
+                <SegmentedControl options={ORIGIN_OPTIONS} value={origin} onValueChange={changeOrigin} aria-label={t('统计数据来源')} />
+              ) : null}
+              <SegmentedControl options={RANGE_OPTIONS} value={range} onValueChange={changeRange} aria-label={t('报表时间范围')} />
+            </div>
             {range === CUSTOM_RANGE ? <DateRangeFields dates={custom} onChange={changeCustomDate} /> : null}
           </div>
         </PageHeader>

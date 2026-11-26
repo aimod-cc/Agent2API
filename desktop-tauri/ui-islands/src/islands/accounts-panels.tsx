@@ -1127,7 +1127,7 @@ function UsageReadingCell({ account, entry }: { account: AccountRecord; entry: U
       title: summary.title,
     }
     : null
-  const windows = summary.kind === 'ok' || summary.kind === 'warn' ? usageWindows(entry) : []
+  const windows = summary.kind === 'ok' || summary.kind === 'warn' ? usageWindows(entry, now) : []
   if (windows.length) {
     const detail = creditDetail ? (
       <CreditDetailButton variant='sum' {...creditDetail}>{t('积分明细')}</CreditDetailButton>

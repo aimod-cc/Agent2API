@@ -23,8 +23,8 @@ export type SanitizePatch = {
   sanitizeBlacklistFingerprints?: boolean
   /** null 恢复内置词表，[] 显式清空，缺失保持原值。 */
   sanitizeFingerprintRules?: (Omit<SanitizeRule, 'roles'> & { roles?: SanitizeRole[] })[] | null
-  /** [] 表示全部提供商，包含之后新增的提供商。 */
-  sanitizeFingerprintProviders?: string[]
+  /** null 恢复默认范围，[] 表示全部提供商（包含之后新增的提供商）。 */
+  sanitizeFingerprintProviders?: string[] | null
 }
 
 export type SanitizeState = {
@@ -33,6 +33,7 @@ export type SanitizeState = {
   rules: SanitizeRule[]
   defaults: SanitizeRule[]
   providers: string[]
+  defaultProviders: string[]
   options: { id: string; label: string }[]
   customRules: boolean
   saved: boolean
@@ -47,6 +48,7 @@ export const INITIAL_SANITIZE: SanitizeState = {
   rules: [],
   defaults: [],
   providers: [],
+  defaultProviders: ['workbuddy', 'workbuddy-intl'],
   options: [],
   customRules: false,
   saved: true,
@@ -88,6 +90,9 @@ export function sanitizeStateFrom(data: unknown, previous: SanitizeState): Sanit
   const providers = Array.isArray(record.sanitizeFingerprintProviders)
     ? record.sanitizeFingerprintProviders.filter((id): id is string => typeof id === 'string')
     : []
+  const defaultProviders = Array.isArray(record.defaultProviders)
+    ? record.defaultProviders.filter((id): id is string => typeof id === 'string')
+    : INITIAL_SANITIZE.defaultProviders
   const options: SanitizeState['options'] = []
   if (Array.isArray(record.providerOptions)) {
     for (const item of record.providerOptions) {
@@ -115,6 +120,7 @@ export function sanitizeStateFrom(data: unknown, previous: SanitizeState): Sanit
     rules: rules ?? [],
     defaults: defaults ?? [],
     providers,
+    defaultProviders: defaultProviders.length ? defaultProviders : INITIAL_SANITIZE.defaultProviders,
     options,
     customRules: record.customRules === true,
     saved: record.saved !== false,

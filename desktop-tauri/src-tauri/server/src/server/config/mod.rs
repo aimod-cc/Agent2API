@@ -98,8 +98,8 @@ pub use account_sort::{
 pub use assistant_config::*;
 pub use privacy_config::{set_privacy_settings, KEY_PRIVACY_REDACTION};
 pub use sanitize_config::{
-    set_sanitize_settings, SanitizePatch, SanitizeSettings, KEY_SANITIZE_PROVIDERS,
-    KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
+    default_sanitize_providers, set_sanitize_settings, SanitizePatch, SanitizeSettings,
+    KEY_SANITIZE_PROVIDERS, KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
 };
 pub use routing_groups::{RoutingGroup, RoutingMember};
 pub use routing_profiles::{

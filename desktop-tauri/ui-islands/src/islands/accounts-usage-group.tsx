@@ -109,7 +109,7 @@ export function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filte
     if (entry.unlimited === true) { out.unlimited++; continue }
     const hasTotalLeft = Object.prototype.hasOwnProperty.call(entry, 'totalLeft')
     const rawValue = usageNumberOrNull(hasTotalLeft ? entry.totalLeft : entry.available)
-    const ratio = groupRatioOf(usageWindows(entry), rawValue)
+    const ratio = groupRatioOf(usageWindows(entry, now), rawValue)
     const unit = String(entry.unit || t('积分')).trim()
     const entryMode: 'additive' | 'ratio' | null =
       rawValue === null && ratio === null ? null : unit === '%' || rawValue === null ? 'ratio' : 'additive'

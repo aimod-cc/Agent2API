@@ -91,16 +91,52 @@ fn ratio_of(usage: &Value, value: Option<f64>) -> Option<Value> {
         && row["unlimited"] != true && (number(&row["remainingPercent"]).is_some_and(|value| value <= 0.0)
         || number(&row["remaining"]).is_some_and(|value| value <= 0.0)))
         .map(|row| row["group"].as_str().unwrap_or("")).collect::<HashSet<_>>();
+    let mut max_model_percent_by_group = HashMap::<String, f64>::new();
+    for item in usage["modelQuotas"].as_array().into_iter().flatten() {
+        let Some(group) = item["group"].as_str().map(str::trim).filter(|group| !group.is_empty()) else { continue; };
+        let Some(pct) = number(&item["remainingPercent"]).map(|value| value.clamp(0.0, 100.0)) else { continue; };
+        max_model_percent_by_group
+            .entry(group.to_ascii_lowercase())
+            .and_modify(|max| *max = max.max(pct))
+            .or_insert(pct);
+    }
+    let mut group_min_window = HashMap::<String, f64>::new();
+    let mut group_has_short = HashSet::<String>::new();
+    for row in &rows {
+        let Some(group) = row["group"].as_str().map(str::trim).filter(|group| !group.is_empty()) else { continue; };
+        let group_key = group.to_ascii_lowercase();
+        let value = if row["unlimited"] == true { Some(100.0) } else { number(&row["remainingPercent"]).map(|v| v.clamp(0.0, 100.0)) };
+        if let Some(value) = value {
+            group_min_window
+                .entry(group_key.clone())
+                .and_modify(|min| *min = min.min(value))
+                .or_insert(value);
+            if matches!(row["window"].as_str(), Some("daily" | "5h")) {
+                group_has_short.insert(group_key);
+            }
+        }
+    }
+    let model_cap_by_group: HashMap<String, f64> = max_model_percent_by_group.into_iter()
+        .filter(|(group_key, cap)| group_min_window.get(group_key).is_some_and(|min_w| *cap + 1e-6 < *min_w))
+        .collect();
     let mut adjusted = false;
     let windows = rows.iter().map(|row| {
         let short = matches!(row["window"].as_str(), Some("daily" | "5h"));
+        let group_name = row["group"].as_str().map(str::trim).unwrap_or("");
+        let group_key = group_name.to_ascii_lowercase();
         let blocked = short && exhausted.contains(row["group"].as_str().unwrap_or(""));
         let percent = number(&row["remainingPercent"]).map(|value| value.clamp(0.0, 100.0));
         if blocked && (row["unlimited"] == true || percent != Some(0.0)) { adjusted = true; }
+        let model_cap = (!blocked).then(|| {
+            model_cap_by_group.get(&group_key).copied()
+                .filter(|_| short || !group_has_short.contains(&group_key))
+        }).flatten();
+        let capped = model_cap.filter(|cap| row["unlimited"] == true || percent.is_none_or(|p| *cap + 1e-6 < p));
         let label = [row["group"].as_str().unwrap_or(""), row["window"].as_str().or(row["label"].as_str()).unwrap_or("")]
             .into_iter().filter(|value| !value.is_empty()).collect::<Vec<_>>().join(" · ");
         json!({ "label": label,
-            "percent": if blocked { Some(0.0) } else { percent }, "unlimited": !blocked && row["unlimited"] == true, "shortWindow": short })
+            "percent": if blocked { Some(0.0) } else if let Some(cap) = capped { Some(cap) } else { percent },
+            "unlimited": !blocked && capped.is_none() && row["unlimited"] == true, "shortWindow": short })
     }).collect::<Vec<_>>();
     let exhausted_without_short = exhausted.iter().any(|group| {
         !rows.iter().any(|row| {
@@ -191,5 +227,40 @@ mod tests {
         });
         let ratio = ratio_of(&usage, None).expect("ratio");
         assert_eq!(ratio["percent"].as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn ratio_of_clamps_short_window_only_when_all_models_in_group_are_capped() {
+        let all_capped = json!({
+            "windows": [
+                { "group": "Gemini", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 100.0 },
+                { "group": "Claude/GPT", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Claude/GPT", "window": "weekly", "remainingPercent": 100.0 }
+            ],
+            "modelQuotas": [
+                { "id": "claude-opus-5-5", "group": "Claude/GPT", "remainingPercent": 0.0 },
+                { "id": "claude-sonnet-5-5", "group": "Claude/GPT", "remainingPercent": 0.0 },
+                { "id": "gpt-oss-120b", "group": "Claude/GPT", "remainingPercent": 0.0 }
+            ]
+        });
+        let ratio = ratio_of(&all_capped, None).expect("ratio");
+        assert_eq!(ratio["percent"].as_f64(), Some(0.0));
+        assert_eq!(ratio["windows"][2]["percent"].as_f64(), Some(0.0));
+        assert_eq!(ratio["windows"][3]["percent"].as_f64(), Some(100.0));
+
+        let partial_capped = json!({
+            "windows": [
+                { "group": "Gemini", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 100.0 }
+            ],
+            "modelQuotas": [
+                { "id": "gemini-3.1-flash-image", "group": "Gemini", "remainingPercent": 0.0 },
+                { "id": "gemini-4-neon", "group": "Gemini", "remainingPercent": 100.0 }
+            ]
+        });
+        let ratio = ratio_of(&partial_capped, None).expect("ratio");
+        assert_eq!(ratio["percent"].as_f64(), Some(100.0));
+        assert_eq!(ratio["windows"][0]["percent"].as_f64(), Some(100.0));
     }
 }

@@ -7,9 +7,9 @@
 .asst-composer-wrap {
   flex: none;
   width: 100%;
-  max-width: 788px;
+  max-width: 764px;
   margin: 0 auto;
-  padding: 4px 24px 16px;
+  padding: 4px 12px 0;
 }
 .asst-composer {
   position: relative;
@@ -331,11 +331,15 @@
 @media (max-width: 900px) {
   .asst-menu { display: inline-flex; }
   .asst-top-collapsed-actions { display: none; }
-  .asst-top { padding: 0 12px; }
-  .asst-scroll { padding: 14px 12px 10px; }
-  .asst-empty-center { padding: 0 12px 4vh; }
-  .asst-composer-wrap { padding: 4px 12px 12px; }
+  .asst-top { padding: 0 0 6px; }
+  .asst-scroll { padding: 14px 0 10px; }
+  .asst-empty-center { padding: 0 0 4vh; }
+  .asst-composer-wrap { max-width: 740px; padding: 4px 0 0; }
   .asst-composer textarea { font-size: 16px; }
+}
+
+@media (max-width: 767.98px) {
+  .page.active[data-page="assistant"] { padding-bottom: 0; }
 }
 
 @media (max-width: 600px) {

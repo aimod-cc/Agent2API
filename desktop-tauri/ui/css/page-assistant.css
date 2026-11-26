@@ -2,18 +2,10 @@
    AI 助手页（侧边栏「智能」组 · data-page="assistant"）
 
    极简克制双栏布局：
-     · 左侧 220px 可收起历史栏（窄屏自动变为抽屉），按时间分段、按需搜索；
+     · 左侧 234px 可收起历史栏（窄屏自动变为抽屉），按时间分段、按需搜索；
      · 右侧平铺无外框：极简顶栏 + 居中输入空态 / 740px 阅读列 + 底部输入区；
      · 已完成工具收成极静单行折叠条，待确认 / 失败使用干净细框卡片。
    ───────────────────────────────────────────── */
-
-/* 去掉助手页外层内容容器的默认边距，让左右双栏直接贴合顶栏下方 */
-.content:has(> .content-inner > .page.active[data-page="assistant"]) {
-  padding: 0;
-}
-.content-inner:has(> .page.active[data-page="assistant"]) {
-  max-width: none;
-}
 
 .page.active[data-page="assistant"] {
   flex: 1;
@@ -21,7 +13,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-bottom: 0;
+  padding-bottom: var(--pad);
 }
 
 .asst-layout {
@@ -34,32 +26,37 @@
   background: var(--bg);
 }
 
-/* ─── 左栏：历史会话（220px、平铺无边框、单行轻头） ─── */
+/* ─── 左栏：历史会话（234px、平铺无边框、单行轻头） ─── */
 .asst-side {
   flex: none;
-  width: 220px;
+  width: 234px;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  padding-right: 14px;
+  margin-right: 18px;
   border-right: 1px solid var(--hairline);
-  transition: width 180ms cubic-bezier(.2, .8, .2, 1), opacity 150ms ease, border-color 150ms ease, visibility 180ms ease;
+  transition: width 180ms cubic-bezier(.2, .8, .2, 1), padding-right 180ms cubic-bezier(.2, .8, .2, 1), margin-right 180ms cubic-bezier(.2, .8, .2, 1), opacity 150ms ease, border-color 150ms ease, visibility 180ms ease;
 }
 .asst-side.is-collapsed {
   width: 0;
+  padding-right: 0;
+  margin-right: 0;
   opacity: 0;
   visibility: hidden;
+  border-right-width: 0;
   border-right-color: transparent;
   pointer-events: none;
 }
 
 .asst-side-head {
   flex: none;
-  height: 42px;
+  height: 38px;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 0 8px;
+  padding: 0 0 6px;
 }
 .asst-side-head .spacer { flex: 1 1 auto; }
 .asst-new {
@@ -72,10 +69,14 @@
   color: var(--text);
 }
 [data-slot="sheet-content"] .asst-side-collapse { display: none; }
+[data-slot="sheet-content"] .asst-side-head { height: 42px; padding: 0 10px; }
+[data-slot="sheet-content"] .asst-side-search { padding: 0 10px 6px; }
+[data-slot="sheet-content"] .asst-side-list { padding: 2px 8px 10px; }
+[data-slot="sheet-content"] .asst-side-foot { padding: 8px 10px; }
 
 .asst-side-search {
   flex: none;
-  padding: 0 8px 6px;
+  padding: 2px 0 8px;
 }
 
 .asst-side-list {
@@ -86,7 +87,7 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 2px 6px 10px;
+  padding: 2px 0 10px;
 }
 .asst-side-empty {
   padding: 24px 8px;
@@ -168,12 +169,12 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px;
+  padding: 10px 0 0;
   border-top: 1px solid var(--hairline);
 }
 .asst-side-foot-btn {
   height: 24px;
-  padding: 0 6px;
+  padding: 0 8px;
   color: var(--text-3);
   font-size: 11.5px;
   font-weight: 400;
@@ -197,11 +198,11 @@
 
 .asst-top {
   flex: none;
-  height: 42px;
+  height: 38px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 20px;
+  padding: 0 0 6px;
 }
 .asst-top.has-border { border-bottom: 1px solid var(--hairline); }
 .asst-top .spacer { flex: 1 1 auto; }
@@ -269,7 +270,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 0 24px 6vh;
+  padding: 0 12px 6vh;
   overflow-y: auto;
 }
 .asst-empty-inner {
@@ -323,7 +324,7 @@
   min-height: 0;
   overflow-y: auto;
   overflow-anchor: none;
-  padding: 20px 24px 16px;
+  padding: 18px 12px 16px;
 }
 .asst-flow {
   width: 100%;

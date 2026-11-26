@@ -111,7 +111,10 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
                   { value: 'selected', label: t('指定提供商'), disabled: !state.options.length }]}
                 disabled={disabled} onValueChange={value => {
                   if (value === 'all') { setScope('all'); return }
-                  if (!providers.length) setProviders(state.options.map(option => option.id))
+                  if (!providers.length) {
+                    const defaults = state.defaultProviders.filter(id => state.options.some(option => option.id === id))
+                    setProviders(defaults.length ? defaults : state.options.map(option => option.id))
+                  }
                   setScope('selected')
                 }} />
             </div>
@@ -125,7 +128,7 @@ export function SanitizePanel({ snap }: { snap: SettingsSnapshot }) {
                 }} className='w-full'
                 placeholder={t('请至少选择一个提供商')} />
             </div> : null}
-            <div className='hint'>{t('默认应用全部提供商（包含之后新增的插件与自定义提供商）。指定范围后，未选中的提供商不做关键词替换；清空选择自动回到全部提供商。')}</div>
+            <div className='hint'>{t('默认仅应用 WorkBuddy 国内版与国际版。指定范围后，未选中的提供商不做关键词替换；切到「全部提供商」或清空选择则应用于全部提供商（包含之后新增的插件与自定义提供商）。')}</div>
           </div>
           <Dialog open={rulesOpen} onOpenChange={open => {
             setRulesOpen(open)
