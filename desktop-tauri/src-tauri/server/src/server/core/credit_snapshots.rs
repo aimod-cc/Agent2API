@@ -422,7 +422,15 @@ fn day_bounds(day: NaiveDate) -> Option<(i64, i64)> {
 
 fn day_start(day: NaiveDate) -> Option<i64> {
     let midnight = day.and_hms_opt(0, 0, 0)?;
-    Local.from_local_datetime(&midnight).earliest().map(|time| time.timestamp_millis())
+    // 夏令时切换日的本地零点可能不存在（例如 America/Santiago 2026-09-06 从 00:00 跳到 01:00）。
+    // .earliest() 对不存在的本地时间返回 None，导致整个区间被跳过。
+    // 改用 .single() 先尝试正常零点；不存在时取该日最早有效的本地时间（01:00）。
+    Local.from_local_datetime(&midnight).single()
+        .or_else(|| {
+            // 零点不存在：尝试 01:00（夏令时切换日常见的跳法）
+            day.and_hms_opt(1, 0, 0).and_then(|t| Local.from_local_datetime(&t).single())
+        })
+        .map(|time| time.timestamp_millis())
 }
 
 /// 明细里最早一条的时间戳；表还没建或还没有数据时为 `None`。
@@ -551,6 +559,9 @@ fn rolled_days_in_range(
 
 /// 区间内实际有明细的日期（去重，升序）。用于「对未汇总的日子从明细现算」：
 /// 只遍历这些日子，不遍历没有明细的空白日期。
+///
+/// 利用时间索引逐日推进：每次只查当前游标之后的第一条记录，再把游标推进到
+/// 该本地日期的结束边界。不逐行扫描全部明细，也不遍历空白日期。
 fn actual_days_in_range(
     conn: &rusqlite::Connection,
     start: NaiveDate,
@@ -558,16 +569,25 @@ fn actual_days_in_range(
 ) -> rusqlite::Result<Vec<NaiveDate>> {
     let Some(start_ts) = day_start(start) else { return Ok(Vec::new()) };
     let Some(end_ts) = day_start(end.succ_opt().unwrap_or(end)) else { return Ok(Vec::new()) };
-    // 查出区间内所有明细的 ts（只取 ts 列，不取账号和值，减少传输量）
-    let mut stmt = conn.prepare_cached(
-        "SELECT ts FROM account_credit_snapshots WHERE ts >= ?1 AND ts < ?2",
-    )?;
-    let rows = stmt.query_map(params![start_ts, end_ts], |row| row.get::<_, i64>(0))?;
-    let mut days = std::collections::BTreeSet::new();
-    for row in rows {
-        days.insert(day_of_local(row?));
+    let mut days = Vec::new();
+    let mut cursor = start_ts;
+    loop {
+        // 查游标之后的第一条记录
+        let ts: Option<i64> = conn.query_row(
+            "SELECT ts FROM account_credit_snapshots WHERE ts >= ?1 AND ts < ?2 ORDER BY ts LIMIT 1",
+            params![cursor, end_ts],
+            |row| row.get(0),
+        ).optional()?;
+        let Some(ts) = ts else { break };
+        let day = day_of_local(ts);
+        days.push(day);
+        // 把游标推进到这一天的结束边界（下一天的零点）
+        let Some(next_day) = day.succ_opt() else { break };
+        let Some(next_ts) = day_start(next_day) else { break };
+        cursor = next_ts;
     }
-    Ok(days.into_iter().collect())
+    days.dedup();
+    Ok(days)
 }
 
 /// 名册只可能缺一种行：名册出现之前（更早的那版二进制）写下的明细。补登记每个库只做一次，
