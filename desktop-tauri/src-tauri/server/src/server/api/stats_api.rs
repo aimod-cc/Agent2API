@@ -228,6 +228,59 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
     }
 }
 
+/// `GET /api/stats/credits` —— 积分报表：按账号、按本地自然日给出**实测**的积分消耗。
+///
+/// 数据来源是余额快照（`core::credit_snapshots`）：每次余额查询成功，把每个积分
+/// 钱包的已用量记一行；某账号某天的消耗 = 当天相邻两条快照的已用量增量之和。
+/// 上游按积分计费（CodeArts / WorkBuddy）而请求响应里没有积分，这是唯一可靠的来源。
+///
+/// 参数与 [`stats_summary`] 同一套：`range`（同一白名单、同一默认值）、`custom`
+/// 时的 `startDate` / `endDate`，校验也在路由层做（理由同上，避免两层容错度不一致）。
+/// 「今天」的切法、区间的夹取与请求报表共用存储层的同一份实现，两张报表对照着看
+/// 不会错位。
+///
+/// 响应形状见 `credit_snapshots::report` 的文档。两点与请求报表不同：
+///   - 不接受 `apiKey` / `client` / `origin` 筛选 —— 积分是按账号扣的，
+///     快照里没有「这条是哪个 Key 发的」；
+///   - 没有数据是正常结果（`accounts` 为空、`firstSnapshotAt` 为 null），
+///     库不可用才是 500。
+pub async fn stats_credits(State(state): State<ServerState>, Query(params): Query<Params>) -> Response {
+    let requested = text_of(&params, "range").unwrap_or_else(|| DEFAULT_RANGE.to_string());
+    if !RANGES.contains(&requested.as_str()) {
+        return errors::management_error(
+            400,
+            format!("range 取值非法: {requested}（合法值: {}）", RANGES.join("、")),
+        );
+    }
+    let custom = if requested == "custom" {
+        let start = match parse_day_param(&params, "startDate") {
+            Ok(value) => value,
+            Err(message) => return errors::management_error(400, message),
+        };
+        let end = match parse_day_param(&params, "endDate") {
+            Ok(value) => value,
+            Err(message) => return errors::management_error(400, message),
+        };
+        if start > end {
+            return errors::management_error(
+                400,
+                format!("开始日期不能晚于结束日期（startDate={}, endDate={}）", start, end),
+            );
+        }
+        Some((start, end))
+    } else {
+        None
+    };
+    let stats = state.request_stats();
+    // 同步读库，放进 `spawn_blocking`（理由见 `stats_summary`）
+    let result = tokio::task::spawn_blocking(move || stats.credit_report(&requested, custom)).await;
+    match result {
+        Ok(Some(value)) => ok_json(value),
+        Ok(None) => errors::management_error(500, "积分快照库不可用"),
+        Err(error) => errors::management_error(500, format!("积分报表计算任务失败: {error}")),
+    }
+}
+
 /// GET /api/stats/requests?offset=&limit=&model=&provider=&status=&start=&end=
 ///
 /// 每行含 `provider`（id）与 `providerLabel`（展示名），由存储层的 `entry_json`
