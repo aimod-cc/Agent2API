@@ -101,7 +101,7 @@ export function PreviewPane({ state, localDirect = false }: { state: RawState; l
   }
   const sourceFile = typeof body?.sourceFile === 'string' ? body.sourceFile : ''
   return (
-    <div>
+    <div className='min-w-0'>
       {body?.liveLocal === true ? (
         <div className='mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-[11.5px] text-subtle'>
           <span>{t('实时读取自本机对话文件（不存入数据库）')}</span>

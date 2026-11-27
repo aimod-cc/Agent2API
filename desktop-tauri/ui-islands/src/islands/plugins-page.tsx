@@ -28,7 +28,7 @@ import { PluginPageToolbar, type PluginSortKey } from './plugins-toolbar'
 import { PluginCategoryRail, pluginRailSubtitle, pluginRailTitle, type PluginRailKey } from './plugins-rail'
 import { applicablePluginItems, missingPluginItems, pluginBatchItems, type PluginBatchAction, type PluginBatchItem } from '../../../ui-shared/plugins-batch-items'
 import { usePluginBatch, waitScriptOperation, type PluginRequest } from '../../../ui-shared/plugins-batch-runner'
-import { PluginBatchConfirm, PluginBatchProgress, PluginBatchToolbar } from '../../../ui-shared/plugins-batch-view'
+import { PluginBatchDialog, PluginBatchProgress, PluginBatchToolbar } from '../../../ui-shared/plugins-batch-view'
 import { PluginMissingBanner, PluginMissingDialog } from '../../../ui-shared/plugins-missing'
 import { PluginCatalogStatus } from '../../../ui-shared/plugins-catalog-status'
 import { ScriptCatalogStatus } from '../../../ui-shared/plugins-script-catalog'
@@ -94,7 +94,6 @@ function PluginsPage(): React.ReactElement {
   const [taskCreateRequest, setTaskCreateRequest] = React.useState(0)
   const [selecting, setSelecting] = React.useState(false)
   const [selected, setSelected] = React.useState(new Set<string>())
-  const [batchConfirm, setBatchConfirm] = React.useState<{ action: PluginBatchAction; items: PluginBatchItem[] } | null>(null)
   const [missingOpen, setMissingOpen] = React.useState(false)
   const listRef = React.useRef<HTMLDivElement>(null)
   const taskData = usePluginsTaskData()
@@ -474,8 +473,8 @@ function PluginsPage(): React.ReactElement {
       return row ? [{ ...row, required: item.required }] : []
     })
     const targets = applicablePluginItems(current, action)
-    if (targets.length) setBatchConfirm({ action, items: targets })
-  }, [])
+    if (targets.length) batch.prepare(action, targets)
+  }, [batch.prepare])
 
   React.useEffect(() => {
     if (!payload) return
@@ -647,8 +646,7 @@ function PluginsPage(): React.ReactElement {
             visibleKeys={selectableVisibleKeys}
             selected={selected} disabled={locked} onSelection={changeSelection} onAction={confirmBatch}
             onExit={handleExitBatch} t={t} /> : null}
-          {batch.task ? <PluginBatchProgress task={batch.task} t={t} onClose={batch.clear}
-            onRetry={items => confirmBatch(batch.task!.action, items)} /> : null}
+          {batch.backgroundVisible ? <PluginBatchProgress model={batch} t={t} /> : null}
           {fileInstall.backgroundVisible ? <PluginFileInstallProgress model={fileInstall} t={t} /> : null}
         </div>
 
@@ -755,9 +753,7 @@ function PluginsPage(): React.ReactElement {
       onOpenScheduledTasks={() => { fileInstall.close(); bridge().wbApp?.showPage?.('scheduled') }}
       t={t}
     />
-    {batchConfirm ? <PluginBatchConfirm key={`${batchConfirm.action}:${batchConfirm.items.map(item => item.key).join('|')}`}
-      action={batchConfirm.action} items={batchConfirm.items} disabled={locked} t={t} onClose={() => setBatchConfirm(null)}
-      onConfirm={() => { const { action, items } = batchConfirm; setBatchConfirm(null); void batch.execute(action, items) }} /> : null}
+    <PluginBatchDialog model={batch} disabled={locked} t={t} />
     {missingOpen ? <PluginMissingDialog required={missing.required} bindable={missing.bindable} unresolved={missing.unresolved}
       disabled={locked} t={t} onClose={() => setMissingOpen(false)}
       onInstall={items => { setMissingOpen(false); void batch.execute('install', items) }}

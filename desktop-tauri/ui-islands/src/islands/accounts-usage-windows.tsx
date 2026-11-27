@@ -77,12 +77,30 @@ function WindowResetRow({
   )
 }
 
-function WindowTooltipBody({ row, now }: { row: UsageWindowReading; now: number }) {
+function effectiveWindowResetAt(row: UsageWindowReading): number | null {
+  const isFull = row.unlimited || (row.percent !== null && row.percent >= 100)
+  if (row.constrainedByModel && isLongWindowCode(row.windowCode)) return null
+  if (row.constrainedByModel && isShortWindowCode(row.windowCode)) return row.modelResetsAt
+  return row.resetsAt !== null && !isFull ? row.resetsAt : null
+}
+
+function WindowTooltipBody({
+  row,
+  models,
+  now,
+}: {
+  row: UsageWindowReading
+  models: ModelQuotaReading[]
+  now: number
+}) {
   const value = row.percentText || row.view
   const isFull = row.unlimited || (row.percent !== null && row.percent >= 100)
   const ownResetAt = row.resetsAt !== null && !isFull ? row.resetsAt : null
   const isConstrainedLong = row.constrainedByModel && isLongWindowCode(row.windowCode)
   const isConstrainedShort = row.constrainedByModel && isShortWindowCode(row.windowCode)
+  const lowModels = isConstrainedShort && row.group
+    ? models.filter(model => model.group === row.group && model.percent !== null && model.percent < 20)
+    : []
   return (
     <div className='usage-window-tip-card'>
       <div className='usage-window-tip-head'>
@@ -102,17 +120,29 @@ function WindowTooltipBody({ row, now }: { row: UsageWindowReading; now: number 
           ) : null}
         </>
       ) : isConstrainedShort ? (
-        row.modelResetsAt !== null ? (
-          <>
-            <WindowResetRow resetsAt={row.modelResetsAt} now={now} tone={row.tone} layout='tip' />
-            <div className='usage-window-tip-muted'>{t('受模型配额限制')}</div>
-            {row.modelResetsAt <= now ? (
-              <div className='usage-window-tip-muted'>{t('可刷新余额查看最新额度')}</div>
-            ) : null}
-          </>
-        ) : (
-          <div className='usage-window-tip-muted'>{t('受模型配额限制，未返回重置时间')}</div>
-        )
+        <>
+          {row.modelResetsAt !== null ? (
+            <>
+              <WindowResetRow resetsAt={row.modelResetsAt} now={now} tone={row.tone} layout='tip' />
+              <div className='usage-window-tip-muted'>{t('受模型配额限制')}</div>
+              {row.modelResetsAt <= now ? (
+                <div className='usage-window-tip-muted'>{t('可刷新余额查看最新额度')}</div>
+              ) : null}
+            </>
+          ) : (
+            <div className='usage-window-tip-muted'>{t('受模型配额限制，未返回重置时间')}</div>
+          )}
+          {lowModels.length ? (
+            <div className='usage-window-tip-models'>
+              {lowModels.map(model => (
+                <div key={model.id} className='usage-window-tip-model-row'>
+                  <span>{model.name}</span>
+                  <span className='usage-window-tip-val warn'>{model.percentText || model.view}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </>
       ) : ownResetAt !== null ? (
         <>
           <WindowResetRow resetsAt={ownResetAt} now={now} tone={row.tone} layout='tip' />
@@ -152,10 +182,8 @@ function AllWindowsTooltipBoard({
               const value = row.percentText || row.view
               const isFull = row.unlimited || (row.percent !== null && row.percent >= 100)
               const isConstrainedLong = row.constrainedByModel && isLongWindowCode(row.windowCode)
-              const effectiveResetAt = row.constrainedByModel && isShortWindowCode(row.windowCode)
-                ? row.modelResetsAt : row.resetsAt
-              const reset = effectiveResetAt !== null && !isConstrainedLong && (!isFull || row.constrainedByModel)
-                ? formatResetCountdown(effectiveResetAt, now) : null
+              const effectiveResetAt = effectiveWindowResetAt(row)
+              const reset = effectiveResetAt !== null ? formatResetCountdown(effectiveResetAt, now) : null
               const exact = reset && effectiveResetAt !== null ? exactResetLabel(effectiveResetAt) : ''
               return (
                 <div key={row.id} className='usage-window-board-row'>
@@ -194,57 +222,19 @@ function AllWindowsTooltipBoard({
   )
 }
 
-function GroupModelResetFooter({
-  group,
+function WindowReading({
+  row,
   models,
-  resetAt,
   now,
 }: {
-  group: WindowGroup
+  row: UsageWindowReading
   models: ModelQuotaReading[]
-  resetAt: number
   now: number
 }) {
-  const reset = formatResetCountdown(resetAt, now)
-  const groupZero = group.rows.some(row => isShortWindowCode(row.windowCode) && isExhaustedRow(row))
-  const lowModels = models.filter(model => model.group === group.name && model.percent !== null && model.percent < 20)
-  return (
-    <Tooltip>
-      <TooltipTrigger render={<span className='usage-window-group-cd usage-window-hoverable' />}>
-        <span className={`usage-window-cd ${reset.overdue ? 'muted' : 'warn'}${groupZero && !reset.overdue ? ' is-zero' : ''}`}>
-          <ResetIcon size={9} />
-          <span>{reset.short}</span>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent variant='plain' side='top' sideOffset={6} className='p-2'>
-        <div className='usage-window-tip-card'>
-          <div className='usage-window-tip-head'>
-            <span className='usage-window-tip-title'>{group.name || t('模型限制')}</span>
-            <span className='usage-window-tip-val warn'>{t('受模型配额限制')}</span>
-          </div>
-          <WindowResetRow resetsAt={resetAt} now={now} tone='warn' layout='tip' />
-          {lowModels.length ? (
-            <div className='usage-window-tip-models'>
-              {lowModels.map(model => (
-                <div key={model.id} className='usage-window-tip-model-row'>
-                  <span>{model.name}</span>
-                  <span className='usage-window-tip-val warn'>{model.percentText || model.view}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </TooltipContent>
-    </Tooltip>
-  )
-}
-
-function WindowReading({ row, now }: { row: UsageWindowReading; now: number }) {
   const value = row.percentText || row.view
   const remaining = row.percent === null ? row.view : t('剩余 {percent}%', { percent: numberText(row.percent) })
-  const isFull = row.unlimited || (row.percent !== null && row.percent >= 100)
-  const showReset = row.resetsAt !== null && !isFull && !(row.constrainedByModel && isShortWindowCode(row.windowCode))
-  const reset = showReset && row.resetsAt !== null ? formatResetCountdown(row.resetsAt, now) : null
+  const effectiveResetAt = effectiveWindowResetAt(row)
+  const reset = effectiveResetAt !== null ? formatResetCountdown(effectiveResetAt, now) : null
   const isZero = isExhaustedRow(row)
   const cdTone = reset?.overdue ? 'muted' : row.tone
 
@@ -255,23 +245,25 @@ function WindowReading({ row, now }: { row: UsageWindowReading; now: number }) {
       >
         <span className='usage-window-line'>
           <span className='usage-window-label'>{row.window}</span>
-          <span className='usage-window-value'>{value}</span>
+          <span className='usage-window-reading'>
+            <span className='usage-window-value'>{value}</span>
+            {reset ? (
+              <span className={`usage-window-reset-inline ${cdTone}${isZero && !reset.overdue ? ' is-zero' : ''}`}>
+                <span className='usage-window-sep' aria-hidden='true'>·</span>
+                <span className='usage-window-reset-text'>{reset.inline}</span>
+              </span>
+            ) : null}
+          </span>
         </span>
         {row.percent !== null && !row.unlimited ? (
           <Meter value={row.percent} variant={row.tone === 'warn' ? 'warning' : row.tone === 'muted' ? 'muted' : 'success'}
-            className='mt-1' trackClassName='h-[3px]'
-            indicatorClassName={row.tone === 'muted' ? 'opacity-45' : row.tone === 'ok' ? 'opacity-75' : undefined}
-            aria-label={`${row.label} · ${remaining}`} />
-        ) : null}
-        {reset ? (
-          <span className={`usage-window-cd ${cdTone}${isZero && !reset.overdue ? ' is-zero' : ''}`}>
-            <ResetIcon size={9} />
-            <span>{reset.short}</span>
-          </span>
+            className='mt-[4px]' trackClassName='h-[3.5px]'
+            indicatorClassName={row.tone === 'muted' ? 'opacity-45' : row.tone === 'ok' ? 'opacity-85' : undefined}
+            aria-label={`${row.label} · ${remaining}${reset ? ` · ${reset.inline}` : ''}`} />
         ) : null}
       </TooltipTrigger>
       <TooltipContent variant='plain' side='top' sideOffset={6} className='p-2'>
-        <WindowTooltipBody row={row} now={now} />
+        <WindowTooltipBody row={row} models={models} now={now} />
       </TooltipContent>
     </Tooltip>
   )
@@ -283,34 +275,30 @@ function ModelQuotaCard({ row, now }: { row: ModelQuotaReading; now: number }) {
   const isFull = row.percent !== null && row.percent >= 100
   const reset = row.resetsAt !== null && !isFull ? formatResetCountdown(row.resetsAt, now) : null
   const exact = row.resetsAt !== null && !isFull ? exactResetLabel(row.resetsAt) : ''
+  const subMeta = [row.window, exact].filter(Boolean).join(' · ')
   return (
     <div className='usage-window-model-card'>
       <div className='usage-window-model-head'>
         <span className='usage-window-model-name' title={`${row.name} (${row.id})`}>{row.name}</span>
-        <span className={`usage-window-model-val ${row.tone}`}>{value}</span>
+        <span className='usage-window-model-right'>
+          <span className={`usage-window-model-val ${row.tone}`}>{value}</span>
+          {reset && row.resetsAt !== null ? (
+            <time dateTime={new Date(row.resetsAt).toISOString()} className={`usage-window-model-reset-inline${!reset.overdue && row.tone === 'warn' ? ' warn' : ''}`}>
+              <span className='usage-window-sep' aria-hidden='true'>·</span>
+              <span>{reset.inline}</span>
+            </time>
+          ) : null}
+        </span>
       </div>
       <div className='usage-window-model-sub'>
         <span className='usage-window-model-id' title={row.id}>{row.id}</span>
-        {row.window ? <span className='usage-window-model-win'>{row.window}</span> : null}
+        {subMeta ? <span className='usage-window-model-win'>{subMeta}</span> : null}
       </div>
       {row.percent !== null ? (
         <Meter value={row.percent} variant={row.tone === 'warn' ? 'warning' : 'success'}
-          className='mt-1.5' trackClassName='h-[3px]' indicatorClassName={row.tone === 'ok' ? 'opacity-75' : undefined}
-          aria-label={`${row.name} · ${remaining}`} />
+          className='mt-1.5' trackClassName='h-[3.5px]' indicatorClassName={row.tone === 'ok' ? 'opacity-85' : undefined}
+          aria-label={`${row.name} · ${remaining}${reset ? ` · ${reset.inline}` : ''}`} />
       ) : null}
-      <div className='usage-window-model-reset'>
-        {row.resetsAt !== null && reset ? (
-          <time dateTime={new Date(row.resetsAt).toISOString()} className={`usage-window-pop-cd ${reset.overdue ? 'muted' : row.tone}`}>
-            <ResetIcon size={9.5} />
-            <span>{reset.short}</span>
-            <span className='usage-window-pop-at'>· {exact}</span>
-          </time>
-        ) : isFull ? (
-          <span>{t('当前满额，无需等待恢复')}</span>
-        ) : (
-          <span>{t('未返回重置时间')}</span>
-        )}
-      </div>
     </div>
   )
 }
@@ -341,11 +329,6 @@ export function UsageWindowsCell({ entry, rows, updatedAt, now: nowProp, creditD
   const groups = groupWindows(rows)
   const grouped = rows.some(row => row.group)
   const activeTab = models.length > 0 ? detailTab : 'windows'
-  // 无分组、读数较长或没有比例的窗口（Kiro 的「剩 x / y 积分」、AStudio 的
-  // 两个余额）按紧凑行排：标签在左、读数在右。不这样排的话，未分组的窗口会
-  // 走「统计格」样式（标签在上一行、读数 15px 在下一行），单列时整格被一个
-  // 大数字占满，多列时又像两张并排的卡片 —— 与 Antigravity 那种小行读数不一致。
-  const compact = !grouped && (rows.length === 1 || rows.some(row => row.percent === null || row.view.length > 10))
   const warnings = usageWarningsOf(data)
   const supplementary = supplementaryReadings(data, rows)
   const measured = rows.filter(row => !row.aside && !row.unlimited)
@@ -370,6 +353,7 @@ export function UsageWindowsCell({ entry, rows, updatedAt, now: nowProp, creditD
   const age = updatedAt ? usageAgeText(updatedAt, t, now) : ''
   const updateTitle = updatedAt ? t('上次成功查询：{time}', { time: formatTime(updatedAt) }) : ''
   const caption = rows.every(row => row.percentText || row.view === '—') ? t('剩余比例') : t('分窗口额度')
+  const maxCols = grouped ? Math.min(2, groups.length) : 1
 
   const topStatusNode = topReset ? (
     <Tooltip>
@@ -415,24 +399,30 @@ export function UsageWindowsCell({ entry, rows, updatedAt, now: nowProp, creditD
               className='usage-window-plan' title={planName}>{planBadgeLabel(planName)}</Badge> : null}
             {topStatusNode}
           </span>
-          <span className={`usage-window-grid${grouped ? ' grouped' : ' ungrouped'}${compact ? ' compact' : ''}`}
-            style={{ '--quota-columns': Math.min(3, groups.length) } as React.CSSProperties}>
-            {groups.map(group => {
-              const title = groupTitleFor(group.name, models)
-              const groupModelResetAt = group.rows.reduce<number | null>((earliest, row) => {
-                if (!row.constrainedByModel || row.modelResetsAt === null) return earliest
-                return earliest === null || row.modelResetsAt < earliest ? row.modelResetsAt : earliest
-              }, null)
-              return (
-                <span className='usage-window-group' key={group.id}>
-                  {group.name ? <span className='usage-window-group-name' title={title || group.name}>{group.name}</span> : null}
-                  {group.rows.map(row => <WindowReading key={row.id} row={row} now={now} />)}
-                  {groupModelResetAt !== null ? (
-                    <GroupModelResetFooter group={group} models={models} resetAt={groupModelResetAt} now={now} />
-                  ) : null}
+          <span
+            className={`usage-window-grid${grouped ? ' grouped' : ' ungrouped'}${grouped && groups.length > 2 ? ' has-overflow-row' : ''}`}
+            style={{ '--quota-columns': maxCols } as React.CSSProperties}
+          >
+            {grouped ? (
+              groups.map((group, idx) => {
+                const title = groupTitleFor(group.name, models)
+                const spanFull = groups.length > 2 && groups.length % 2 === 1 && idx === groups.length - 1
+                return (
+                  <span className={`usage-window-group${spanFull ? ' is-span-full' : ''}`} key={group.id}>
+                    {group.name ? <span className='usage-window-group-name' title={title || group.name}>{group.name}</span> : null}
+                    <span className='usage-window-rows'>
+                      {group.rows.map(row => <WindowReading key={row.id} row={row} models={models} now={now} />)}
+                    </span>
+                  </span>
+                )
+              })
+            ) : (
+              <span className='usage-window-group'>
+                <span className='usage-window-rows'>
+                  {rows.map(row => <WindowReading key={row.id} row={row} models={models} now={now} />)}
                 </span>
-              )
-            })}
+              </span>
+            )}
           </span>
           <span className='usage-window-foot'>
             <span className='usage-window-updated' title={updateTitle}>
@@ -471,11 +461,21 @@ export function UsageWindowsCell({ entry, rows, updatedAt, now: nowProp, creditD
                       const value = row.percentText || row.view
                       const isConstrainedShort = row.constrainedByModel && isShortWindowCode(row.windowCode)
                       const isConstrainedLong = row.constrainedByModel && isLongWindowCode(row.windowCode)
+                      const effectiveResetAt = effectiveWindowResetAt(row)
+                      const inlineReset = effectiveResetAt !== null ? formatResetCountdown(effectiveResetAt, now) : null
                       return (
                         <div className='usage-window-reset' key={row.id}>
                           <div className='usage-window-reset-head'>
                             <span title={row.label}>{row.label}</span>
-                            <span className={`usage-window-reset-value ${row.tone}`}>{value}</span>
+                            <span className='usage-window-reset-cluster'>
+                              <span className={`usage-window-reset-value ${row.tone}`}>{value}</span>
+                              {inlineReset ? (
+                                <span className={`usage-window-pop-reset-short${!inlineReset.overdue && row.tone === 'warn' ? ' warn' : ''}`}>
+                                  <span className='usage-window-sep' aria-hidden='true'>·</span>
+                                  <span>{inlineReset.inline}</span>
+                                </span>
+                              ) : null}
+                            </span>
                           </div>
                           {isConstrainedShort ? (
                             row.modelResetsAt !== null ? (

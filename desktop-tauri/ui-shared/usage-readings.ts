@@ -229,6 +229,8 @@ export type NormalizedModelQuota = {
   window: string
   remainingPercent: number | null
   resetsAt: number | null
+  modelPercent: number | null
+  modelResetsAt: number | null
   row: UsageObject
 }
 
@@ -280,6 +282,8 @@ export function usageModelQuotasOf(value: unknown): NormalizedModelQuota[] {
     window: string
     remainingPercent: number | null
     resetsAt: number | null
+    modelPercent: number | null
+    modelResetsAt: number | null
     maxBaseId: string
     maxBaseName: string
     hadParenEffort: boolean
@@ -298,12 +302,16 @@ export function usageModelQuotasOf(value: unknown): NormalizedModelQuota[] {
     const remainingPercent = read === null ? null : Math.max(0, Math.min(100, read))
     const rawReset = usageNumberOrNull(row.resetsAt)
     const resetsAt = rawReset !== null && rawReset > 0 && rawReset <= 8.64e15 ? rawReset : null
+    const readModel = usageNumberOrNull(row.modelPercent)
+    const modelPercent = readModel === null ? null : Math.max(0, Math.min(100, readModel))
+    const rawModelReset = usageNumberOrNull(row.modelResetsAt)
+    const modelResetsAt = rawModelReset !== null && rawModelReset > 0 && rawModelReset <= 8.64e15 ? rawModelReset : null
     const maxBaseId = stripEffortId(rawId || rawName, true).value.toLowerCase()
     const hadParenEffort = EFFORT_PAREN_NAME_RE.test(rawName)
     const maxBaseName = stripEffortName(rawName, true).value.toLowerCase()
     idCounts.set(maxBaseId, (idCounts.get(maxBaseId) ?? 0) + 1)
     if (maxBaseName) nameCounts.set(maxBaseName, (nameCounts.get(maxBaseName) ?? 0) + 1)
-    items.push({ raw: row, rawId, rawName, group, window, remainingPercent, resetsAt, maxBaseId, maxBaseName, hadParenEffort })
+    items.push({ raw: row, rawId, rawName, group, window, remainingPercent, resetsAt, modelPercent, modelResetsAt, maxBaseId, maxBaseName, hadParenEffort })
   }
 
   type Entry = NormalizedModelQuota & { barePriority: number }
@@ -328,6 +336,8 @@ export function usageModelQuotasOf(value: unknown): NormalizedModelQuota[] {
       window: item.window,
       remainingPercent: item.remainingPercent,
       resetsAt: item.resetsAt,
+      modelPercent: item.modelPercent,
+      modelResetsAt: item.modelResetsAt,
       barePriority,
       row: {
         ...item.raw,
@@ -337,6 +347,8 @@ export function usageModelQuotasOf(value: unknown): NormalizedModelQuota[] {
         window: item.window,
         remainingPercent: item.remainingPercent,
         resetsAt: item.resetsAt,
+        ...(item.modelPercent !== null ? { modelPercent: item.modelPercent } : {}),
+        ...(item.modelResetsAt !== null ? { modelResetsAt: item.modelResetsAt } : {}),
       },
     }
     const existingIndex = byId.get(idKey) ?? (nameKey ? byGroupName.get(nameKey) : undefined)
@@ -359,16 +371,22 @@ export function usageModelQuotasOf(value: unknown): NormalizedModelQuota[] {
       existing.window = next.window
       existing.remainingPercent = next.remainingPercent
       existing.resetsAt = next.resetsAt
+      existing.modelPercent = next.modelPercent
+      existing.modelResetsAt = next.modelResetsAt
       existing.row = { ...next.row, id: existing.id, name: existing.name, group: existing.group || next.group }
     } else {
       if (!existing.window && next.window) existing.window = next.window
       if (existing.resetsAt === null && next.resetsAt !== null) existing.resetsAt = next.resetsAt
+      if (existing.modelPercent === null && next.modelPercent !== null) existing.modelPercent = next.modelPercent
+      if (existing.modelResetsAt === null && next.modelResetsAt !== null) existing.modelResetsAt = next.modelResetsAt
       existing.row = {
         ...existing.row,
         id: existing.id,
         name: existing.name,
         window: existing.window,
         resetsAt: existing.resetsAt,
+        ...(existing.modelPercent !== null ? { modelPercent: existing.modelPercent } : {}),
+        ...(existing.modelResetsAt !== null ? { modelResetsAt: existing.modelResetsAt } : {}),
       }
     }
     if (!existing.group && next.group) {

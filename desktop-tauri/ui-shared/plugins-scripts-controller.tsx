@@ -1,6 +1,6 @@
 import * as React from 'react'
 import {
-  Alert, Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogDescription,
+  Badge, Button, Dialog, DialogBody, DialogContent, DialogDescription,
   DialogFooter, DialogHeader, DialogTitle, Input, Label, Switch,
 } from '@ui'
 import type { ScriptOperation, ScriptPackage, ScriptPluginsState, ScriptRecommendation, ScriptUpdate } from './plugins'
@@ -245,7 +245,6 @@ export function useScriptPluginsController({
   const [settingsId, setSettingsId] = React.useState<string | null>(null)
   const [detailsPane, setDetailsPane] = React.useState<PluginDetailsPane>('settings')
   const [detailsRecommendation, setDetailsRecommendation] = React.useState<ScriptRecommendation | null>(null)
-  const [trusted, setTrusted] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
   const [operationTarget, setOperationTarget] = React.useState<ScriptOperation['target']>()
@@ -312,7 +311,7 @@ export function useScriptPluginsController({
   React.useEffect(() => {
     if (installRequest <= lastInstallRequest.current) return
     lastInstallRequest.current = installRequest
-    setTrusted(false); setError(''); setSettingsId(null); setDetailsRecommendation(null); setInstallNotice(null)
+    setError(''); setSettingsId(null); setDetailsRecommendation(null); setInstallNotice(null)
     setInstall({ name: '', version: '' })
   }, [installRequest])
   React.useEffect(() => {
@@ -343,7 +342,7 @@ export function useScriptPluginsController({
   }, [])
 
   const openInstall = React.useCallback((value: InstallDraft): void => {
-    setSettingsId(null); setDetailsRecommendation(null); setTrusted(false); setError(''); setInstallNotice(null); setInstall(value)
+    setSettingsId(null); setDetailsRecommendation(null); setError(''); setInstallNotice(null); setInstall(value)
   }, [])
 
   const openDetails = React.useCallback((pack: ScriptPackage, pane: PluginDetailsPane): void => {
@@ -368,7 +367,7 @@ export function useScriptPluginsController({
   }, [])
 
   async function confirmInstall(): Promise<void> {
-    if (!installNotice || !trusted || locked || pending.current) return
+    if (!installNotice || locked || pending.current) return
     const source = installNotice.name.trim()
     const accepted = await act('/api/plugins/scripts/install', {
       id: installNotice.id, name: source, source, version: installNotice.version.trim(), trusted: true,
@@ -446,15 +445,15 @@ export function useScriptPluginsController({
       if (!open) { if (busy || installNotice) details.cancel(); else setInstall(null) }
     }}>
       <DialogContent className='text-foreground'>
-        <DialogHeader><DialogTitle>{t('安装脚本插件')}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{install?.id ? t('更新脚本插件') : t('安装脚本插件')}</DialogTitle></DialogHeader>
         <DialogBody className='gap-4'>
           <DialogDescription className='text-xs leading-relaxed text-subtle'>{t('仅安装你信任的 npm 包、GitHub 仓库或 Magpie 社区分发包；完整性校验不等于安全审计。')}</DialogDescription>
           <div className='space-y-2'><Label htmlFor={`${prefix}-package`}>{t('npm 包名、GitHub 地址或 magpie:包名')}</Label>
             <Input id={`${prefix}-package`} value={install?.name || ''} disabled={busy} autoComplete='off' placeholder='@scope/plugin / https://github.com/owner/repo'
-              onChange={event => { setInstall(value => value ? { ...value, name: event.target.value } : value); setTrusted(false) }} /></div>
+              onChange={event => { setInstall(value => value ? { ...value, name: event.target.value } : value) }} /></div>
           <div className='space-y-2'><Label htmlFor={`${prefix}-version`}>{github ? t('分支、标签或提交（留空使用默认分支）') : t('插件版本（留空使用 latest）')}</Label>
             <Input id={`${prefix}-version`} value={install?.version || ''} disabled={busy} placeholder={github ? t('默认分支') : 'latest'} autoComplete='off'
-              onChange={event => { setInstall(value => value ? { ...value, version: event.target.value } : value); setTrusted(false) }} /></div>
+              onChange={event => { setInstall(value => value ? { ...value, version: event.target.value } : value) }} /></div>
           {github ? <p className='m-0 text-xs leading-relaxed text-muted-foreground'>{t('从 GitHub 官方源下载固定提交。仓库须包含可运行的提供商入口；安装运行依赖，但不执行构建和安装脚本。')}</p> : null}
           {magpie ? <p className='m-0 text-xs leading-relaxed text-muted-foreground'>{t('从 Magpie 社区官方分发目录下载，核验 SHA-512；更新与重装继续使用此来源。')}</p> : null}
           <p className='m-0 text-xs leading-relaxed text-muted-foreground'>{t('也可输入 file: 加网关电脑上的插件目录或 tgz 文件绝对路径；本地插件会复制安装，不修改源目录。')}</p>
@@ -465,20 +464,17 @@ export function useScriptPluginsController({
             <p className='m-0'>{t('兼容 OpenCode v1 / Magpie 提供商插件及其运行依赖；不加载界面、独立工具或 Pi 扩展。')}</p>
             <p className='m-0'>{t('支持自动授权、设备码、手动授权码和插件声明的凭据表单；本机读取作用于网关电脑。')}</p>
           </div> : null}
-          <Alert variant='warning'>{t('脚本不是安全沙箱，可以访问网关所在电脑的文件和网络。不要安装来历不明的插件。')}</Alert>
-          <Label className='flex items-start gap-2 text-xs leading-relaxed'><Checkbox checked={trusted} disabled={busy} onCheckedChange={value => setTrusted(value === true)} />
-            {t('我信任此插件来源，并允许它在网关电脑上运行。')}</Label>
           {error ? <p role='alert' className='m-0 text-xs text-destructive'>{error}</p> : null}
         </DialogBody>
         <DialogFooter><Button variant='outline' disabled={busy} onClick={() => setInstall(null)}>{t('取消')}</Button>
-          <Button disabled={locked || !trusted || !install?.name.trim()} onClick={() => {
-            if (install && trusted && !locked && !pending.current) {
+          <Button disabled={locked || !install?.name.trim()} onClick={() => {
+            if (install && install.name.trim() && !locked && !pending.current) {
               setError('')
               setInstallNotice({ ...install, name: install.name.trim(), version: install.version.trim() })
             }
-          }}>{t('继续安装')}</Button></DialogFooter>
-        <ScriptPluginInstallNotice open={installNotice !== null} source={installNotice?.name || ''}
-          version={installNotice?.version || ''} disabled={locked || !trusted} busy={busy} error={error} t={t}
+          }}>{install?.id ? t('继续更新') : t('继续安装')}</Button></DialogFooter>
+        <ScriptPluginInstallNotice open={installNotice !== null} updating={Boolean(installNotice?.id)} source={installNotice?.name || ''}
+          version={installNotice?.version || ''} disabled={locked} busy={busy} error={error} t={t}
           onCancel={() => { setInstallNotice(null); setError('') }} onConfirm={() => void confirmInstall()} />
       </DialogContent>
     </Dialog>

@@ -799,15 +799,15 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 540px;
+  min-width: 0;
   padding: 2px;
-  overflow-y: auto;
 }
 .cv-row { display: flex; justify-content: flex-start; }
 .cv-row.user { justify-content: flex-end; }
 .cv-row.sys { justify-content: center; }
 .cv-msg {
   max-width: 78%;
+  min-width: 0;
   padding: 8px 12px;
   border-radius: 10px;
   font-size: 12.5px;
@@ -847,6 +847,7 @@
 .cv-reasoning { color: var(--text-2); font-size: 12px; }
 .cv-tool {
   max-width: 88%;
+  min-width: 0;
   padding: 6px 10px;
   border: 1px dashed var(--border-strong);
   border-radius: 10px;

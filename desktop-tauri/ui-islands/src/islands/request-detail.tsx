@@ -342,25 +342,26 @@ function RequestDetail({ initialId, initialRow, initialToken, nav, onClose }: Re
           ) : null}
         </SheetHeader>
 
-        <SheetBody ref={bodyRef} className='gap-3.5'>
-          <div className='flex flex-wrap items-center gap-2'>
-            <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
-              aria-label={t('详情内容')} className='self-start' />
-            {detailRow?.origin !== 'local_direct' ? <RequestDebugSwitch /> : null}
-          </div>
-          <section hidden={active !== 'detail'}>
+        <div className='flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-5 py-2.5'>
+          <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
+            aria-label={t('详情内容')} className='self-start' />
+          {detailRow?.origin !== 'local_direct' ? <RequestDebugSwitch /> : null}
+        </div>
+
+        <SheetBody ref={bodyRef} className='gap-3.5 [scrollbar-gutter:stable]'>
+          <section hidden={active !== 'detail'} className='min-w-0 shrink-0'>
             <RequestDetailPane row={detailRow} loadingDetail={detailLoading} />
           </section>
           {showRoute ? (
-            <section hidden={active !== 'route'}>
+            <section hidden={active !== 'route'} className='min-w-0 shrink-0'>
               <RequestRoutePane row={detailRow as RequestRow & { route: RouteDecision }} />
             </section>
           ) : null}
-          <section hidden={active !== 'preview'}>
+          <section hidden={active !== 'preview'} className='min-w-0 shrink-0'>
             <PreviewPane state={raw} localDirect={detailRow?.origin === 'local_direct'} />
           </section>
           {showRaw ? (
-            <section hidden={active !== 'raw'}>
+            <section hidden={active !== 'raw'} className='min-w-0 shrink-0'>
               <RawPane data={(debug as { data: DebugTraffic }).data} />
             </section>
           ) : null}

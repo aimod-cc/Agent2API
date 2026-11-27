@@ -36,6 +36,8 @@ export type ModelQuotaReading = {
   percentText: string
   tone: 'ok' | 'warn' | 'muted'
   resetsAt: number | null
+  modelPercent: number | null
+  modelResetsAt: number | null
 }
 
 export type WindowGroup = { id: string; name: string; rows: UsageWindowReading[] }
@@ -46,6 +48,9 @@ export type TopResetSummary = {
 }
 
 const SHORT_WINDOW_MAX_MS = 6 * 3_600_000
+// 单模型配额按两位小数（0.01%）四舍五入，而分组窗口保留原始精度；
+// 比较时留出覆盖舍入误差的容差，避免 74.72% < 74.7234% 误判为整组模型受限。
+const MODEL_RECONCILE_EPS = 0.01
 
 function windowOrderRank(code: string): number {
   switch (code.trim().toLowerCase()) {
@@ -85,6 +90,7 @@ export function compactDurationText(remainingMs: number): string {
 }
 
 export function formatResetCountdown(resetsAt: number, now: number): {
+  inline: string
   short: string
   verbose: string
   overdue: boolean
@@ -93,6 +99,7 @@ export function formatResetCountdown(resetsAt: number, now: number): {
   const diff = resetsAt - now
   if (diff <= 0) {
     return {
+      inline: t('应已恢复'),
       short: t('应已恢复'),
       verbose: t('已过预计恢复时刻'),
       overdue: true,
@@ -101,6 +108,7 @@ export function formatResetCountdown(resetsAt: number, now: number): {
   }
   if (diff < 60_000) {
     return {
+      inline: t('即将恢复'),
       short: t('即将恢复'),
       verbose: t('不到 1 分钟后恢复'),
       overdue: false,
@@ -109,6 +117,7 @@ export function formatResetCountdown(resetsAt: number, now: number): {
   }
   const duration = compactDurationText(diff)
   return {
+    inline: duration,
     short: t('{time}后', { time: duration }),
     verbose: t('{time}后恢复', { time: duration }),
     overdue: false,
@@ -214,14 +223,21 @@ function reconcileWindowsWithModels(
   }
   for (const [groupName, groupRows] of byGroup) {
     if (groupRows.some(row => row.constrainedByModel)) continue
-    const matched = models.filter(model => model.group === groupName && model.percent !== null)
+    const groupKey = groupName.trim().toLowerCase()
+    const groupModels = models.filter(model => model.group.trim().toLowerCase() === groupKey)
+    const explicitModels = groupModels.filter(model => model.modelPercent !== null)
+    const matched = explicitModels.length
+      ? explicitModels.map(model => ({ percent: model.modelPercent!, resetsAt: model.modelResetsAt ?? model.resetsAt }))
+      : groupModels
+        .filter(model => model.percent !== null)
+        .map(model => ({ percent: model.percent!, resetsAt: model.resetsAt }))
     if (!matched.length) continue
-    const maxModelPct = Math.max(...matched.map(model => model.percent!))
+    const maxModelPct = Math.max(...matched.map(model => model.percent))
     const minWindowPct = Math.min(...groupRows.map(row => row.unlimited ? 100 : row.percent ?? Infinity))
-    if (!(maxModelPct + 1e-6 < minWindowPct)) continue
+    if (!(maxModelPct + MODEL_RECONCILE_EPS < minWindowPct)) continue
 
     const resets = matched
-      .filter(model => model.percent! < 100 && model.resetsAt !== null)
+      .filter(model => model.percent < 100 && model.resetsAt !== null)
       .map(model => model.resetsAt!)
     const future = resets.filter(at => at > now)
     const modelReset = future.length ? Math.min(...future) : resets.length ? Math.min(...resets) : null
@@ -247,7 +263,7 @@ function reconcileWindowsWithModels(
       target.constrainedByModel = true
       target.modelResetsAt = modelReset
       for (const row of groupRows) {
-        if (isLongWindowCode(row.windowCode) && (row.unlimited || (row.percent !== null && row.percent > maxModelPct + 1e-6))) {
+        if (isLongWindowCode(row.windowCode) && (row.unlimited || (row.percent !== null && row.percent > maxModelPct + MODEL_RECONCILE_EPS))) {
           row.constrainedByModel = true
           row.modelResetsAt = modelReset
           row.tone = 'muted'
@@ -320,6 +336,8 @@ export function usageModelQuotas(entry: UsageEntry): ModelQuotaReading[] {
     percentText: item.remainingPercent !== null ? `${numberText(item.remainingPercent)}%` : '',
     tone: item.remainingPercent === null ? 'muted' : item.remainingPercent < 20 ? 'warn' : 'ok',
     resetsAt: item.resetsAt,
+    modelPercent: item.modelPercent,
+    modelResetsAt: item.modelResetsAt,
   }))
 }
 

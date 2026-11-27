@@ -91,14 +91,27 @@ fn ratio_of(usage: &Value, value: Option<f64>) -> Option<Value> {
         && row["unlimited"] != true && (number(&row["remainingPercent"]).is_some_and(|value| value <= 0.0)
         || number(&row["remaining"]).is_some_and(|value| value <= 0.0)))
         .map(|row| row["group"].as_str().unwrap_or("")).collect::<HashSet<_>>();
-    let mut max_model_percent_by_group = HashMap::<String, f64>::new();
+    const MODEL_CAP_EPS: f64 = 0.01;
+    let mut explicit_model_max = HashMap::<String, f64>::new();
+    let mut fallback_model_max = HashMap::<String, f64>::new();
     for item in usage["modelQuotas"].as_array().into_iter().flatten() {
         let Some(group) = item["group"].as_str().map(str::trim).filter(|group| !group.is_empty()) else { continue; };
-        let Some(pct) = number(&item["remainingPercent"]).map(|value| value.clamp(0.0, 100.0)) else { continue; };
-        max_model_percent_by_group
-            .entry(group.to_ascii_lowercase())
-            .and_modify(|max| *max = max.max(pct))
-            .or_insert(pct);
+        let group_key = group.to_ascii_lowercase();
+        if let Some(pct) = number(&item["modelPercent"]).map(|value| value.clamp(0.0, 100.0)) {
+            explicit_model_max
+                .entry(group_key)
+                .and_modify(|max| *max = max.max(pct))
+                .or_insert(pct);
+        } else if let Some(pct) = number(&item["remainingPercent"]).map(|value| value.clamp(0.0, 100.0)) {
+            fallback_model_max
+                .entry(group_key)
+                .and_modify(|max| *max = max.max(pct))
+                .or_insert(pct);
+        }
+    }
+    let mut max_model_percent_by_group = fallback_model_max;
+    for (group_key, pct) in explicit_model_max {
+        max_model_percent_by_group.insert(group_key, pct);
     }
     let mut group_min_window = HashMap::<String, f64>::new();
     let mut group_has_short = HashSet::<String>::new();
@@ -117,7 +130,7 @@ fn ratio_of(usage: &Value, value: Option<f64>) -> Option<Value> {
         }
     }
     let model_cap_by_group: HashMap<String, f64> = max_model_percent_by_group.into_iter()
-        .filter(|(group_key, cap)| group_min_window.get(group_key).is_some_and(|min_w| *cap + 1e-6 < *min_w))
+        .filter(|(group_key, cap)| group_min_window.get(group_key).is_some_and(|min_w| *cap + MODEL_CAP_EPS < *min_w))
         .collect();
     let mut adjusted = false;
     let windows = rows.iter().map(|row| {
@@ -131,7 +144,7 @@ fn ratio_of(usage: &Value, value: Option<f64>) -> Option<Value> {
             model_cap_by_group.get(&group_key).copied()
                 .filter(|_| short || !group_has_short.contains(&group_key))
         }).flatten();
-        let capped = model_cap.filter(|cap| row["unlimited"] == true || percent.is_none_or(|p| *cap + 1e-6 < p));
+        let capped = model_cap.filter(|cap| row["unlimited"] == true || percent.is_none_or(|p| *cap + MODEL_CAP_EPS < p));
         let label = [row["group"].as_str().unwrap_or(""), row["window"].as_str().or(row["label"].as_str()).unwrap_or("")]
             .into_iter().filter(|value| !value.is_empty()).collect::<Vec<_>>().join(" · ");
         json!({ "label": label,
@@ -260,6 +273,36 @@ mod tests {
             ]
         });
         let ratio = ratio_of(&partial_capped, None).expect("ratio");
+        assert_eq!(ratio["percent"].as_f64(), Some(100.0));
+        assert_eq!(ratio["windows"][0]["percent"].as_f64(), Some(100.0));
+    }
+
+    #[test]
+    fn ratio_of_ignores_rounding_diff_between_model_and_weekly_window() {
+        let with_explicit_model_percent = json!({
+            "windows": [
+                { "group": "Gemini", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 74.7234 }
+            ],
+            "modelQuotas": [
+                { "id": "gemini-4-neon", "group": "Gemini", "remainingPercent": 74.72, "modelPercent": 100.0 },
+                { "id": "gemini-3.1-flash-image", "group": "Gemini", "remainingPercent": 74.72, "modelPercent": 100.0 }
+            ]
+        });
+        let ratio = ratio_of(&with_explicit_model_percent, None).expect("ratio");
+        assert_eq!(ratio["percent"].as_f64(), Some(100.0));
+        assert_eq!(ratio["windows"][0]["percent"].as_f64(), Some(100.0));
+
+        let legacy_rounded_only = json!({
+            "windows": [
+                { "group": "Gemini", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 74.7234 }
+            ],
+            "modelQuotas": [
+                { "id": "gemini-4-neon", "group": "Gemini", "remainingPercent": 74.72 }
+            ]
+        });
+        let ratio = ratio_of(&legacy_rounded_only, None).expect("ratio");
         assert_eq!(ratio["percent"].as_f64(), Some(100.0));
         assert_eq!(ratio["windows"][0]["percent"].as_f64(), Some(100.0));
     }

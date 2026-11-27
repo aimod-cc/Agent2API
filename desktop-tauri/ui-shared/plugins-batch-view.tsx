@@ -1,9 +1,34 @@
 import * as React from 'react'
-import { Alert, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Label, Popover, PopoverContent, PopoverTitle, PopoverTrigger, Progress, Spinner, cn } from '@ui'
+import { Alert, Button, Checkbox, Label, Popover, PopoverContent, PopoverTitle, PopoverTrigger, Progress, SegmentedControl, Spinner } from '@ui'
 import { PluginArtwork } from './plugin-artwork'
 import { applicablePluginItems, type PluginBatchAction, type PluginBatchItem } from './plugins-batch-items'
-import type { PluginBatchTask } from './plugins-batch-runner'
+import type { PluginBatchModel, PluginBatchResult } from './plugins-batch-runner'
 import type { PluginTranslate } from './plugins-store'
+import { DIALOG_SEG_CLASS } from './dialog-segmented'
+import { PluginTaskDialog, PluginTaskProgressBar, PluginTaskRemoveButton, ScriptTrustConfirmDialog } from './plugins-task-dialog'
+
+const formatSize = (bytes: number) => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MiB` : `${Math.max(1, Math.round(bytes / 1024))} KiB`
+
+function formatPluginVersion(value?: string | null): string {
+  const trimmed = value?.trim() || ''
+  if (!trimmed) return ''
+  if (trimmed.startsWith('v')) return trimmed
+  const isVersion = /^\d+\.\d+/.test(trimmed) && !/^[0-9a-f]{7,40}$/i.test(trimmed)
+  return isVersion ? `v${trimmed}` : trimmed
+}
+
+function itemVersionDetail(action: PluginBatchAction, item: PluginBatchItem, t: PluginTranslate): string {
+  const current = formatPluginVersion(item.version)
+  const latest = formatPluginVersion(item.latest)
+  if (action === 'update') {
+    if (current && latest) return `${current} → ${latest}`
+    if (latest) return latest
+    if (current) return `${current} → ${t('最新版本')}`
+    return t('最新版本')
+  }
+  if (action === 'install') return current || t('最新版本')
+  return current
+}
 
 export function pluginBatchVerb(action: PluginBatchAction, t: PluginTranslate): string {
   if (action === 'install') return t('安装')
@@ -57,70 +82,316 @@ export function PluginBatchToolbar({ items, visibleKeys, selected, disabled, onS
   </div>
 }
 
-export function PluginBatchConfirm({ action, items, disabled, onClose, onConfirm, t }: {
-  action: PluginBatchAction; items: PluginBatchItem[]; disabled: boolean; onClose(): void; onConfirm(): void; t: PluginTranslate
-}) {
-  const [trusted, setTrusted] = React.useState(false)
-  const scriptInstall = (action === 'install' || action === 'update') && items.some(item => item.kind === 'script')
-  const destructive = action === 'uninstall' || action === 'disable'
-  const verb = pluginBatchVerb(action, t)
-  const accounts = items.reduce((sum, item) => sum + item.accounts, 0)
-  return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
-    <DialogContent className='w-[min(680px,calc(100vw-48px))]'>
-      <DialogHeader><DialogTitle>{t('{action}所选的 {count} 个插件', { action: verb, count: items.length })}</DialogTitle></DialogHeader>
-      <DialogBody className='min-h-0 gap-4'>
-        <ul className='plugins-confirm-list'>{items.map(item => <li key={item.key}>
-          <PluginArtwork src={item.icon} />
-          <div className='min-w-0 flex-1'><p className='m-0 text-sm'>{item.name}</p><p className='m-0 mt-1 text-xs text-muted-foreground'>{item.sourceLabel} · {action === 'update' ? item.latest || item.version : item.version || t('最新版本')}</p>{item.kind === 'script' && item.source ? <p className='m-0 mt-1 break-all text-xs text-muted-foreground'>{item.source}</p> : null}</div>
-          {destructive && item.accounts ? <span className='shrink-0 text-xs text-warning'>{t('{count} 个账号受影响', { count: item.accounts })}</span> : null}
-        </li>)}</ul>
-        {destructive ? <Alert variant='warning'>{t('对应提供商将停止转发。账号、凭据和原有设置均保留，重新安装或启用并成功加载后恢复。')}</Alert> : null}
-        {scriptInstall ? <>
-          <Alert variant='warning'>{t('脚本不是安全沙箱，可以访问网关所在电脑的文件和网络。不要安装来历不明的插件。')}</Alert>
-          <div className='space-y-2 text-xs text-subtle'>
-            <p>{t('Magpie 官方和社区插件均通过兼容方式接入 Agent2API，不保证 100% 可用。')}</p>
-            <p>{t('签到及附带任务默认允许，实际执行遵循签到中心的开关和计划。')}</p>
-            <p className='text-muted-foreground'>{t('部分插件的附带任务可能消耗额度、发送对话或创建及解散群聊。')}</p>
-          </div>
-          <Label className='flex items-start gap-3 text-xs font-normal leading-5'><Checkbox checked={trusted} onCheckedChange={value => setTrusted(value === true)} />{t('我信任本次所选脚本插件的来源，并允许它们在网关电脑上运行。')}</Label>
-        </> : null}
-      </DialogBody>
-      <DialogFooter className='flex-wrap'>
-        <span className='mr-auto text-xs text-muted-foreground'>{destructive && accounts ? t('保留 {count} 个账号的数据', { count: accounts }) : t('单项失败不会中断其余插件')}</span>
-        <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
-        <Button variant={destructive ? 'destructive' : 'default'} disabled={disabled || scriptInstall && !trusted} onClick={onConfirm}>{t('确认{action}（{count}）', { action: verb, count: items.length })}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+type BatchFilter = 'all' | 'pending' | 'done' | 'failed'
+type PendingBatchStart = 'start' | 'retry'
+
+const isPendingResult = (row: PluginBatchResult) => row.state === 'waiting' || row.state === 'working'
+const isDoneResult = (row: PluginBatchResult) => row.state === 'succeeded' || row.state === 'warning'
+const isFailedResult = (row: PluginBatchResult) => row.state === 'failed' || row.state === 'unconfirmed'
+
+function summarizeBatch(results: PluginBatchResult[]) {
+  const waiting = results.filter(row => row.state === 'waiting').length
+  const failed = results.filter(row => row.state === 'failed').length
+  const warnings = results.filter(row => row.state === 'warning' || row.state === 'unconfirmed').length
+  const succeeded = results.filter(isDoneResult).length
+  const completed = results.filter(row => !isPendingResult(row)).length
+  const current = results.find(row => row.state === 'working')
+  const unconfirmed = results.some(row => row.state === 'unconfirmed')
+  return { waiting, failed, warnings, succeeded, completed, total: results.length, current, unconfirmed }
 }
 
-export function PluginBatchProgress({ task, onRetry, onClose, t }: { task: PluginBatchTask; onRetry(items: PluginBatchItem[]): void; onClose(): void; t: PluginTranslate }) {
-  const [open, setOpen] = React.useState(false)
-  const completed = task.results.filter(item => !['waiting', 'working'].includes(item.state)).length
-  const failed = task.results.filter(item => item.state === 'failed')
-  const unresolved = task.results.some(item => item.state === 'unconfirmed')
+function batchDialogTitle(action: PluginBatchAction, done: boolean, t: PluginTranslate): string {
+  if (done) {
+    if (action === 'update') return t('插件更新结果')
+    if (action === 'install') return t('批量安装结果')
+    return t('批量{action}结束', { action: pluginBatchVerb(action, t) })
+  }
+  if (action === 'update') return t('批量更新插件')
+  if (action === 'install') return t('批量安装插件')
+  if (action === 'uninstall') return t('批量卸载插件')
+  if (action === 'enable') return t('批量启用插件')
+  return t('批量停用插件')
+}
+
+function batchDialogSubtitle(action: PluginBatchAction, t: PluginTranslate): string {
+  if (action === 'update') return t('先确认更新清单，再逐个下载并更新')
+  if (action === 'install') return t('先确认安装清单，再逐个下载并安装')
+  return t('先确认插件清单，再逐个执行操作')
+}
+
+function batchStatusLabel(action: PluginBatchAction, row: PluginBatchResult, t: PluginTranslate): string {
+  if (row.state === 'waiting') {
+    if (action === 'update') return t('待更新')
+    if (action === 'install') return t('待安装')
+    return t('待处理')
+  }
+  if (row.state === 'working') {
+    if (row.message) return row.message
+    if (action === 'update') return t('正在更新…')
+    if (action === 'install') return t('正在安装…')
+    return t('正在处理…')
+  }
+  if (row.state === 'succeeded') {
+    if (action === 'update') return t('已更新')
+    if (action === 'install') return t('已安装')
+    return t('完成')
+  }
+  if (row.state === 'warning') return t('已完成，需检查')
+  if (row.state === 'unconfirmed') return t('结果待确认')
+  if (action === 'update') return t('更新失败')
+  if (action === 'install') return t('安装失败')
+  return t('操作失败')
+}
+
+export function PluginBatchDialog({ model, disabled, t }: {
+  model: PluginBatchModel
+  disabled: boolean
+  t: PluginTranslate
+}) {
+  const rowsRef = React.useRef<HTMLDivElement>(null)
+  const [confirmAction, setConfirmAction] = React.useState<PendingBatchStart | null>(null)
+  const [filter, setFilter] = React.useState<BatchFilter>('all')
+  const task = model.task
+  const results = task?.results ?? []
+  const failedCount = results.filter(isFailedResult).length
+
+  React.useEffect(() => {
+    if (!model.open || !results.length) setFilter('all')
+  }, [model.open, results.length])
+  React.useEffect(() => {
+    if (filter === 'failed' && failedCount === 0) setFilter('all')
+  }, [filter, failedCount])
+  React.useEffect(() => {
+    if (!model.open || task?.running || !results.length) setConfirmAction(null)
+  }, [model.open, task?.running, results.length])
+
+  if (!task) return null
+
+  const { waiting, failed, warnings, succeeded, completed, total, current, unconfirmed } = summarizeBatch(results)
+  const action = task.action
+  const verb = pluginBatchVerb(action, t)
+  const destructive = action === 'uninstall' || action === 'disable'
+  const accounts = results.reduce((sum, row) => sum + row.item.accounts, 0)
+  const restoredAccounts = action === 'install'
+    ? results.filter(row => row.state === 'succeeded' && row.item.required).reduce((sum, row) => sum + row.item.accounts, 0)
+    : 0
+  const pendingCount = results.filter(isPendingResult).length
+  const doneCount = results.filter(isDoneResult).length
+  const visibleResults = filter === 'pending'
+    ? results.filter(isPendingResult)
+    : filter === 'done'
+      ? results.filter(isDoneResult)
+      : filter === 'failed'
+        ? results.filter(isFailedResult)
+        : results
+
+  const requestStart = (kind: PendingBatchStart) => {
+    const targetState = kind === 'retry' ? 'failed' : 'waiting'
+    const needsScriptConfirm = (action === 'install' || action === 'update')
+      && results.some(row => row.state === targetState && row.item.kind === 'script')
+    if (needsScriptConfirm) {
+      setConfirmAction(kind)
+      return
+    }
+    void model.start(kind === 'retry')
+  }
+
+  const confirmAndStart = () => {
+    if (!confirmAction) return
+    const retry = confirmAction === 'retry'
+    setConfirmAction(null)
+    void model.start(retry)
+  }
+
+  const pendingLabel = action === 'update' ? t('待更新') : action === 'install' ? t('待安装') : t('待处理')
+  const doneLabel = action === 'update' ? t('已更新') : action === 'install' ? t('已安装') : t('已完成')
+  const filterOptions: Array<{ value: BatchFilter; label: string; count: number }> = [
+    { value: 'all', label: t('全部'), count: results.length },
+    { value: 'pending', label: pendingLabel, count: pendingCount },
+    { value: 'done', label: doneLabel, count: doneCount },
+    ...(failedCount > 0 ? [{ value: 'failed' as const, label: t('失败'), count: failedCount }] : []),
+  ]
+
+  return (
+    <PluginTaskDialog
+      open={model.open}
+      confirmOpen={confirmAction !== null}
+      onOpenChange={model.setOpen}
+      onClose={model.close}
+      hasRows={results.length > 0}
+      title={batchDialogTitle(action, task.phase === 'done', t)}
+      subtitle={batchDialogSubtitle(action, t)}
+      rowsRef={rowsRef}
+      top={
+        destructive ? (
+          <Alert variant='warning' className='shrink-0'>
+            {t('对应提供商将停止转发。账号、凭据和原有设置均保留，重新安装或启用并成功加载后恢复。')}
+          </Alert>
+        ) : null
+      }
+      filterBar={
+        results.length ? (
+          <SegmentedControl<BatchFilter>
+            aria-label={t('按状态筛选')}
+            className={DIALOG_SEG_CLASS}
+            value={filter}
+            onValueChange={next => {
+              setFilter(next)
+              if (rowsRef.current) rowsRef.current.scrollTop = 0
+            }}
+            options={filterOptions}
+          />
+        ) : null
+      }
+      listHeader={t('已选 {count} 个插件', { count: results.length })}
+      belowList={
+        <>
+          {unconfirmed ? (
+            <Alert variant='warning' className='shrink-0'>{t('本批操作已暂停，请先刷新插件状态')}</Alert>
+          ) : null}
+          <p className='m-0 shrink-0 text-xs leading-5 text-muted-foreground'>
+            {destructive && accounts
+              ? t('保留 {count} 个账号的数据', { count: accounts })
+              : t('单项失败不会中断其余插件。账号和原有设置均保留。')}
+          </p>
+        </>
+      }
+      footerStatus={
+        task.running ? (
+          <>
+            <p className='mb-2'>{current?.item.name || ''} · {completed}/{total}</p>
+            <Progress value={completed} max={Math.max(1, total)} aria-label={t('插件批量操作进度')} />
+          </>
+        ) : task.phase === 'done' ? (
+          restoredAccounts && !failed
+            ? t('{count} 个账号所需插件已就绪', { count: restoredAccounts })
+            : t('完成 {done} 个 · 失败 {failed} 个 · 需检查 {warnings} 个', { done: succeeded, failed, warnings })
+        ) : (
+          t('已选 {count} 个插件', { count: waiting })
+        )
+      }
+      footerActions={
+        <>
+          <Button variant='outline' onClick={model.close}>
+            {task.running ? t('收起') : task.phase === 'done' ? t('完成') : t('取消')}
+          </Button>
+          {!task.running && failed > 0 && !unconfirmed ? (
+            <Button variant='outline' disabled={disabled} onClick={() => requestStart('retry')}>
+              {t('重试失败项')}
+            </Button>
+          ) : null}
+          {task.phase === 'ready' && waiting > 0 && !unconfirmed ? (
+            <Button variant={destructive ? 'destructive' : 'default'} disabled={disabled} onClick={() => requestStart('start')}>
+              {t('开始{action}（{count}）', { action: verb, count: waiting })}
+            </Button>
+          ) : null}
+        </>
+      }
+      nestedDialog={
+        <ScriptTrustConfirmDialog
+          open={confirmAction !== null}
+          action={action === 'update' ? 'update' : 'install'}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={confirmAndStart}
+          t={t}
+        />
+      }
+    >
+      {visibleResults.map(row => {
+        const { item } = row
+        const versionDetail = itemVersionDetail(action, item, t)
+        const stateClass = row.state === 'succeeded'
+          ? 'text-success'
+          : row.state === 'failed'
+            ? 'text-destructive'
+            : row.state === 'warning' || row.state === 'unconfirmed'
+              ? 'text-warning'
+              : 'text-muted-foreground'
+        const secondaryMetric = row.state === 'working' && typeof row.percent === 'number'
+          ? `${Math.round(row.percent)}%`
+          : item.size
+            ? formatSize(item.size)
+            : ''
+        return (
+          <div key={item.key} className='plugins-file-row'>
+            <PluginArtwork src={item.icon} />
+            <div className='min-w-0 flex-1'>
+              <p className='m-0 text-sm'>{item.name}</p>
+              <p className='m-0 mt-1 text-xs text-muted-foreground'>
+                {item.sourceLabel}{versionDetail ? ` · ${versionDetail}` : ''}
+              </p>
+              {item.kind === 'script' && item.source ? (
+                <p className='m-0 mt-1 break-all text-xs text-muted-foreground'>{item.source}</p>
+              ) : null}
+              {destructive && item.accounts ? (
+                <p className='m-0 mt-1 text-xs text-warning'>{t('{count} 个账号受影响', { count: item.accounts })}</p>
+              ) : null}
+              {action === 'install' && item.required && item.accounts ? (
+                <p className='m-0 mt-1 text-xs text-warning'>{t('{count} 个账号等待恢复', { count: item.accounts })}</p>
+              ) : null}
+              {row.message && (row.state === 'failed' || row.state === 'warning' || row.state === 'unconfirmed') ? (
+                <p className={`m-0 mt-1 break-words text-xs ${row.state === 'failed' ? 'text-destructive' : 'text-warning'}`}>{row.message}</p>
+              ) : null}
+              {row.message && row.state === 'waiting' ? (
+                <p className='m-0 mt-1 break-words text-xs text-muted-foreground'>{row.message}</p>
+              ) : null}
+            </div>
+            <div className='plugins-file-state'>
+              <span className={stateClass}>
+                {row.state === 'working' ? <Spinner className='inline-block size-3' /> : null}{' '}
+                {batchStatusLabel(action, row, t)}
+              </span>
+              {secondaryMetric ? <span className='mt-1 block tabular-nums text-muted-foreground'>{secondaryMetric}</span> : null}
+            </div>
+            {task.phase === 'ready' && !disabled ? (
+              <PluginTaskRemoveButton
+                label={t('移除插件 {name}', { name: item.name })}
+                onClick={() => model.remove(item.key)}
+              />
+            ) : null}
+          </div>
+        )
+      })}
+      {!results.length ? (
+        <p className='m-0 py-8 text-center text-xs text-muted-foreground'>{t('没有可处理的插件')}</p>
+      ) : !visibleResults.length ? (
+        <p className='m-0 py-8 text-center text-xs text-muted-foreground'>{t('没有符合筛选条件的插件')}</p>
+      ) : null}
+    </PluginTaskDialog>
+  )
+}
+
+export function PluginBatchProgress({ model, t }: { model: PluginBatchModel; t: PluginTranslate }) {
+  if (!model.backgroundVisible || !model.task) return null
+  const task = model.task
+  const { completed, total, succeeded, failed, warnings, current, unconfirmed } = summarizeBatch(task.results)
   const verb = pluginBatchVerb(task.action, t)
-  const current = task.results.find(item => item.state === 'working')
-  const succeeded = task.results.filter(item => item.state === 'succeeded' || item.state === 'warning').length
-  const warnings = task.results.filter(item => item.state === 'warning' || item.state === 'unconfirmed').length
-  const processed = task.results.filter(item => item.state === 'succeeded')
-  const restoredAccounts = task.action === 'install' ? processed.filter(item => item.item.required).reduce((total, item) => total + item.item.accounts, 0) : 0
-  React.useEffect(() => { if (!task.running && task.results.some(item => item.state !== 'succeeded')) setOpen(true) }, [task.running, task.results])
-  return <div className='plugins-task' role='status' aria-live='polite'>
-    <div className='plugins-task-head'>
-      {task.running ? <Spinner className='size-3.5' /> : null}
-      <span className='text-xs'>{task.running ? t('正在批量{action}插件', { action: verb }) : unresolved ? t('本批操作已暂停，请先刷新插件状态') : t('批量{action}结束', { action: verb })}</span>
-      <span className='text-xs tabular-nums text-muted-foreground'>{completed}/{task.results.length}</span>
-      {current ? <span className='plugins-task-current'>{current.item.name} · {current.message}</span> : <span className='plugins-task-current'>{restoredAccounts ? t('{count} 个账号所需插件已就绪', { count: restoredAccounts }) : t('完成 {done} 个 · 失败 {failed} 个 · 需检查 {warnings} 个', { done: succeeded, failed: failed.length, warnings })}</span>}
-      <div className='ml-auto flex items-center gap-2'>
-        {!task.running && failed.length && !unresolved ? <Button variant='outline' size='xs' onClick={() => onRetry(failed.map(item => item.item))}>{t('重试失败项')}</Button> : null}
-        <Button variant='link' size='xs' onClick={() => setOpen(value => !value)}>{open ? t('收起明细') : t('展开明细')}</Button>
-        {!task.running ? <Button variant='ghost' size='xs' onClick={onClose}>{t('关闭')}</Button> : null}
-      </div>
-    </div>
-    <Progress value={completed} max={task.results.length} aria-label={t('插件批量操作进度')} />
-    {open ? <ul className='plugins-task-results'>{task.results.map(result => <li key={result.item.key} className={cn('text-xs', result.state === 'failed' ? 'text-destructive' : result.state === 'warning' || result.state === 'unconfirmed' ? 'text-warning' : 'text-subtle')}>
-      <span>{result.item.name}</span><span className='ml-auto'>{result.state === 'succeeded' ? t('完成') : result.message || t('等待处理')}</span>
-    </li>)}</ul> : null}
-  </div>
+  const restoredAccounts = task.action === 'install'
+    ? task.results.filter(row => row.state === 'succeeded' && row.item.required).reduce((sum, row) => sum + row.item.accounts, 0)
+    : 0
+  return (
+    <PluginTaskProgressBar
+      running={task.running}
+      title={
+        task.running
+          ? t('正在批量{action}插件', { action: verb })
+          : unconfirmed
+            ? t('本批操作已暂停，请先刷新插件状态')
+            : t('批量{action}结束', { action: verb })
+      }
+      done={completed}
+      total={total}
+      detail={
+        current
+          ? `${current.item.name}${current.message ? ` · ${current.message}` : ''}`
+          : restoredAccounts && !failed
+            ? t('{count} 个账号所需插件已就绪', { count: restoredAccounts })
+            : t('完成 {done} 个 · 失败 {failed} 个 · 需检查 {warnings} 个', { done: succeeded, failed, warnings })
+      }
+      progressLabel={t('插件批量操作进度')}
+      onInspect={() => model.setOpen(true)}
+      onClose={task.running ? undefined : model.clear}
+      t={t}
+    />
+  )
 }
