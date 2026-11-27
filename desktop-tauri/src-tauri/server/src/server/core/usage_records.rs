@@ -272,6 +272,8 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome, query_config: &str
         if let Some(usage) = &outcome.usage {
             crate::server::core::limiter::sources::note(account_id, usage, query_config);
             crate::server::core::account_order::note_usage(account_id, usage, query_config);
+            // 积分快照（本地定制）：在 `with_mut` 闭包之外调用，内部自己取库锁，不重入。
+            crate::server::core::credit_snapshots::record(account_id, usage, now);
         }
     }
     match written {

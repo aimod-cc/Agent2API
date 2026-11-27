@@ -884,6 +884,13 @@ const BRIDGE_JS: &str = r#"
       client: options && options.client,
       origin: options && options.origin,
     })),
+    // 积分报表（按账号 × 天的实测积分消耗）。档位与 dates 的口径同上；
+    // 没有 apiKey / client / origin —— 积分按账号扣，快照里没有「哪把 Key 发的」
+    getStatsCredits: (range, dates) => call('GET', '/api/stats/credits' + toQuery({
+      range,
+      startDate: dates && dates.start,
+      endDate: dates && dates.end,
+    })),
     // 筛选条件是可选对象，复用上面 toQuery 的「空值跳过」语义：
     // 清空的输入框不该变成 `?model=` 这种永不命中的条件
     getStatsRequests: query => call('GET', '/api/stats/requests' + toQuery(query)),

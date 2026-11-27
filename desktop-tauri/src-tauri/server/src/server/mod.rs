@@ -379,6 +379,9 @@ impl ServerState {
         // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时
         // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
         core::usage_records::install(db.clone());
+        // 积分余额的时间序列快照（本地定制，不走 schema 版本链，表自建）：写入点在
+        // `usage_records::write_result` 的成功分支，每次余额查询每个积分钱包一行。
+        core::credit_snapshots::install(db.clone());
         // 签到记录的明细台账（签到中心「签到记录」页）：装句柄即可，记账点在
         // `core::billing::checkin::run_checkin`（唯一），台账全量保留 ——
         // 清历史走签到记录页自己的「清空 / 按筛选删除」（见 checkin_records 模块头）。

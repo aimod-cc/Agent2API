@@ -93,6 +93,7 @@ pub(crate) mod title_routing;
 // 范围、密钥封装与自动同步的触发口径见该模块头
 pub mod cloud_sync;
 pub mod credential_maintenance;
+pub mod credit_snapshots;
 pub mod crypto;
 pub mod custom_providers;
 pub mod debug_traffic;

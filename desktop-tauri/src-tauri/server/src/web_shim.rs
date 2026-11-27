@@ -2444,6 +2444,15 @@ pub fn shim_js() -> &'static str {
         origin: options && options.origin,
       }));
     },
+    // 积分报表（按账号 × 天的实测积分消耗）。档位与 dates 的口径同上，
+    // 与桌面壳 bridge.rs 的同名方法成对维护。
+    getStatsCredits: function (range, dates) {
+      return call('GET', '/api/stats/credits' + toQuery({
+        range: range,
+        startDate: dates && dates.start,
+        endDate: dates && dates.end,
+      }));
+    },
     getStatsRequests: function (query) { return call('GET', '/api/stats/requests' + toQuery(query)); },
     getStatsRequestDetail: function (query) { return call('GET', '/api/stats/requests/detail' + toQuery(query)); },
     getStatsRequestFilters: function () { return call('GET', '/api/stats/requests/filters'); },

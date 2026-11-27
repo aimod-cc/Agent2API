@@ -109,6 +109,97 @@ pub fn request_date_bounds(start: NaiveDate, end: NaiveDate) -> Option<(i64, i64
     Some((clock::local_midnight_ms(start), clock::local_midnight_ms(next)))
 }
 
+/// 积分报表的区间（闭合的本地日期），口径与请求报表一致 —— 除了 `all`：
+/// 请求聚合长期保留，而积分快照只留 `credit_snapshots::RETENTION_DAYS` 天，
+/// 所以 `all` 的起点取**快照表里最早的一天**（快照只从开始采集那天才有，
+/// 在此之前没有任何读数）。快照表还没建时按「今天往前 29 天」给一个合法区间。
+fn credit_range(
+    conn: &rusqlite::Connection,
+    range: &str,
+    today: NaiveDate,
+    custom: Option<(NaiveDate, NaiveDate)>,
+) -> rusqlite::Result<Option<(NaiveDate, NaiveDate)>> {
+    use chrono::Duration as ChronoDuration;
+    // `report::RANGE_ALL` 是 report 模块的私有常量（上游只导出了 RANGE_CUSTOM）；
+    // 这里比较字面量而不是去改它的可见性：对上游的 diff 越小越好
+    if range == "all" {
+        // 起点要同时考虑明细和日报：明细会被裁剪（90 天），但日报保留更久。
+        // 只取明细最早时间会把已裁剪的日报排除在「all」之外。
+        let from_raw = crate::server::core::credit_snapshots::first_snapshot_ts(conn)?
+            .map(clock::day_of);
+        let from_daily = crate::server::core::credit_snapshots::first_daily_day(conn)?;
+        let first = match (from_raw, from_daily) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => today - ChronoDuration::days(29),
+        };
+        return Ok(Some((first, today)));
+    }
+    let (start_key, end_key) = report::range_bounds(range, &std::collections::BTreeMap::new(), today, custom);
+    let pair = match (
+        NaiveDate::parse_from_str(&start_key, "%Y-%m-%d").ok(),
+        NaiveDate::parse_from_str(&end_key, "%Y-%m-%d").ok(),
+    ) {
+        (Some(start), Some(end)) => Some((start, end)),
+        _ => None,
+    };
+    Ok(pair)
+}
+
+/// 区间内每一天的 `request_daily.account_stats` 里留下的「账号 id → 展示名」。
+/// 同一账号在多天里留了不同的名字时取**最近一天**的（账号改过名）。
+/// 与 `report::build_accounts` 是同一来源，所以积分报表和请求报表里的账号名对得上。
+fn account_names(
+    conn: &rusqlite::Connection,
+    start_key: &str,
+    end_key: &str,
+) -> rusqlite::Result<std::collections::BTreeMap<String, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT account_stats FROM request_daily WHERE date >= ?1 AND date <= ?2 ORDER BY date ASC",
+    )?;
+    let rows = stmt.query_map([start_key, end_key], |row| row.get::<_, String>(0))?;
+    let mut names = std::collections::BTreeMap::new();
+    for text in rows {
+        // 某一天的 JSON 坏了不该拖垮整张报表：那天的名字不要就是了
+        let Ok(accounts) = serde_json::from_str::<Vec<record::AccountAccum>>(&text?) else {
+            continue;
+        };
+        for account in accounts {
+            if account.account_id.is_empty() || account.account_name.is_empty() {
+                continue;
+            }
+            // 按日期升序遍历，后一天的同名条目覆盖前一天：留下的是最近一次的快照名
+            names.insert(account.account_id, account.account_name);
+        }
+    }
+    // 回退：对 request_daily 里没出现过的账号，从 accounts 表的 data JSON 里读展示名。
+    // 这样「只在其他客户端消耗了积分、没有网关请求」的账号也能显示可识别的名字。
+    let mut fallback = conn.prepare("SELECT id, data FROM accounts")?;
+    let rows = fallback.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, data) = row?;
+        if names.contains_key(&id) {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<Value>(&data) {
+            // 按上游的统一口径：displayName → name → nickname → email → id
+            let name = record.get("displayName")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| record.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()))
+                .or_else(|| record.get("nickname").and_then(Value::as_str).filter(|s| !s.is_empty()))
+                .or_else(|| record.get("email").and_then(Value::as_str).filter(|s| !s.is_empty()));
+            if let Some(name) = name {
+                names.insert(id, name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -531,6 +622,47 @@ impl RequestStats {
             target.extend(sources.clone());
         }
         summary
+    }
+
+    /// 积分报表（`GET /api/stats/credits`）：按账号、按本地自然日给出**实测**的积分
+    /// 消耗，数据来自余额快照（`core::credit_snapshots`）。
+    ///
+    /// 区间口径与 [`Self::usage_summary`] 完全一致：同一套 `range` 白名单、同一个
+    /// `report::range_bounds`、同一个本地日界线 —— 两张报表摆在一起时，「今天」
+    /// 必须是同一段。`all` 以**积分快照**的保留期为准（快照明细只留
+    /// `credit_snapshots::RETENTION_DAYS` 天），而不是请求聚合的最早一天。
+    ///
+    /// 账号的展示名取自 `request_daily.account_stats` 里留下的名字快照（与
+    /// `report::build_accounts` 同一来源），所以积分报表里的账号名与请求报表对得上；
+    /// 区间内没发过请求的账号拿不到名字，前端回落显示 id。
+    ///
+    /// 返回 `None` 只在「快照库不可用」时（路由层给 500）；库里没有快照是正常结果
+    /// （`accounts` 为空、`firstSnapshotAt` 为 null），不是错误。
+    pub fn credit_report(
+        &self,
+        range: &str,
+        custom: Option<(NaiveDate, NaiveDate)>,
+    ) -> Option<Value> {
+        let range = report::normalize_range(range);
+        let today = clock::today();
+        // 两步必须分开：先在统计库的连接上把区间和账号名读出来、**退出闭包**，
+        // 再让 `credit_snapshots` 用它自己的句柄读快照。两处拿到的是同一个 `Db`
+        // 的克隆（同一把连接锁），而在持有连接的闭包里再调一次 `Db::with`
+        // 属于同线程重入 —— 不会死锁，但会直接返回 `None`，报表永远是 500。
+        let bounds = {
+            let guard = self.guard();
+            self.with_conn(&guard, |conn| {
+                let (start, end) = match credit_range(conn, range, today, custom)? {
+                    Some(bounds) => bounds,
+                    // 日期键解析不出日期：只可能是系统时钟被拨到了极端的年份
+                    None => return Ok(None),
+                };
+                let names = account_names(conn, &date_key(start), &date_key(end))?;
+                Ok(Some((names, start, end)))
+            })
+        };
+        let (names, start, end) = bounds.flatten()?;
+        crate::server::core::credit_snapshots::load_report(&names, range, start, end)
     }
 
     pub fn today_request_count(&self) -> Value {

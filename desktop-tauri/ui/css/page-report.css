@@ -98,6 +98,11 @@
 .report-rank-track { height: 4px; background: var(--surface-2); }
 .report-rank-fill { background: var(--report-slice-1); opacity: .85; }
 .report-rank-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; border-top: 1px solid var(--hairline); padding-top: 8px; margin-top: 6px; color: var(--text-3); font-size: 11px; line-height: 16px; }
+/* 积分消耗卡：合计行 + 行内的「重置 / 不完整」小标记 */
+.report-credit-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; padding: 10px 0 8px; color: var(--text-3); font-size: 11px; line-height: 16px; }
+.report-credit-summary strong { color: var(--text); font-size: 22px; line-height: 28px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.report-credit-summary small { margin-left: auto; font-size: inherit; white-space: nowrap; }
+.report-credit-flag { flex: none; padding: 0 4px; border: 1px solid var(--hairline); border-radius: var(--r-pill); color: var(--text-3); font-size: 10px; line-height: 16px; }
 .report-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 28px; margin-bottom: 8px; }
 .report-section-heading > div { display: flex; align-items: baseline; gap: 12px; }
 .report-section-heading h2 { margin: 0; font-size: 14px; font-weight: 500; }

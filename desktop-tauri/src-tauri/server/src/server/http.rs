@@ -253,6 +253,9 @@ pub fn panel_router(state: ServerState) -> Router {
         // 未知 /api/stats/* 子路径返回管理信封 404（照 logs_api::not_found 的做法，
         // 而不是全局兜底的 OpenAI 形状）—— 同一前缀下的 404 形状保持一致。
         .route("/api/stats/summary", get(api::stats_api::stats_summary))
+        // 积分报表（按账号 × 天的实测积分消耗，来自余额快照）。与 summary 同组同鉴权，
+        // 同样必须排在 `/api/stats/{*rest}` 通配之前
+        .route("/api/stats/credits", get(api::stats_api::stats_credits))
         .route(
             "/api/stats/requests",
             get(api::stats_api::stats_requests).delete(api::stats_api::clear_stats_requests),

@@ -19,6 +19,7 @@ import { ReportUsageDonuts } from './report/usage-donuts'
 import { applyReportMerge, readMergeRules, saveMergeRules, type MergeRules } from './report/report-merge'
 import { SourceStatsPanel } from './report/source-stats'
 import { ReportDailyTrend } from './report/daily-trend-panel'
+import { CreditPanel, type CreditReport } from './report/credit-panel'
 import { DateRangeFields } from './date-range-fields'
 import { updateCustomRange } from '../../../ui-shared/date-range'
 import { PageAutoRefresh, pageRefreshStore, usePageAutoRefresh } from './page-auto-refresh'
@@ -34,6 +35,8 @@ type IntervalTask = { id?: string; enabled?: boolean; interval?: number; unit?: 
 type StatsBridge = {
   /** GET /api/stats/summary?range=<档位>[&startDate=&endDate=&origin=] */
   getStatsSummary(range: string, dates?: CustomRange, options?: { apiKey?: string; client?: string; origin?: string }): Promise<StatsSummary | null | undefined>
+  /** GET /api/stats/credits?range=<档位>[&startDate=&endDate=]（积分报表；老版本后端没有这个方法，用前先判空） */
+  getStatsCredits?(range: string, dates?: CustomRange): Promise<CreditReport | null | undefined>
 }
 
 /** 账号行徽章要读的那点账号信息（wbApp 状态里的一条） */
@@ -176,8 +179,19 @@ type PageData = { summary: StatsSummary | null; error: string | null }
 
 const EMPTY_DATA: PageData = { summary: null, error: null }
 
+/**
+ * 积分报表的读数。与主报表分开学着放：两个接口各自成败，
+ * 积分接口挂了只让「积分消耗」那张卡显示错误，不该把整页换成错误态。
+ */
+type CreditData = { report: CreditReport | null; error: string | null }
+
+const EMPTY_CREDIT: CreditData = { report: null, error: null }
+
 function ReportPage() {
   const [data, setData] = React.useState<PageData>(EMPTY_DATA)
+  const [credit, setCredit] = React.useState<CreditData>(EMPTY_CREDIT)
+  /** 积分报表正在加载（首次）：之后的重拉不闪加载态，旧读数留在屏幕上直到新数据到 */
+  const [creditLoading, setCreditLoading] = React.useState(true)
   const [range, setRange] = React.useState<string>(readRange)
   const [origin, setOrigin] = React.useState<string>('all')
   /** 自定义区间（起止本地自然日）：只有档位选中「自定义」时随请求发出 */
@@ -210,6 +224,8 @@ function ReportPage() {
    */
   const signatureRef = React.useRef('')
   const loadingRef = React.useRef(0)
+  /** 积分报表的「最后一次请求胜出」序号（语义同 loadPanel 里的 seq；它写在回调里，这里声明在组件作用域） */
+  const creditSeq = React.useRef(0)
 
   const applyData = React.useCallback((next: PageData, signature: string) => {
     signatureRef.current = signature
@@ -217,6 +233,32 @@ function ReportPage() {
   }, [])
 
   /* ─── 加载 ─────────────────────────────── */
+
+  /**
+   * 拉一次积分报表。与主报表分开请求、由 loadPanel 带着一起走（换档位 / 改日期 / 轮询 /
+   * 切到本页都会经过 loadPanel，这样四条触发路径不用各写一遍）。
+   *
+   * 同样是「最后一次请求胜出」；老版本后端的桥上没有 getStatsCredits，那就整张卡不显示
+   * （credit 留在 EMPTY_CREDIT，JSX 里判 report 与 error 都为空即隐藏），不报错。
+   * 必须声明在 loadPanel 之前：那里引用了它（const 有暂时性死区）。
+   */
+  const loadCredits = React.useCallback(async (requested: string): Promise<void> => {
+    const api = shared().workbuddyDesktop
+    if (typeof api?.getStatsCredits !== 'function') return
+    const token = ++creditSeq.current
+    const dates = requested === CUSTOM_RANGE ? customRef.current : undefined
+    try {
+      const payload = await api.getStatsCredits(requested, dates)
+      if (token !== creditSeq.current) return
+      if (!payload || typeof payload !== 'object') throw new Error(t('后端未返回积分报表数据'))
+      setCredit({ report: payload, error: null })
+    } catch (error) {
+      if (token !== creditSeq.current) return
+      setCredit({ report: null, error: errorMessage(error) || t('未知错误') })
+    } finally {
+      if (token === creditSeq.current) setCreditLoading(false)
+    }
+  }, [])
 
   /**
    * 拉一次报表。不做互斥锁，而是「最后一次请求胜出」：用户连点几档范围时，用锁会把后面几次
@@ -230,6 +272,8 @@ function ReportPage() {
     // 自定义区间的两个日期跟在这条请求上（后端只在 range=custom 时读它们；
     // 其余档位不带，避免出现「档位与日期各说各话」的请求）
     const dates = requested === CUSTOM_RANGE ? customRef.current : undefined
+    // 积分报表跟着同一个档位走：不 await，它自己管自己的成败与加载态
+    void loadCredits(requested)
     try {
       const api = shared().workbuddyDesktop
       if (!api) throw new Error('后端桥不可用')
@@ -263,7 +307,7 @@ function ReportPage() {
     } finally {
       loadingRef.current -= 1
     }
-  }, [applyData])
+  }, [applyData, loadCredits])
 
   /** 外部直接塞一份数据（契约里的 render）：不带参数 = 只重绘（旧实现的能力，React 里状态
    *  没变就没有重绘的必要）；传 null 只清 lastSummary 的读数，视图不动（与旧实现 renderAll
@@ -449,6 +493,11 @@ function ReportPage() {
             emptyText={t('所选范围内还没有请求记录')} />
         ) : null}
       </div>
+
+      {/* ── 积分消耗（按账号 × 天的实测积分，紧跟账号排行；老版本后端没有这个接口时整卡不显示）── */}
+      {credit.report || credit.error ? (
+        <CreditPanel report={credit.report} error={credit.error} loading={creditLoading ? loadingBlock : null} />
+      ) : null}
 
       <ReportUsageDonuts
         models={modelList}
