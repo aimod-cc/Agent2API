@@ -422,12 +422,11 @@ fn day_bounds(day: NaiveDate) -> Option<(i64, i64)> {
 
 fn day_start(day: NaiveDate) -> Option<i64> {
     let midnight = day.and_hms_opt(0, 0, 0)?;
-    // 夏令时切换日的本地零点可能不存在（例如 America/Santiago 2026-09-06 从 00:00 跳到 01:00）。
-    // .earliest() 对不存在的本地时间返回 None，导致整个区间被跳过。
-    // 改用 .single() 先尝试正常零点；不存在时取该日最早有效的本地时间（01:00）。
-    Local.from_local_datetime(&midnight).single()
+    // 夏令时切换日的本地零点可能不存在（春季跳时）或重复（秋季回拨）。
+    // .earliest() 对不存在的本地时间返回 None，对重复时间取第一次——两种都正确。
+    // 零点不存在时取 01:00（春季跳时的常见跳法）。
+    Local.from_local_datetime(&midnight).earliest()
         .or_else(|| {
-            // 零点不存在：尝试 01:00（夏令时切换日常见的跳法）
             day.and_hms_opt(1, 0, 0).and_then(|t| Local.from_local_datetime(&t).single())
         })
         .map(|time| time.timestamp_millis())
