@@ -123,9 +123,17 @@ fn credit_range(
     // `report::RANGE_ALL` 是 report 模块的私有常量（上游只导出了 RANGE_CUSTOM）；
     // 这里比较字面量而不是去改它的可见性：对上游的 diff 越小越好
     if range == "all" {
-        let first = crate::server::core::credit_snapshots::first_snapshot_ts(conn)?
-            .map(clock::day_of)
-            .unwrap_or_else(|| today - ChronoDuration::days(29));
+        // 起点要同时考虑明细和日报：明细会被裁剪（90 天），但日报保留更久。
+        // 只取明细最早时间会把已裁剪的日报排除在「all」之外。
+        let from_raw = crate::server::core::credit_snapshots::first_snapshot_ts(conn)?
+            .map(clock::day_of);
+        let from_daily = crate::server::core::credit_snapshots::first_daily_day(conn)?;
+        let first = match (from_raw, from_daily) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => today - ChronoDuration::days(29),
+        };
         return Ok(Some((first, today)));
     }
     let (start_key, end_key) = report::range_bounds(range, &std::collections::BTreeMap::new(), today, custom);
@@ -163,6 +171,30 @@ fn account_names(
             }
             // 按日期升序遍历，后一天的同名条目覆盖前一天：留下的是最近一次的快照名
             names.insert(account.account_id, account.account_name);
+        }
+    }
+    // 回退：对 request_daily 里没出现过的账号，从 accounts 表的 data JSON 里读展示名。
+    // 这样「只在其他客户端消耗了积分、没有网关请求」的账号也能显示可识别的名字。
+    let mut fallback = conn.prepare("SELECT id, data FROM accounts")?;
+    let rows = fallback.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, data) = row?;
+        if names.contains_key(&id) {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<Value>(&data) {
+            // 按上游的统一口径：displayName → name → nickname → email → id
+            let name = record.get("displayName")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| record.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()))
+                .or_else(|| record.get("nickname").and_then(Value::as_str).filter(|s| !s.is_empty()))
+                .or_else(|| record.get("email").and_then(Value::as_str).filter(|s| !s.is_empty()));
+            if let Some(name) = name {
+                names.insert(id, name.to_string());
+            }
         }
     }
     Ok(names)

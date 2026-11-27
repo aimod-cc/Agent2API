@@ -135,7 +135,7 @@
   "按本地整点，无请求的整点不标注": "By local hour; hours with no requests are not labeled",
   "按模型官方/自定义单价估算": "Estimated from official/custom model rates",
   "按每条请求的软件标识和识别规则统计，不依赖 API Key，也不代表设备或用户数。待确认的软件统一计入“其它”；规则修改不重新归类历史请求。": "Statistics use per-request software identifiers and identification rules, independently of API keys. They do not count devices or users. Unconfirmed software is grouped under Other; rule changes do not reclassify historical requests.",
-  "按账号统计的实测积分消耗，来自定时记录的余额快照。上游按批结算，小时内的读数不准、按天的合计是准的；它记的是账号在上游的总消耗，不只是本网关用掉的部分。标「偏低」的账号期间有套餐到期或额度被重置，中间几分钟的消耗没算进去，读数比实际略低。": "Measured credit usage per account, taken from periodically recorded balance snapshots. The upstream settles in batches, so figures within an hour are not accurate while daily totals are; it records each account's total usage upstream, not only what this gateway spent. Accounts marked \"Low\" had a package expire or their quota reset during the period; the few minutes in between are not counted, so the total runs slightly low.",
+  "按账号统计的实测积分消耗，来自定时记录的余额快照。上游按批结算，读数是采样下限而非精确值：跨零点的变化可能未计入任何一天，已用额度回落（套餐到期或重置）时的消耗也算不出来，标「偏低」的账号有这类情况。它记的是账号在上游的总消耗，不只是本网关用掉的部分。": "Measured credit usage per account, taken from periodically recorded balance snapshots. The upstream settles in batches, so figures are a sampled lower bound, not exact: changes crossing midnight may not be counted in either day, and usage during credit drops (package expiry or quota reset) cannot be calculated either. Accounts marked \"Low\" have such cases. It records each account's total usage upstream, not only what this gateway spent.",
   "提供商合并管理": "Provider merge",
   "提供商用": "Provider usage",
   "提供商用占比": "Provider usage share",

@@ -101,7 +101,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 
-use chrono::{Local, NaiveDate, TimeZone};
+use chrono::{Duration, Local, NaiveDate, TimeZone};
 use rusqlite::params;
 use serde_json::json;
 
@@ -219,8 +219,9 @@ fn write_snapshots(
             params![account_id, TOTAL_WALLET],
         )?;
     }
-    // 裁剪失败不算写入失败（只是多留一会儿旧数据），所以丢掉它的结果
-    let _ = prune_before(conn, now_ms - RETENTION_DAYS * 86_400_000);
+    // 裁剪：只删**已经成功汇总**的完整日期对应的明细。如果汇总没跟上（每轮最多 7 天），
+    // 未汇总的明细必须保留到成功汇总后再删——否则历史报表会永久少算。
+    prune_rolled(conn, now_ms)?;
     reopen_rolled_days(conn, now_ms)?;
     rollup_if_due(conn, now_ms, &NEXT_ROLLUP_MS);
     Ok(())
@@ -278,9 +279,36 @@ fn last_total_sample(conn: &rusqlite::Connection, account_id: &str) -> rusqlite:
     .optional()
 }
 
-/// 删掉 `cutoff` 之前的快照，返回删掉的行数。
-fn prune_before(conn: &rusqlite::Connection, cutoff_ms: i64) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM account_credit_snapshots WHERE ts < ?1", [cutoff_ms])
+/// 删掉已成功汇总的完整日期对应的明细（保留期 [`RETENTION_DAYS`] 以内的也不删，
+/// 因为汇总表只按天存，明细对「今天」的现算和事后核对还有用）。
+///
+/// 只删「已汇总」标记存在且已过期的日子：如果汇总没跟上（每轮最多 7 天），
+/// 未汇总的明细保留到成功汇总后再删。这样历史报表不会永久少算。
+fn prune_rolled(conn: &rusqlite::Connection, now_ms: i64) -> rusqlite::Result<usize> {
+    let today = day_of_local(now_ms);
+    let cutoff = today - Duration::days(RETENTION_DAYS);
+    // 找到所有已汇总且已过期的日子
+    let mut stmt = conn.prepare_cached(
+        "SELECT day FROM account_credit_daily_days WHERE day < ?1",
+    )?;
+    let days: Vec<String> = stmt.query_map([date_key(cutoff)], |row| row.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if days.is_empty() {
+        return Ok(0);
+    }
+    // 逐日删除（走主键索引，不扫全表）
+    let mut total = 0;
+    for day in days {
+        let Some(date) = parse_day(&day) else { continue };
+        let Some(start) = day_start(date) else { continue };
+        let end = start + 86_400_000;
+        total += conn.execute(
+            "DELETE FROM account_credit_snapshots WHERE ts >= ?1 AND ts < ?2",
+            params![start, end],
+        )?;
+    }
+    Ok(total)
 }
 
 /// 下一次允许做「按天汇总」的时刻（毫秒），进程内有效；真正的进度记在库里的
@@ -399,6 +427,14 @@ fn day_start(day: NaiveDate) -> Option<i64> {
 }
 
 /// 明细里最早一条的时间戳；表还没建或还没有数据时为 `None`。
+/// 日报表里最早的一天（用于「all」区间的起点，不受明细保留期限制）。
+pub fn first_daily_day(conn: &rusqlite::Connection) -> rusqlite::Result<Option<NaiveDate>> {
+    let text: Option<String> = conn
+        .query_row("SELECT MIN(day) FROM account_credit_daily", [], |row| row.get(0))
+        .optional()?;
+    Ok(text.as_deref().and_then(parse_day))
+}
+
 pub fn first_snapshot_ts(conn: &rusqlite::Connection) -> rusqlite::Result<Option<i64>> {
     let exists: Option<i64> = conn
         .query_row(
@@ -498,6 +534,19 @@ fn last_rolled_day(conn: &rusqlite::Connection) -> rusqlite::Result<Option<Naive
     Ok(text.as_deref().and_then(parse_day))
 }
 
+/// 区间内哪些日子已经汇总过了（用于判断哪些日子需要从明细现算）。
+fn rolled_days_in_range(
+    conn: &rusqlite::Connection,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> rusqlite::Result<std::collections::HashSet<NaiveDate>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT day FROM account_credit_daily_days WHERE day >= ?1 AND day <= ?2",
+    )?;
+    let rows = stmt.query_map(params![date_key(start), date_key(end)], |row| row.get::<_, String>(0))?;
+    Ok(rows.filter_map(|r| r.ok()).filter_map(|d| parse_day(&d)).collect())
+}
+
 /// 名册只可能缺一种行：名册出现之前（更早的那版二进制）写下的明细。补登记每个库只做一次，
 /// 做没做过记在库里的 `account_credit_meta`（进程重启不丢）。
 ///
@@ -586,6 +635,9 @@ fn usage_by_day(
     if let Some(last_finished) = today.pred_opt() {
         let last = end_date.min(last_finished);
         if start_date <= last {
+            // 汇总可能没跟上（每轮最多 7 天）。对所选范围内尚未汇总的日子，
+            // 从明细现算并纳入结果，不遗漏。
+            let rolled = rolled_days_in_range(conn, start_date, last)?;
             let mut stmt = conn.prepare_cached(
                 "SELECT account_id, day, credit_used, resets, samples FROM account_credit_daily \
                  WHERE day >= ?1 AND day <= ?2",
@@ -601,6 +653,16 @@ fn usage_by_day(
                     date,
                     DayUsage { credit_used, resets: resets as u32, partial: samples < 2 },
                 );
+            }
+            // 对未汇总的日子，从明细现算
+            let mut day = start_date;
+            while day <= last {
+                if !rolled.contains(&day) {
+                    for (account_id, series) in day_series(conn, day)? {
+                        out.entry(account_id).or_default().extend(daily_usage(&series, day_of_local));
+                    }
+                }
+                day = day.succ_opt().unwrap();
             }
         }
     }
@@ -866,10 +928,11 @@ mod tests {
             let kept = now - (RETENTION_DAYS - 1) * 86_400_000;
             write_snapshots(conn, "acct-1", &snapshot, too_old).unwrap();
             write_snapshots(conn, "acct-1", &snapshot, kept).unwrap();
-            // 再写一次触发裁剪；只有超过保留期的行该被删
+            // 先汇总（让「已汇总」标记落库），再写一次触发裁剪
+            refresh_daily_rollup(conn, now).unwrap();
             write_snapshots(conn, "acct-1", &snapshot, now).unwrap();
             let stamps: Vec<i64> = rows(conn).iter().map(|(_, ts, _, _, _)| *ts).collect();
-            assert_eq!(stamps, vec![kept, now], "保留期之外的快照应被裁掉");
+            assert_eq!(stamps, vec![kept, now], "保留期之外且已汇总的快照应被裁掉");
         })
         .expect("库不可用");
     }
@@ -882,6 +945,18 @@ mod tests {
 
     fn write_total(conn: &rusqlite::Connection, account_id: &str, used: f64, ts: i64) {
         write_snapshots(conn, account_id, &total(used), ts).unwrap();
+    }
+
+    /// 测试专用：只写明细，不做裁剪 / 名册登记 / 汇总维护。
+    /// 避免触发全局 `NEXT_ROLLUP_MS` 导致「单独跑」和「整组跑」结果不同。
+    fn write_total_raw(conn: &rusqlite::Connection, account_id: &str, used: f64, ts: i64) {
+        // 先建表（write_snapshots 里做的事，这里也要做）
+        conn.execute_batch(CREATE_TABLE_SQL).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO account_credit_snapshots (account_id, wallet_type, ts, credit_used, credit_remaining, credit_total) \
+             VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            params![account_id, TOTAL_WALLET, ts, used],
+        ).unwrap();
     }
 
     /// 某账号合计钱包的全部明细 `(时间戳, 已用积分)`，按时间升序。
@@ -1259,13 +1334,13 @@ mod tests {
     fn rollup_catches_up_in_batches_and_matches_a_computation_over_all_raw_rows() {
         let (db, _guard) = crate::server::db::test_temp::TempDb::open("credit-snapshots-rollup-batches");
         db.with(|conn| {
-            // 11 月 1 日到 10 日，每天 a 涨 10
+            // 11 月 1 日到 10 日，每天 a 涨 10（用 write_total_raw 避免触发全局汇总节拍）
             for index in 0..10 {
                 let date = day("2026-11-01") + chrono::Duration::days(index);
                 let base = index as f64 * 100.0;
                 let text = date.format("%Y-%m-%d").to_string();
-                write_total(conn, "a", base, at(&text, 10, 0));
-                write_total(conn, "a", base + 10.0, at(&text, 10, 10));
+                write_total_raw(conn, "a", base, at(&text, 10, 0));
+                write_total_raw(conn, "a", base + 10.0, at(&text, 10, 10));
             }
             let now = at("2026-11-11", 12, 0);
             assert_eq!(refresh_daily_rollup(conn, now).unwrap(), ROLLUP_BATCH_DAYS, "一轮最多 7 天");
