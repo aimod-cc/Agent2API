@@ -301,8 +301,7 @@ fn prune_rolled(conn: &rusqlite::Connection, now_ms: i64) -> rusqlite::Result<us
     let mut total = 0;
     for day in days {
         let Some(date) = parse_day(&day) else { continue };
-        let Some(start) = day_start(date) else { continue };
-        let end = start + 86_400_000;
+        let Some((start, end)) = day_bounds(date) else { continue };
         total += conn.execute(
             "DELETE FROM account_credit_snapshots WHERE ts >= ?1 AND ts < ?2",
             params![start, end],
@@ -429,9 +428,12 @@ fn day_start(day: NaiveDate) -> Option<i64> {
 /// 明细里最早一条的时间戳；表还没建或还没有数据时为 `None`。
 /// 日报表里最早的一天（用于「all」区间的起点，不受明细保留期限制）。
 pub fn first_daily_day(conn: &rusqlite::Connection) -> rusqlite::Result<Option<NaiveDate>> {
+    // 先建表（新库上第一次请求「all」时表可能还不存在）
+    conn.execute_batch(CREATE_TABLE_SQL)?;
+    // MIN(day) 在表为空时返回 NULL：直接读成 Option<String>，不用 .optional()
+    // （.optional() 只处理「没有行」，不处理「行里的列是 NULL」）
     let text: Option<String> = conn
-        .query_row("SELECT MIN(day) FROM account_credit_daily", [], |row| row.get(0))
-        .optional()?;
+        .query_row("SELECT MIN(day) FROM account_credit_daily", [], |row| row.get(0))?;
     Ok(text.as_deref().and_then(parse_day))
 }
 
@@ -547,6 +549,27 @@ fn rolled_days_in_range(
     Ok(rows.filter_map(|r| r.ok()).filter_map(|d| parse_day(&d)).collect())
 }
 
+/// 区间内实际有明细的日期（去重，升序）。用于「对未汇总的日子从明细现算」：
+/// 只遍历这些日子，不遍历没有明细的空白日期。
+fn actual_days_in_range(
+    conn: &rusqlite::Connection,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> rusqlite::Result<Vec<NaiveDate>> {
+    let Some(start_ts) = day_start(start) else { return Ok(Vec::new()) };
+    let Some(end_ts) = day_start(end.succ_opt().unwrap_or(end)) else { return Ok(Vec::new()) };
+    // 查出区间内所有明细的 ts（只取 ts 列，不取账号和值，减少传输量）
+    let mut stmt = conn.prepare_cached(
+        "SELECT ts FROM account_credit_snapshots WHERE ts >= ?1 AND ts < ?2",
+    )?;
+    let rows = stmt.query_map(params![start_ts, end_ts], |row| row.get::<_, i64>(0))?;
+    let mut days = std::collections::BTreeSet::new();
+    for row in rows {
+        days.insert(day_of_local(row?));
+    }
+    Ok(days.into_iter().collect())
+}
+
 /// 名册只可能缺一种行：名册出现之前（更早的那版二进制）写下的明细。补登记每个库只做一次，
 /// 做没做过记在库里的 `account_credit_meta`（进程重启不丢）。
 ///
@@ -654,15 +677,16 @@ fn usage_by_day(
                     DayUsage { credit_used, resets: resets as u32, partial: samples < 2 },
                 );
             }
-            // 对未汇总的日子，从明细现算
-            let mut day = start_date;
-            while day <= last {
+            // 对未汇总的日子，从明细现算。
+            // 只遍历实际有明细的日期：如果 custom 从 0001-01-01 开始，
+            // 逐日遍历 74 万天会长时间占用数据库连接。
+            let actual_days = actual_days_in_range(conn, start_date, last)?;
+            for day in actual_days {
                 if !rolled.contains(&day) {
                     for (account_id, series) in day_series(conn, day)? {
                         out.entry(account_id).or_default().extend(daily_usage(&series, day_of_local));
                     }
                 }
-                day = day.succ_opt().unwrap();
             }
         }
     }

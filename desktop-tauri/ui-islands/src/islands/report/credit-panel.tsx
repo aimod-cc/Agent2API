@@ -77,7 +77,7 @@ export function CreditPanel({ report, loading, error }: {
       {!error && loading ? loading : null}
       {!error && !loading && report && !accounts.length ? (
         <Empty>{report.firstSnapshotAt
-          ? t('所选范围内没有积分消耗')
+          ? t('所选范围内未测得积分消耗（快照不足时无法计算）')
           : t('还没有积分快照：余额查询成功后开始记录')}</Empty>
       ) : null}
       {!error && !loading && report && accounts.length ? (
