@@ -114,6 +114,9 @@ pub fn identity(client: &Client, executable: &Path) -> Result<(), String> {
                 return Err("客户端身份或版本不支持，未切换凭证".into());
             }
         }
+        Identity::Authenticode { signers } => {
+            super::windows::verify_authenticode(&checked, signers)?;
+        }
     }
     Ok(())
 }
@@ -124,7 +127,7 @@ pub fn detect(client: &Client, override_path: &str) -> Result<Option<PathBuf>, S
         identity(client, &path)?;
         return checked(&path, false).map(Some);
     }
-    for path in super::windows::running_executables(&client.executables)? {
+    for path in super::windows::running_executables(&client.executables, client.switch_only)? {
         if identity(client, &path).is_ok() { return checked(&path, false).map(Some); }
     }
     for candidate in &client.locations {
@@ -144,6 +147,17 @@ pub fn detect(client: &Client, override_path: &str) -> Result<Option<PathBuf>, S
                 let mut path = root.join(dir);
                 for part in candidate.path.split('/') { path.push(part); }
                 if path.exists() && identity(client, &path).is_ok() { return checked(&path, false).map(Some); }
+            }
+        }
+        if let Some(raw_path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&raw_path) {
+                if !dir.is_absolute() { continue; }
+                for name in &client.executables {
+                    let path = dir.join(name);
+                    if path.is_file() && identity(client, &path).is_ok() {
+                        return checked(&path, false).map(Some);
+                    }
+                }
             }
         }
     }

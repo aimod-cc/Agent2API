@@ -1,7 +1,7 @@
 import * as React from 'react'
 import {
   Badge, NavItem, NavList, Select, SelectContent, SelectGroup, SelectItem, SelectLabel,
-  SelectTrigger, SelectValue, useMediaQuery,
+  SelectTrigger, SelectValue, StatusDot, useMediaQuery,
 } from '@ui'
 import { t } from '../i18n'
 
@@ -184,14 +184,13 @@ export const PluginCategoryRail = React.memo(function PluginCategoryRail({
             count={counts.scheduled}
             trailing={
               counts.scheduledUpdatable > 0 ? (
-                <Badge
-                  variant='warning'
-                  shape='tag'
-                  className='px-1.5 text-[10.5px]'
+                <span
+                  className='inline-flex items-center'
                   title={t('有 {count} 个插件可更新', { count: counts.scheduledUpdatable })}
+                  aria-label={t('有 {count} 个插件可更新', { count: counts.scheduledUpdatable })}
                 >
-                  ↑{counts.scheduledUpdatable}
-                </Badge>
+                  <StatusDot variant='warning' />
+                </span>
               ) : undefined
             }
             onClick={() => onChange('scheduled')}

@@ -202,10 +202,11 @@ fn parse_config(block: &Map<String, Value>) -> Result<AssistantConfig, String> {
 
 /// POST /api/assistant/chat
 pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
-    let access = match super::model_access::authenticate(&headers, super::model_access::ASSISTANT) {
+    let access = match super::model_access::authenticate_call(&headers, super::model_access::ASSISTANT) {
         Ok(access) => access,
         Err(error) => return chat_error(error),
     };
+    let usage_lease = access.usage_lease.clone();
     let payload = match parse_body(&body) {
         Ok(payload) => payload,
         Err(error) => return errors::management_error(400, error.message),
@@ -286,7 +287,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
     let requested_model = match super::request_prepare::resolve_model(&state, &mut upstream, access.scope.as_ref()).await {
         Ok(name) => name,
         Err(error) => {
-            pipeline::record_early_failure(&state, started_at, &model, reasoning.as_deref().unwrap_or(""), &access.source, &error);
+            pipeline::record_early_failure(&state, started_at, &model, reasoning.as_deref().unwrap_or(""), "chat_completions", &access.source, &error);
             return chat_error(error);
         }
     };
@@ -314,6 +315,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
         &requested_model,
         &model,
         reasoning.as_deref().unwrap_or(""),
+        "chat_completions",
         &access.source,
         true,
     ).await;
@@ -347,7 +349,8 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
         Ok(ForwardOutcome::Native(response)) => {
             let context = RecordContext {
                 stats: state.request_stats(), telemetry, started_at, model: requested_model,
-                client_model: model, client_reasoning: reasoning.unwrap_or_default(), status: i64::from(response.status),
+                client_model: model, client_reasoning: reasoning.unwrap_or_default(),
+                client_protocol: "chat_completions".to_string(), status: i64::from(response.status),
                 raw_request: None, raw_response: None, is_test: true, source: access.source,
             };
             super::protocol::native_response::respond(response, context, &mut guard)
@@ -361,6 +364,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
                 model: requested_model,
                 client_model: model.clone(),
                 client_reasoning: reasoning.clone().unwrap_or_default(),
+                client_protocol: "chat_completions".to_string(),
                 status: i64::from(status.as_u16()),
                 raw_request: None,
                 raw_response: None,
@@ -369,13 +373,29 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
             };
             // 记账移交给响应流（它与流的生命周期同长）；守卫不再兜底
             guard.handoff();
+            struct LeaseStream<S> {
+                inner: S,
+                _lease: Option<Arc<crate::server::core::key_usage::KeyUsageLease>>,
+            }
+            impl<S: futures::Stream + Unpin> futures::Stream for LeaseStream<S> {
+                type Item = S::Item;
+                fn poll_next(
+                    mut self: std::pin::Pin<&mut Self>,
+                    cx: &mut std::task::Context<'_>,
+                ) -> std::task::Poll<Option<Self::Item>> {
+                    std::pin::Pin::new(&mut self.inner).poll_next(cx)
+                }
+            }
             sse_response(
                 status,
-                Box::new(RecordingStream::with_terminals(
-                    source,
-                    context,
-                    pipeline::terminal::CHAT,
-                )),
+                Box::new(LeaseStream {
+                    inner: RecordingStream::with_terminals(
+                        source,
+                        context,
+                        pipeline::terminal::CHAT,
+                    ),
+                    _lease: usage_lease,
+                }),
             )
             .into_response()
         }
@@ -391,6 +411,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
                     model: requested_model,
                     client_model: model.clone(),
                     client_reasoning: reasoning.clone().unwrap_or_default(),
+                    client_protocol: "chat_completions".to_string(),
                     status: 200,
                     raw_request: None,
                     raw_response,
@@ -413,6 +434,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
                     model: requested_model,
                     client_model: model.clone(),
                     client_reasoning: reasoning.clone().unwrap_or_default(),
+                    client_protocol: "chat_completions".to_string(),
                     status,
                     raw_request: None,
                     raw_response: None,

@@ -36,6 +36,7 @@ export type PrivacyLimits = {
 export type PrivacyPatch = {
   enabled?: boolean
   reversible?: boolean
+  ephemeralPlaceholders?: boolean
   action?: PrivacyAction
   secrets?: boolean
   personal?: boolean
@@ -48,12 +49,14 @@ export type PrivacyPatch = {
   allowlist?: string[]
   providerMode?: PrivacyProviderMode
   providers?: string[]
+  revision?: string
 }
 
 export type PrivacyState = {
   status: 'loading' | 'ready' | 'unavailable'
   enabled: boolean
   reversible: boolean
+  ephemeralPlaceholders: boolean
   action: PrivacyAction
   secrets: boolean
   personal: boolean
@@ -69,6 +72,7 @@ export type PrivacyState = {
   providerOptions: { id: string; label: string }[]
   categoryOptions: PrivacyCategoryOption[]
   vaultEntries: number
+  revision: string
   saved: boolean
   limits: PrivacyLimits
 }
@@ -93,14 +97,23 @@ export const DEFAULT_PRIVACY_CATEGORIES: PrivacyCategoryOption[] = [
   { id: 'phone_cn', label: t('中国大陆手机号'), defaultOn: true },
   { id: 'id_card_cn', label: t('中国身份证号'), defaultOn: true },
   { id: 'bank_card', label: t('银行卡号'), defaultOn: true },
-  { id: 'public_ip', label: t('公网 IP 地址'), defaultOn: false },
+  { id: 'ssn', label: t('美国社保号 (SSN)'), defaultOn: true },
+  { id: 'passport', label: t('护照号'), defaultOn: true },
+  { id: 'iban', label: t('国际银行账号 (IBAN)'), defaultOn: true },
+  { id: 'birthday', label: t('出生日期'), defaultOn: true },
+  { id: 'mac', label: t('MAC 地址'), defaultOn: true },
+  { id: 'serial', label: t('设备序列号'), defaultOn: true },
+  { id: 'public_ip', label: t('公网 IP 地址 (v4/v6)'), defaultOn: false },
   { id: 'home_path', label: t('本机主目录用户名'), defaultOn: false },
+  { id: 'userhost', label: t('登录名与主机名'), defaultOn: false },
+  { id: 'bucket', label: t('云存储桶名称'), defaultOn: false },
 ]
 
 export const INITIAL_PRIVACY: PrivacyState = {
   status: 'loading',
   enabled: false,
   reversible: true,
+  ephemeralPlaceholders: false,
   action: 'mask',
   secrets: true,
   personal: false,
@@ -109,8 +122,16 @@ export const INITIAL_PRIVACY: PrivacyState = {
     phone_cn: true,
     id_card_cn: true,
     bank_card: true,
+    ssn: true,
+    passport: true,
+    iban: true,
+    birthday: true,
+    mac: true,
+    serial: true,
     public_ip: false,
     home_path: false,
+    userhost: false,
+    bucket: false,
   },
   kindActions: {},
   words: [],
@@ -123,6 +144,7 @@ export const INITIAL_PRIVACY: PrivacyState = {
   providerOptions: [],
   categoryOptions: DEFAULT_PRIVACY_CATEGORIES,
   vaultEntries: 0,
+  revision: '',
   saved: true,
   limits: {
     maxWords: 200,
@@ -145,12 +167,21 @@ export const PRIVACY_KIND_LABELS: Record<string, string> = {
   PASSWORD: t('密码凭证'),
   SECRET: t('机密凭据'),
   WALLET_KEY: t('钱包私钥'),
+  SEED_PHRASE: t('钱包助记词'),
   EMAIL: t('邮箱地址'),
   PHONE_CN: t('中国大陆手机号'),
   ID_CARD_CN: t('中国身份证号'),
   BANK_CARD: t('银行卡号'),
+  SSN: t('美国社保号'),
+  PASSPORT: t('护照号'),
+  IBAN: t('国际银行账号'),
+  BIRTHDAY: t('出生日期'),
+  MAC: t('MAC 地址'),
+  SERIAL: t('设备序列号'),
   PUBLIC_IP: t('公网 IP 地址'),
   HOME_PATH: t('主目录用户名'),
+  USERHOST: t('登录名/主机名'),
+  BUCKET: t('云存储桶'),
   TERM: t('自定义保密词'),
   CUSTOM: t('自定义规则'),
 }
@@ -173,14 +204,14 @@ export function privacyActionLabel(action: unknown): string {
 }
 
 export const PRIVACY_TIPS = {
-  panel: t('隐私脱敏会在请求离开本机前识别密钥、私钥、个人隐私信息与自定义保密词。启用遮罩替换时，相同密文始终映射为同一稳定占位符（{{KIND_xxxxxxxx}}），不破坏上游缓存；密文仅暂存于内存，绝不写入数据库或日志，响应到达后透明还原为原文。'),
-  personal: t('启用后对邮箱、手机号、身份证号、银行卡号、公网 IP 和本机用户名等个人信息做检测，可按子类分别开关；带前缀校验和尾号检查，尽量避免误伤普通数字编号。'),
-  words: t('填写项目代号、内部域名、真实姓名等不想离开本机的词条（每行一条），命中后按统一占位符遮罩并在回答时还原。'),
+  panel: t('隐私脱敏会在请求离开本机前识别密钥、钱包私钥/助记词、个人隐私信息与自定义保密词。默认使用稳定占位符以保护提示词缓存；也可开启每次请求随机占位符并隐藏类型。原文仅驻留内存，绝不落盘或随云同步上传。'),
+  personal: t('启用后对邮箱、手机号、身份证号、银行卡、国际证件、设备与网络信息做检测，可按子类分别开关，并内置误判过滤。'),
+  words: t('填写项目代号、内部域名、真实姓名或日期（每行一条）。填写日期会自动识别同一天的多种常见中英文写法。'),
   allowlist: t('填写允许原样放行的内容（每行一条），即使命中上述检测规则也会跳过脱敏。'),
 } as const
 
 export const PRIVACY_NOTES = {
-  panel: t('默认关闭。先于上游请求发出、晚于「关键词替换」执行；原生思考块与签名块保持原样。若配置「拦截请求」，命中时立即拒绝转发且不重试其他账号。'),
+  panel: t('默认关闭，配置与词表不参与云同步。开启后生图/改图与独立识图接口会被拒绝以防漏脱敏；原生思考块与签名块保持原样。'),
 } as const
 
 function isPrivacyAction(value: unknown): value is PrivacyAction {
@@ -267,6 +298,7 @@ export function privacyStateFrom(data: unknown, previous: PrivacyState): Privacy
     status: 'ready',
     enabled: rec.enabled === true,
     reversible: rec.reversible !== false,
+    ephemeralPlaceholders: rec.ephemeralPlaceholders === true,
     action: isPrivacyAction(rec.action) ? rec.action : 'mask',
     secrets: rec.secrets !== false,
     personal: rec.personal === true,
@@ -282,6 +314,7 @@ export function privacyStateFrom(data: unknown, previous: PrivacyState): Privacy
     providerOptions,
     categoryOptions: categoryOptions.length ? categoryOptions : DEFAULT_PRIVACY_CATEGORIES,
     vaultEntries: Number.isFinite(Number(rec.vaultEntries)) ? Number(rec.vaultEntries) : 0,
+    revision: typeof rec.revision === 'string' ? rec.revision : '',
     saved: rec.saved !== false,
     limits: {
       maxWords: num('maxWords'),
@@ -347,6 +380,7 @@ export function samePrivacyDraft(a: PrivacyState, b: PrivacyState): boolean {
   return (
     a.enabled === b.enabled
     && a.reversible === b.reversible
+    && a.ephemeralPlaceholders === b.ephemeralPlaceholders
     && a.action === b.action
     && a.secrets === b.secrets
     && a.personal === b.personal

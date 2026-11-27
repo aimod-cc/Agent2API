@@ -212,6 +212,13 @@ pub fn authorized_models() -> Result<(Vec<String>, crate::server::request_stats:
     let id = bound_id.or_else(first_key_id).ok_or_else(|| GatewayError::with_status(401, "日活保活会调用模型，请先在「网关 Key」页创建一把 Key（或设置环境变量 Key）"))?;
     let (scope, identity) = access_for_id(&id)?;
     validate_scope(&models, &scope)?;
+    if let (Some(key_id), Some(limit)) = (scope.key_id(), scope.usage_limit()) {
+        let _lease = crate::server::core::key_usage::check_and_reserve(
+            key_id,
+            scope.key_name().unwrap_or(""),
+            limit,
+        )?;
+    }
     Ok((models, identity))
 }
 
@@ -345,6 +352,8 @@ pub fn record_activity(
     entry.provider = Some("workbuddy-intl".to_string());
     entry.client_model = model.to_string();
     entry.upstream_model = model.to_string();
+    entry.client_protocol = "chat_completions".to_string();
+    entry.upstream_protocol = "chat_completions".to_string();
     entry.duration_ms = logging::now_ms() - started_at;
     entry.is_test = true;
     entry.source = RequestSource { client: "checkin_keepalive".to_string(), api_key: identity, ..Default::default() };

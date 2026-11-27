@@ -786,7 +786,7 @@ function PluginsPage(): React.ReactElement {
       }} /> : null}
     {detailsItem ? <PluginDetailsDialog name={pluginName(detailsItem.id, detailsItem.name)}
       description={pluginDescription(detailsItem.id, detailsItem.description)} version={detailsItem.version}
-      sourceLabel={t('社区插件')} icon={detailsItem.icon} artwork={detailsItem.id === 'agent2api-web-providers' ? 'web' : 'providers'}
+      sourceLabel={t('社区插件')} downloads={detailsItem.downloads} icon={detailsItem.icon} artwork={detailsItem.id === 'agent2api-web-providers' ? 'web' : 'providers'}
       t={t} onClose={() => setDetailsStore(null)}
       metadata={detailsItem.error ? <div className='text-xs text-warning'>{errorMessage(detailsItem.reason)}</div>
         : detailsItem.version && !detailsInstallable ? <p className='m-0 text-xs text-warning'>{t('当前平台暂无包')}</p> : null}

@@ -32,6 +32,7 @@ fn context_for(stats: Arc<RequestStats>) -> (RecordContext, Arc<RequestTelemetry
         model: "test-model".to_string(),
         client_model: "test-model".to_string(),
         client_reasoning: String::new(),
+        client_protocol: "chat_completions".to_string(),
         is_test: false,
         source: Default::default(),
         status: 200,

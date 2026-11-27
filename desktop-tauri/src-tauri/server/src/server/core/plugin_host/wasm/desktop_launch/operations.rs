@@ -102,6 +102,7 @@ impl Operation {
             "phase": state.phase, "message": state.message, "error": state.error,
             "committed": state.committed, "started": state.started, "restored": state.restored,
             "running": state.client_running, "requiresRestart": self.restart, "hotSwitch": self.hot_switch,
+            "switchOnly": self.binding.client.switch_only,
             "proxy": self.proxy.to_json(),
             "executable": self.executable.display().to_string(), "package": self.binding.package,
             "resources": self.binding.client.resources.iter().map(|resource| json!({ "id": resource.id, "label": resource.label,
@@ -109,7 +110,7 @@ impl Operation {
             "backup": state.backup, "pendingBackup": self.pending_backup,
             "remainingMs": self.deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
             "canRestore": (state.backup.is_some() || self.pending_backup.is_some()) && !state.restored && !state.worker,
-            "canRetryStart": state.committed && !state.started && !state.restored && !state.worker })
+            "canRetryStart": !self.binding.client.switch_only && state.committed && !state.started && !state.restored && !state.worker })
     }
 
     pub fn finish(&self, phase: &'static str, message: impl Into<String>, error: bool) {
@@ -157,7 +158,7 @@ pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Pr
     let raw_proxy = origin.initial_proxy().clone();
     let requested_use_proxy = selection.use_proxy;
     let setting = settings::read(&db, &binding.provider, &binding.client.id)?;
-    let launch_args = settings::parse_args(&setting.args)?;
+    let launch_args = if binding.client.switch_only { Vec::new() } else { settings::parse_args(&setting.args)? };
     let launch_args_for_probe = launch_args.clone();
     let client = binding.client.clone();
     let override_path = setting.path.clone();
@@ -166,8 +167,8 @@ pub async fn prepare(manager: Source, store: AccountStore, db: Db, selection: Pr
         let executable = paths::detect(&client, &override_path)?.ok_or("没有找到本机客户端，请先选择程序位置")?;
         let targets = storage::targets(&client, &executable)?;
         for target in targets.values() { target.probe()?; }
-        let running = windows::running(&executable)?;
-        let hot_switch = if running && proxy_state.resolved.is_none() {
+        let running = windows::running(&executable, client.switch_only)?;
+        let hot_switch = if running && !client.switch_only && proxy_state.resolved.is_none() {
             windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
                 && windows::running_has_args(&executable, &launch_args_for_probe)?
         } else {
@@ -209,7 +210,10 @@ pub fn cancel(manager: Source, intent: &str) -> Result<Value, String> {
     let operation = find(&manager, intent)?;
     operation.cancel.cancel();
     let mut state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;
-    if !state.worker && !state.committed { state.phase = "canceled"; state.message = "本次启动已取消".into(); }
+    if !state.worker && !state.committed {
+        state.phase = "canceled";
+        state.message = if operation.binding.client.switch_only { "本次切换已取消" } else { "本次启动已取消" }.into();
+    }
     drop(state);
     Ok(operation.public())
 }
@@ -228,8 +232,8 @@ pub fn confirm(manager: Source, intent: &str, restart_confirmed: bool) -> Result
     let launch_args = operation.launch_args.clone();
     let (running, hot_switch, pending) = crate::server::core::blocking::in_place(move || {
         paths::identity(&client, &executable)?;
-        let running = windows::running(&executable)?;
-        let hot_switch = if running && !use_proxy {
+        let running = windows::running(&executable, client.switch_only)?;
+        let hot_switch = if running && !client.switch_only && !use_proxy {
             windows::hot_switch_targets(&executable, client.hot_switch.as_ref())?.is_some()
                 && windows::running_has_args(&executable, &launch_args)?
         } else {
@@ -243,7 +247,13 @@ pub fn confirm(manager: Source, intent: &str, restart_confirmed: bool) -> Result
     if operation.pending_backup.is_some() || pending.is_some() { return Err("上次本机切换未完整结束，请先恢复原凭证".into()); }
     if running && !operation.initial_running { return Err("客户端在准备后已启动，请重新确认".into()); }
     if operation.hot_switch && running && !hot_switch { return Err("客户端后台服务状态已变化，请重新确认".into()); }
-    if operation.restart && !restart_confirmed { return Err("客户端正在运行，请确认已保存内容并允许重启".into()); }
+    if operation.restart && !restart_confirmed {
+        return Err(if operation.binding.client.switch_only {
+            "客户端正在运行，请确认已保存内容并允许关闭后切换"
+        } else {
+            "客户端正在运行，请确认已保存内容并允许重启"
+        }.into());
+    }
     {
         let state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;
         if state.confirmed || state.worker || state.phase != "awaiting_confirmation" { drop(state); return Ok(operation.public()); }
@@ -275,7 +285,8 @@ pub async fn settings(manager: Source, store: AccountStore, db: Db, selection: S
     binding.current()?;
     if !manager.is_current() { return Err("本机管理会话已变化".into()); }
     Ok(json!({ "provider": selection.provider, "client": binding.client.id, "path": setting.path,
-        "args": setting.args,
+        "args": if binding.client.switch_only { "" } else { setting.args.as_str() },
+        "switchOnly": binding.client.switch_only,
         "detected": detected.as_ref().ok().and_then(|path| path.as_ref()).map(|path| path.display().to_string()),
         "error": detected.err(), "revision": settings::revision(&binding.package, &setting),
         "permission": "per_operation_confirmation" }))
@@ -288,7 +299,14 @@ pub async fn configure(manager: Source, store: AccountStore, db: Db, selection: 
     if settings::revision(&binding.package, &previous) != revision { return Err("插件或客户端设置已变化，请重新读取".into()); }
     let path_supplied = path.is_some();
     let next_path = path.unwrap_or_else(|| previous.path.clone());
-    let next_args = args.map(|value| value.trim().to_string()).unwrap_or_else(|| previous.args.clone());
+    let next_args = if binding.client.switch_only {
+        if args.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+            return Err("当前客户端不支持配置启动参数".into());
+        }
+        String::new()
+    } else {
+        args.map(|value| value.trim().to_string()).unwrap_or_else(|| previous.args.clone())
+    };
     if next_path.len() > 2048 { return Err("本机客户端路径无效".into()); }
     settings::parse_args(&next_args)?;
     if !next_path.is_empty() && (path_supplied || next_path != previous.path) {

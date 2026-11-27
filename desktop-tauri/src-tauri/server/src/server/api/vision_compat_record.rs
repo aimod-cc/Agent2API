@@ -18,6 +18,8 @@ pub(super) fn persist(context: &RecordContext) {
         entry.client_model = context.client_model.clone();
         entry.upstream_model = snapshot.upstream_model.clone();
         entry.upstream_reasoning = snapshot.upstream_reasoning;
+        entry.client_protocol = "chat_completions".to_string();
+        entry.upstream_protocol = snapshot.upstream_protocol;
         entry.error = call.error;
         entry.prompt_tokens = snapshot.prompt_tokens;
         entry.completion_tokens = snapshot.completion_tokens;

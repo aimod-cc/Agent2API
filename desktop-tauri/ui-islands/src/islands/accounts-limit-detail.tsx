@@ -143,7 +143,9 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
   }, [])
   const initialFocus = React.useCallback(() => boxRef.current ?? null, [])
 
-  const cooldownLabel = cooldown?.scope === 'provider' ? t('提供商共享冷却') : t('账号冷却')
+  const balancePaused = cooldown?.kind === 'balance'
+  const cooldownLabel = balancePaused ? t('余额不足暂停') : cooldown?.scope === 'provider' ? t('提供商共享冷却') : t('账号冷却')
+  const cooldownTitle = balancePaused ? t('上游已报余额不足 · 暂停派单') : cooldownLabel
   const cooldownSource = cooldown?.timeSource === 'upstream' ? t('冷却来自上游时间') : cooldown?.timeSource === 'fallback' ? t('冷却来自本机估算') : ''
   const earliest = soonest === RESET_UNKNOWN ? t('待定') : soonest
 
@@ -167,7 +169,7 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
             {cooldown ? (
               <div className='usage-pop-row'>
                 <div className='usage-pop-line'>
-                  <span className='usage-pop-name'>{cooldownLabel}</span>
+                  <span className='usage-pop-name'>{cooldownTitle}</span>
                   <span className='usage-pop-view warn'>{waitText(cooldown.resetAt - Date.now())}</span>
                 </div>
                 <div className='lp-pop-subline'>
@@ -199,7 +201,9 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
             ))}
             <div className='lp-pop-foot'>
               <span className='lp-pop-note'>{cooldown
-                ? cooldown.scope === 'provider' ? t('同一提供商的账号暂时停止转发 · 到恢复时间自动解除') : t('账号全部模型暂时停止转发 · 到恢复时间自动解除')
+                ? balancePaused
+                  ? t('余额回升后自动恢复，也可手动清除')
+                  : cooldown.scope === 'provider' ? t('同一提供商的账号暂时停止转发 · 到恢复时间自动解除') : t('账号全部模型暂时停止转发 · 到恢复时间自动解除')
                 : t('{n} 个模型限流中 · 到恢复时间自动解除', { n: count })}</span>
               <Button variant='outline' size='xs' title={t('清除该账号的冷却与全部模型限流标记')}
                 onClick={() => onClear('')}>{t('全部清除')}</Button>

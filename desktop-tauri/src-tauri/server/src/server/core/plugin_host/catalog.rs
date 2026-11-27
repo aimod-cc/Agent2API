@@ -294,9 +294,11 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
             .cloned()
             .unwrap_or_else(|| Value::Null);
         let icon = icons.remove(id).unwrap_or(icon);
+        let downloads = entry["downloads"].as_u64().unwrap_or(0);
         let mut value = json!({
             "id": id, "name": super::pack_view::display_name(text("name")), "description": text("description"),
             "order": entry["order"], "category": entry["category"],
+            "downloads": downloads,
             "providers": entry.get("providers").cloned().unwrap_or_else(|| json!([])),
             "repository": repo,
             "homepage": detail.homepage,

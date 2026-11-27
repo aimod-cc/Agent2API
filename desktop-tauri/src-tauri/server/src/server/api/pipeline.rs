@@ -432,6 +432,8 @@ pub struct RecordContext {
     /// 档位」是两个读数（客户端没指定时映射绑定可补一个，承载家也可能归并）。
     /// 采集时机与 [`Self::client_model`] 相同（入口解析出 payload 后取一次）。
     pub client_reasoning: String,
+    /// **下游请求使用的协议**（`chat_completions` / `responses` / `anthropic` / `images`）。
+    pub client_protocol: String,
     /// 下发给客户端的 HTTP 状态码
     pub status: i64,
     /// **下游原始请求体文本**（`request_raw` 表的请求侧；完整保存，None = 未采集）。
@@ -467,6 +469,7 @@ pub fn record_early_failure(
     started_at: i64,
     model: &str,
     client_reasoning: &str,
+    client_protocol: &str,
     source: &crate::server::request_stats::RequestSource,
     error: &GatewayError,
 ) {
@@ -476,6 +479,7 @@ pub fn record_early_failure(
         started_at,
         client_model: model.to_string(),
         client_reasoning: client_reasoning.to_string(),
+        client_protocol: client_protocol.to_string(),
         model: model.to_string(),
         // 与 `payload_response` 同一口径：非法状态码会被归一成 500
         status: i64::from(error.http_status().as_u16()),
@@ -506,6 +510,7 @@ pub(super) fn running_progress(snapshot: &TelemetrySnapshot, started_at: i64) ->
         account_name: snapshot.account_name.clone(),
         upstream_model: snapshot.upstream_model.clone(),
         upstream_reasoning: snapshot.upstream_reasoning.clone(),
+        upstream_protocol: snapshot.upstream_protocol.clone(),
         attempts: snapshot.attempts.max(1),
         first_response_ms: snapshot.first_response_at.map(|at| (at - started_at).max(0)),
         phase: snapshot.phase.as_str().to_string(),
@@ -838,11 +843,19 @@ pub fn write_debug_files(body: &[u8], method: &str, path: &str, user_agent: &str
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = std::fs::write(dir.join(DEBUG_REQUEST_FILE), body);
+    let privacy = config::current().privacy_settings();
+    let safe_body: std::borrow::Cow<'_, [u8]> = if privacy.settings.enabled {
+        std::borrow::Cow::Owned(crate::server::core::privacy::redact_debug_body(
+            body, path, &privacy,
+        ))
+    } else {
+        std::borrow::Cow::Borrowed(body)
+    };
+    let _ = std::fs::write(dir.join(DEBUG_REQUEST_FILE), safe_body.as_ref());
     let meta = format!(
         "{} {method} {path} {}B ua={user_agent}",
         iso_timestamp(),
-        body.len(),
+        safe_body.len(),
     );
     let _ = std::fs::write(dir.join(DEBUG_META_FILE), meta);
 }

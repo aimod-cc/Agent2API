@@ -1,11 +1,12 @@
 import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
+import '../styles/agent-redesign.css'
 import { Alert, Button, Card, Collapsible, CollapsibleContent, CollapsibleTrigger, Empty, EmptyDescription, EmptyTitle, InputGroup, InputGroupAddon, InputGroupInput, NavItem, NavList, SegmentedControl, Sidebar, Skeleton, Spinner, StatusDot, cn } from '@ui'
 import { t } from '../i18n'
 import { clearFilters, counts, getAgentStore, isDesktopEnvironment, loadPanel, selectClient, selectedClient, setFilter, setQuery, subscribeAgentStore, visibleClients, type LoadOptions } from './agent-state'
 import { blankProfile, detectionLabel } from './agent-model'
 import { ProfileEditor } from './agent-editor'
-import { LocalDirectSection } from './agent-local-direct-card'
+import { LocalDirectDockItem, LocalDirectPanel, useLocalDirect } from './agent-local-direct-card'
 import { PathDialog } from './agent-path-dialog'
 import { ApplyDialog } from './agent-preview'
 import { ProfileDialog } from './agent-profile-dialog'
@@ -39,6 +40,8 @@ function formatDetectedTime(detectedAt: number): string {
 export function AgentPage() {
   const store = React.useSyncExternalStore(subscribeAgentStore,getAgentStore,getAgentStore)
   const [tab, setTab] = React.useState<string>('config')
+  const [directSelected, setDirectSelected] = React.useState(false)
+  const localDirect = useLocalDirect()
   const client = selectedClient()
   const list = visibleClients(store)
   const stats = counts(store)
@@ -52,6 +55,7 @@ export function AgentPage() {
     : detectedTime
       ? t('上次检测 {time}', { time: detectedTime })
       : ''
+  const showDirectPanel = directSelected && Boolean(localDirect.status)
 
   return <Card render={<section/>} className='panel agent-panel'>
     <div className='toolbar agent-toolbar'>
@@ -74,7 +78,6 @@ export function AgentPage() {
       <span className='min-w-0 flex-1'>{store.error}</span>
       <Button variant='outline' size='sm' disabled={isDetecting || Boolean(store.busy)} onClick={() => void loadPanel({ force: true })}>{t('重新检测')}</Button>
     </Alert>}
-    <LocalDirectSection />
     <div className='agent-body'>
       <Sidebar className='agent-rail p-0 gap-0' aria-label={t('客户端清单')}><NavList className='agent-rail-scroll'>
         {initialLoading ? Array.from({ length: 8 }, (_, index) => (
@@ -87,16 +90,19 @@ export function AgentPage() {
             <Skeleton className='size-2 shrink-0 rounded-full' />
           </div>
         )) : <>
-          {detected.length>0&&<><div className='agent-rail-label'>{t('已检测到')}（{detected.length}）</div>{detected.map(item=><ClientRow key={item.id} client={item} active={item.id===store.selected}/>)}</>}
-          {missing.length>0&&<><div className='agent-rail-label'>{t('未检测到')}（{missing.length}）</div>{missing.map(item=><ClientRow key={item.id} client={item} active={item.id===store.selected}/>)}</>}
+          {detected.length>0&&<><div className='agent-rail-label'>{t('已检测到')}（{detected.length}）</div>{detected.map(item=><ClientRow key={item.id} client={item} active={!showDirectPanel && item.id===store.selected} onPick={() => { setDirectSelected(false); selectClient(item.id) }} />)}</>}
+          {missing.length>0&&<><div className='agent-rail-label'>{t('未检测到')}（{missing.length}）</div>{missing.map(item=><ClientRow key={item.id} client={item} active={!showDirectPanel && item.id===store.selected} onPick={() => { setDirectSelected(false); selectClient(item.id) }} />)}</>}
           {!list.length&&<Empty>
             <span>{t('没有匹配的客户端')}</span>
             {(store.query || store.filter !== 'all') && <Button variant='outline' size='sm' onClick={clearFilters}>{t('清除筛选')}</Button>}
           </Empty>}
         </>}
-      </NavList></Sidebar>
+      </NavList>
+      {localDirect.status ? <LocalDirectDockItem status={localDirect.status} active={showDirectPanel} onSelect={() => setDirectSelected(true)} /> : null}
+      </Sidebar>
       <div className='agent-detail'>
-        {initialLoading ? <div className='agent-detail-center'>
+        {showDirectPanel ? <LocalDirectPanel controller={localDirect} />
+        : initialLoading ? <div className='agent-detail-center'>
           <Spinner className='size-6 text-primary' />
           <p className='text-sm text-subtle'>{t('正在检测本机客户端与配置文件…')}</p>
         </div> : store.clients.length > 0 && !list.length ? <Empty className='agent-detail-center'>
@@ -112,7 +118,7 @@ export function AgentPage() {
   </Card>
 }
 
-function ClientRow({client,active}:{client:AgentClient;active:boolean}) {
+function ClientRow({client,active,onPick}:{client:AgentClient;active:boolean;onPick:()=>void}) {
   const live = client.configurations.find(profile => profile.status === 'active' || profile.status === 'enabled')
   const dotVariant = client.readError
     ? 'destructive'
@@ -131,7 +137,7 @@ function ClientRow({client,active}:{client:AgentClient;active:boolean}) {
           ? t('尚未启用配置')
           : detectionLabel(client)
   return <NavItem active={active} icon={<ClientAvatar client={client}/>} trailing={<StatusDot variant={dotVariant} className={cn(active && 'agent-status-active')}/>}
-    className={cn('agent-client',active&&'is-active',!client.detected&&'is-missing')} onClick={()=>selectClient(client.id)}>
+    className={cn('agent-client',active&&'is-active',!client.detected&&'is-missing')} onClick={onPick}>
     <span className='agent-client-main'><span className='agent-client-name'>{client.name}{client.version&&<span className='agent-client-ver'>{client.version}</span>}</span>
       <span className='agent-client-sub'>{subtitle}</span></span>
   </NavItem>

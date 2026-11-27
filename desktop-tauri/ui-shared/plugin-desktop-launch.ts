@@ -24,6 +24,7 @@ export type LaunchResult = {
   running: boolean
   requiresRestart: boolean
   hotSwitch: boolean
+  switchOnly: boolean
   proxy: LaunchProxy
   executable: string
   resources: Array<{ id: string; label: string; location: string }>
@@ -33,7 +34,7 @@ export type LaunchResult = {
   canRestore: boolean
   canRetryStart: boolean
 }
-export type LaunchSettings = { provider: string; client: string; path: string; args: string; detected: string | null; error: string | null; revision: string }
+export type LaunchSettings = { provider: string; client: string; path: string; args: string; switchOnly: boolean; detected: string | null; error: string | null; revision: string }
 export type LaunchPendingRecovery = { backup: string; provider: string; account: string; client: string; label: string; executable: string }
 export type LaunchRequest = <T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, options?: { retry: 'never' }) => Promise<T>
 export type LaunchTranslate = (key: string, vars?: Record<string, string | number>) => string
@@ -57,7 +58,7 @@ export function readLaunchResult(raw: unknown): LaunchResult {
     || !string(raw.message) || !string(raw.executable) || !Array.isArray(raw.resources) || raw.resources.length > 8
     || raw.resources.some(resource => !object(resource) || !string(resource.id, 128) || !string(resource.label, 128) || !string(resource.location))
     || typeof raw.remainingMs !== 'number' || !Number.isFinite(raw.remainingMs) || raw.remainingMs < 0
-    || ['error', 'committed', 'started', 'restored', 'running', 'requiresRestart', 'hotSwitch', 'canRestore', 'canRetryStart'].some(key => typeof raw[key] !== 'boolean')
+    || ['error', 'committed', 'started', 'restored', 'running', 'requiresRestart', 'hotSwitch', 'switchOnly', 'canRestore', 'canRetryStart'].some(key => typeof raw[key] !== 'boolean')
     || ['backup', 'pendingBackup'].some(key => raw[key] !== null && !string(raw[key], 48))) throw new Error('本机启动状态返回格式无效')
   const proxy = raw.proxy
   if (!object(proxy)
@@ -69,7 +70,7 @@ export function readLaunchResult(raw: unknown): LaunchResult {
 
 export function readLaunchSettings(raw: unknown, selection: LaunchSelection): LaunchSettings {
   if (!object(raw) || raw.provider !== selection.provider || raw.client !== selection.client || !string(raw.path, 2048)
-    || !string(raw.args, 1024)
+    || !string(raw.args, 1024) || typeof raw.switchOnly !== 'boolean'
     || raw.detected !== null && !string(raw.detected, 2048) || raw.error !== null && !string(raw.error)
     || !string(raw.revision, 64) || !/^[a-f0-9]{64}$/.test(raw.revision)) throw new Error('本机客户端设置返回格式无效')
   return raw as unknown as LaunchSettings
@@ -100,7 +101,7 @@ export function launchMessage(message: string, t: LaunchTranslate): string {
   }).join('；')
 }
 
-export function launchPhaseText(phase: LaunchPhase, t: LaunchTranslate): string {
+export function launchPhaseText(phase: LaunchPhase, t: LaunchTranslate, switchOnly = false): string {
   switch (phase) {
     case 'awaiting_confirmation': return t('等待确认')
     case 'preparing': return t('正在准备账号凭证')
@@ -109,10 +110,10 @@ export function launchPhaseText(phase: LaunchPhase, t: LaunchTranslate): string 
     case 'reloading': return t('正在重载客户端服务')
     case 'starting': return t('正在启动客户端')
     case 'started': return t('客户端已启动')
-    case 'switched': return t('凭证已在线切换')
+    case 'switched': return switchOnly ? t('凭证已切换') : t('凭证已在线切换')
     case 'committed': return t('凭证已切换，客户端未启动')
-    case 'failed': return t('启动未完成')
-    case 'canceled': return t('本次启动已取消')
+    case 'failed': return switchOnly ? t('切换未完成') : t('启动未完成')
+    case 'canceled': return switchOnly ? t('本次切换已取消') : t('本次启动已取消')
     case 'restored': return t('原凭证已恢复')
     case 'recovery_required': return t('需要恢复原凭证')
   }

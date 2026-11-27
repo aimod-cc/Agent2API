@@ -21,12 +21,12 @@ use crate::server::core::providers::{kind_from_id, kind_id, ProviderKind};
 
 pub(crate) use routing::entry_id_in_manifest;
 pub use routing::{
-    default_model_catalog, default_model_usable, forwarding_providers, model_blocked_everywhere,
-    providers_for_model, wire_target_for_provider, WireTarget,
+    default_model_catalog, default_model_usable, effective_upstream_model, forwarding_providers,
+    model_blocked_everywhere, providers_for_model, wire_target_for_provider, WireTarget,
 };
 pub use view::{
     advertised_manifest_contains, advertised_model_ids, has_available_providers, manage_view,
-    models_by_provider, models_response, session_models, suggest_advertised,
+    models_by_provider, models_response, session_models, suggest_advertised, upstream_model_ids,
 };
 /// 「这条映射在管理页上还有没有模型行可挂」——删除自映射时的放行判据（见函数说明）。
 /// 只服务写侧一个调用点，不进对外的 `pub use`。

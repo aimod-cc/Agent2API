@@ -17,10 +17,11 @@ import {
   refreshPrivacy, savePrivacyConfig, testPrivacyPreview, type SettingsSnapshot,
 } from './settings-state'
 
-function toPatch(draft: PrivacyState): PrivacyPatch {
-  return {
+function toPatch(draft: PrivacyState, revision?: string): PrivacyPatch {
+  const patch: PrivacyPatch = {
     enabled: draft.enabled,
     reversible: draft.reversible,
+    ephemeralPlaceholders: draft.ephemeralPlaceholders,
     action: draft.action,
     secrets: draft.secrets,
     personal: draft.personal,
@@ -34,17 +35,21 @@ function toPatch(draft: PrivacyState): PrivacyPatch {
     providerMode: draft.providerMode,
     providers: draft.providers,
   }
+  if (revision) patch.revision = revision
+  return patch
 }
 
 export function PrivacyPanel({ snap }: { snap: SettingsSnapshot }) {
   const state = snap.privacy
   const [draft, setDraft] = React.useState<PrivacyState>(state)
+  const [saveError, setSaveError] = React.useState('')
   const busy = snap.busy === 'privacy'
   const ready = state.status === 'ready'
   const disabled = !ready || busy
 
   React.useEffect(() => {
     setDraft(state)
+    setSaveError('')
   }, [state])
 
   const actionOptions: { value: PrivacyAction; label: string }[] = [
@@ -56,20 +61,27 @@ export function PrivacyPanel({ snap }: { snap: SettingsSnapshot }) {
   const dirty = ready && !samePrivacyDraft(draft, state)
 
   function updateDraft(patch: Partial<PrivacyState>): void {
+    setSaveError('')
     setDraft(current => ({ ...current, ...patch }))
   }
 
   async function save(): Promise<void> {
-    await savePrivacyConfig(toPatch(draft))
+    setSaveError('')
+    const result = await savePrivacyConfig(toPatch(draft, state.revision || undefined))
+    if (!result.ok && result.error) {
+      setSaveError(result.error)
+    }
   }
 
   const stateSummary = !ready
     ? (state.status === 'loading' ? STATES.appLoading : t('未能读取隐私脱敏设置，请稍后重试'))
     : !state.enabled
       ? t('已关闭；敏感信息不会自动遮罩。建议在使用公开或第三方模型时开启。')
-      : state.vaultEntries > 0
-        ? t('已开启（内存映射 {count} 条；仅内存保留，不落盘）', { count: state.vaultEntries })
-        : t('已开启；出站请求将按规则识别并保护敏感信息。')
+      : state.ephemeralPlaceholders
+        ? t('已开启（单次随机隐藏类型占位符；映射随请求结束自动销毁）')
+        : state.vaultEntries > 0
+          ? t('已开启（内存映射 {count} 条；仅内存保留，不落盘）', { count: state.vaultEntries })
+          : t('已开启；出站请求将按规则识别并保护敏感信息。')
 
   return (
     <Card render={<section />} className='panel'>
@@ -94,7 +106,13 @@ export function PrivacyPanel({ snap }: { snap: SettingsSnapshot }) {
           <Label htmlFor='settings-privacy-reversible' className='flex items-center gap-2'>
             <Switch id='settings-privacy-reversible' checked={draft.reversible} disabled={disabled}
               onCheckedChange={reversible => updateDraft({ reversible })} />
-            {t('自动还原响应中的占位符（支持流式输出与工具调用参数）')}
+            {t('自动还原响应中的占位符（支持流式输出、JSON 输出与工具调用参数）')}
+          </Label>
+          <Label htmlFor='settings-privacy-ephemeral' className='flex items-center gap-2'>
+            <Switch id='settings-privacy-ephemeral' checked={draft.ephemeralPlaceholders}
+              disabled={disabled || !draft.reversible}
+              onCheckedChange={ephemeralPlaceholders => updateDraft({ ephemeralPlaceholders })} />
+            {t('每次请求使用随机且隐藏类型的占位符（隐私更强，会降低提示词缓存命中，且不支持引用上游历史会话）')}
           </Label>
         </div>
 
@@ -103,6 +121,15 @@ export function PrivacyPanel({ snap }: { snap: SettingsSnapshot }) {
         {!state.saved ? (
           <Alert variant='destructive' role='alert' className='text-xs text-destructive'>
             {t('隐私脱敏设置仅本次运行生效，写入数据库失败，请检查配置目录')}
+          </Alert>
+        ) : null}
+
+        {saveError ? (
+          <Alert variant='destructive' role='alert' className='flex flex-wrap items-center justify-between gap-2 text-xs text-destructive'>
+            <span>{saveError}</span>
+            <Button variant='outline' size='xs' disabled={busy} onClick={() => void refreshPrivacy()}>
+              {t('刷新最新配置')}
+            </Button>
           </Alert>
         ) : null}
 
@@ -128,7 +155,7 @@ export function PrivacyPanel({ snap }: { snap: SettingsSnapshot }) {
               <Label htmlFor='privacy-detect-secrets' className='flex items-center gap-2'>
                 <Switch id='privacy-detect-secrets' checked={draft.secrets} disabled={disabled}
                   onCheckedChange={secrets => updateDraft({ secrets })} />
-                {t('自动识别密钥与凭据（API Key、私钥、JWT、数据库连接串密码、认证头）')}
+                {t('自动识别密钥、钱包与凭据（API Key、私钥、助记词、JWT、密码字段与工具 JSON 敏感字段）')}
               </Label>
               <div className='flex flex-wrap items-center gap-2'>
                 <Label htmlFor='privacy-detect-personal' className='flex items-center gap-2'>
@@ -220,7 +247,7 @@ export function PrivacyPanel({ snap }: { snap: SettingsSnapshot }) {
                 {dirty ? t('有未保存的修改') : t('当前设置已保存')}
               </span>
               {dirty ? (
-                <Button variant='outline' disabled={busy} onClick={() => setDraft(state)}>
+                <Button variant='outline' disabled={busy} onClick={() => { setDraft(state); setSaveError('') }}>
                   {t('放弃修改')}
                 </Button>
               ) : null}

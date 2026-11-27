@@ -678,7 +678,7 @@ pub(super) fn list_entry_json(
         Some(None) => (row.cost_usd, row.cost_usd.is_some(), None),
         Some(Some(detail)) => (Some(detail.cost_usd), true, Some(detail.source)),
     };
-    let mut object = serde_json::Map::with_capacity(44);
+    let mut object = serde_json::Map::with_capacity(46);
     object.insert("rowId".into(), json!(row.row_id));
     object.insert("id".into(), json!(row.id));
     object.insert("ts".into(), json!(row.ts));
@@ -734,6 +734,8 @@ pub(super) fn list_entry_json(
         object.insert("clientUserAgent".into(), Value::String(row.client_user_agent.clone()));
     }
     object.insert("origin".into(), json!(row.origin));
+    object.insert("clientProtocol".into(), json!(row.client_protocol));
+    object.insert("upstreamProtocol".into(), json!(row.upstream_protocol));
     Value::Object(object)
 }
 

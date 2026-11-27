@@ -671,6 +671,7 @@ fn table_row_counts(conn: &Connection, skip: &[&str]) -> Vec<Value> {
         "local_direct_files",
         "account_usage_records",
         "account_limiter_events",
+        "api_key_usage_events",
         "checkin_records",
         "maintenance_runs",
         "maintenance_items",

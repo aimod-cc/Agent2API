@@ -129,7 +129,7 @@ impl ConversationOwner {
         host: &Arc<Host>,
         provider: &str,
         account: &str,
-        telemetry: &RequestTelemetry,
+        telemetry: &Arc<RequestTelemetry>,
         egress: Result<EgressSelection, EgressError>,
     ) -> Result<(Self, ConversationCall), GatewayError> {
         let request = telemetry.id();
@@ -192,6 +192,7 @@ impl ConversationOwner {
             output: output.clone(),
             signal: signal.clone(),
             egress,
+            telemetry: Arc::downgrade(telemetry),
             provider: provider.to_string(),
             account: account.to_string(),
             request,
@@ -257,6 +258,7 @@ pub(in crate::server::core::plugin_host) struct ConversationCall {
     // 锁顺序：Signal → Host生命周期 → Runtime只读 → Table → ScopeGate → Record → replay。
     signal: Arc<Signal>,
     egress: Result<Arc<ConversationEgress>, EgressError>,
+    telemetry: Weak<RequestTelemetry>,
     provider: String,
     account: String,
     request: String,
@@ -269,6 +271,12 @@ pub(in crate::server::core::plugin_host) struct ConversationCall {
 
 impl ConversationCall {
     pub(super) fn request_id(&self) -> &str { &self.request }
+
+    pub(super) fn note_upstream_protocol(&self, protocol: &str) {
+        if let Some(telemetry) = self.telemetry.upgrade() {
+            telemetry.note_upstream_protocol(protocol);
+        }
+    }
 
     pub(super) fn capacity_caller(&self) -> &str { &self.capacity_caller }
 

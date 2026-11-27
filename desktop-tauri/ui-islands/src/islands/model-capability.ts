@@ -105,6 +105,7 @@ export function reasoningLevelsOf(
   model: {
     reasoningLevels?: unknown; reasoningDefaultLevel?: unknown
     reasoningFixedLevel?: unknown; reasoningSource?: unknown
+    supportsReasoning?: unknown; capabilities?: unknown
   } | null | undefined,
 ): { levels: string[]; defaultLevel: string; fixedLevel: string; source: string } | null {
   const raw = model?.reasoningLevels
@@ -113,13 +114,19 @@ export function reasoningLevelsOf(
     (level): level is string => typeof level === 'string' && level.trim() !== '',
   )
   if (!levels.length) return null
+  const source = typeof model?.reasoningSource === 'string' ? model.reasoningSource : ''
+  const caps = model?.capabilities && typeof model.capabilities === 'object'
+    ? model.capabilities as { supportsReasoning?: unknown } : null
+  const supports = typeof caps?.supportsReasoning === 'boolean'
+    ? caps.supportsReasoning
+    : typeof model?.supportsReasoning === 'boolean' ? model.supportsReasoning : null
+  if (supports === false && source !== 'upstream') return null
   const preset = model?.reasoningDefaultLevel
   const fixed = model?.reasoningFixedLevel
-  const source = model?.reasoningSource
   return {
     levels, defaultLevel: typeof preset === 'string' ? preset.trim() : '',
     fixedLevel: typeof fixed === 'string' ? fixed.trim() : '',
-    source: typeof source === 'string' ? source : '',
+    source,
   }
 }
 

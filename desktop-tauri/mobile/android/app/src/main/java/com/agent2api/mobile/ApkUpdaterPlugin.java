@@ -1,6 +1,9 @@
 package com.agent2api.mobile;
 
+import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
@@ -17,6 +20,7 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -201,6 +205,85 @@ public class ApkUpdaterPlugin extends Plugin {
         call.resolve();
     }
 
+    private void startActivitySafely(Intent intent, boolean forceNewTask) {
+        Activity activity = getActivity();
+        if (activity != null && !activity.isFinishing() && !activity.isDestroyed()) {
+            if (forceNewTask) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            }
+            activity.startActivity(intent);
+        } else {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private PackageInfo getInstalledPackageInfo() throws PackageManager.NameNotFoundException {
+        PackageManager pm = getContext().getPackageManager();
+        String pkg = getContext().getPackageName();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return pm.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(0));
+        }
+        return pm.getPackageInfo(pkg, 0);
+    }
+
+    @SuppressWarnings("deprecation")
+    private PackageInfo getArchivePackageInfo(File file) {
+        PackageManager pm = getContext().getPackageManager();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return pm.getPackageArchiveInfo(file.getAbsolutePath(), PackageManager.PackageInfoFlags.of(0));
+        }
+        return pm.getPackageArchiveInfo(file.getAbsolutePath(), 0);
+    }
+
+    @SuppressWarnings("deprecation")
+    private static long versionCodeOf(PackageInfo info) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return info.getLongVersionCode();
+        }
+        return info.versionCode;
+    }
+
+    /**
+     * 校验缓存目录里的 APK 是否仍然是有效的「待安装更新」。
+     *
+     * Android 覆盖升级后不会自动清空 cacheDir；若不比对版本，升级完成后
+     * 重进设置页还会一直停留在「新版本安装包已就绪」。损坏、旧版或已安装的
+     * 同版本包在这里顺手清理。
+     */
+    private boolean hasPendingUpdateApk(File file) {
+        if (!file.exists() || file.length() <= 0) {
+            if (file.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
+            }
+            return false;
+        }
+        try {
+            PackageInfo archive = getArchivePackageInfo(file);
+            if (archive == null || archive.packageName == null) {
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
+                return false;
+            }
+            if (getContext().getPackageName().equals(archive.packageName)) {
+                PackageInfo current = getInstalledPackageInfo();
+                long archiveCode = versionCodeOf(archive);
+                long currentCode = versionCodeOf(current);
+                if (archiveCode < currentCode
+                    || (archiveCode == currentCode && Objects.equals(archive.versionName, current.versionName))) {
+                    //noinspection ResultOfMethodCallIgnored
+                    file.delete();
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception ignored) {
+            return file.exists() && file.length() > 0;
+        }
+    }
+
     /**
      * 当前是否允许安装未知来源应用。
      *
@@ -209,25 +292,43 @@ public class ApkUpdaterPlugin extends Plugin {
      */
     @PluginMethod
     public void canInstall(PluginCall call) {
-        JSObject result = new JSObject();
-        boolean allowed = true;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            allowed = getContext().getPackageManager().canRequestPackageInstalls();
+        try {
+            JSObject result = new JSObject();
+            boolean allowed = true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                allowed = getContext().getPackageManager().canRequestPackageInstalls();
+            }
+            result.put("allowed", allowed);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject("无法检查安装权限：" + error.getMessage());
         }
-        result.put("allowed", allowed);
-        call.resolve(result);
     }
 
     /** 跳到本应用的「安装未知应用」设置页（`canInstall` 为 false 时由界面调用） */
     @PluginMethod
     public void openInstallPermissionSettings(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Intent intent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
-            intent.setData(Uri.parse("package:" + getContext().getPackageName()));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            getContext().startActivity(intent);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            call.resolve();
+            return;
         }
-        call.resolve();
+        Uri packageUri = Uri.parse("package:" + getContext().getPackageName());
+        Intent[] candidates = new Intent[] {
+            new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, packageUri),
+            new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES),
+            new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri),
+        };
+        Exception lastError = null;
+        for (Intent candidate : candidates) {
+            try {
+                startActivitySafely(candidate, false);
+                call.resolve();
+                return;
+            } catch (Exception error) {
+                lastError = error;
+            }
+        }
+        call.reject("无法打开安装权限设置：" + (lastError != null ? lastError.getMessage() : "系统未提供对应页面"));
     }
 
     /**
@@ -240,11 +341,34 @@ public class ApkUpdaterPlugin extends Plugin {
     @PluginMethod
     public void install(PluginCall call) {
         File file = targetFile();
-        if (!file.exists()) {
+        if (!file.exists() || file.length() <= 0) {
+            if (file.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
+            }
             call.reject("安装包不存在，请先下载");
             return;
         }
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && !getContext().getPackageManager().canRequestPackageInstalls()) {
+                call.reject("尚未授予「安装未知来源应用」权限，请先授权后再试");
+                return;
+            }
+            PackageInfo archive = null;
+            boolean archiveChecked = false;
+            try {
+                archive = getArchivePackageInfo(file);
+                archiveChecked = true;
+            } catch (Exception ignored) {
+                // 个别定制 ROM 解析异常时不阻断系统安装器
+            }
+            if (archiveChecked && (archive == null || archive.packageName == null)) {
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
+                call.reject("安装包已损坏，请重新下载");
+                return;
+            }
             Uri uri = FileProvider.getUriForFile(
                 getContext(),
                 getContext().getPackageName() + ".fileprovider",
@@ -253,8 +377,7 @@ public class ApkUpdaterPlugin extends Plugin {
             Intent intent = new Intent(Intent.ACTION_VIEW);
             intent.setDataAndType(uri, "application/vnd.android.package-archive");
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            getContext().startActivity(intent);
+            startActivitySafely(intent, true);
             call.resolve();
         } catch (Exception error) {
             call.reject("无法启动安装器：" + error.getMessage());
@@ -265,9 +388,10 @@ public class ApkUpdaterPlugin extends Plugin {
     @PluginMethod
     public void downloaded(PluginCall call) {
         File file = targetFile();
+        boolean pending = hasPendingUpdateApk(file);
         JSObject result = new JSObject();
-        result.put("exists", file.exists());
-        result.put("size", file.exists() ? file.length() : 0);
+        result.put("exists", pending);
+        result.put("size", pending ? file.length() : 0);
         call.resolve(result);
     }
 

@@ -142,6 +142,22 @@ fn parse_provider(provider: &str, item: &Value) -> DeclaredErrorPolicy {
             let code = clean_text(&entry.code, 256);
             let model = clean_text(&entry.model, 256);
             let reason = clean_text(&entry.reason, 240);
+            let legacy_sdk_balance = local_id == "balance"
+                && entry.kind == ErrorKind::Balance
+                && action == ErrorAction::SwitchAccount
+                && entry.cooldown == CooldownMode::Upstream
+                && fallback_seconds == 600
+                && !entry.exponential
+                && fallback_cap_seconds == 1800
+                && entry.scope == CooldownScope::Account
+                && code.is_empty()
+                && model.is_empty()
+                && statuses == [402];
+            let (exponential, fallback_cap_seconds, statuses) = if legacy_sdk_balance {
+                (true, 21_600, Vec::new())
+            } else {
+                (entry.exponential, fallback_cap_seconds, statuses)
+            };
             out.rules.push(PluginErrorRule {
                 rule: ErrorRule {
                     id: full_id,
@@ -155,7 +171,7 @@ fn parse_provider(provider: &str, item: &Value) -> DeclaredErrorPolicy {
                     action,
                     cooldown: entry.cooldown,
                     fallback_seconds,
-                    exponential: entry.exponential,
+                    exponential,
                     fallback_cap_seconds,
                     scope: entry.scope,
                 },

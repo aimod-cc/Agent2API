@@ -19,6 +19,11 @@ impl RpcAdapter {
         let host = execution.host.clone();
         let options = host.options.wasm.as_ref().ok_or_else(|| GatewayError::with_status(501, "非 Wasm 图片通道"))?;
         if !options.allows("images.v1") { return Err(GatewayError::with_status(501, "插件未声明标准图片能力")); }
+        telemetry.note_upstream_protocol(match self.id {
+            "antigravity" => "gemini",
+            "doubaowork" => "proprietary",
+            _ => "images",
+        });
         host.ensure().await.map_err(|message| GatewayError::with_status(503, message))?;
         let mut params = json!({ "provider": self.id, "account": account, "body": body,
             "headers": headers_json(headers), "proxy": proxy.map(wire_proxy).transpose()?.unwrap_or(Value::Null),

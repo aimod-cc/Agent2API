@@ -32,6 +32,7 @@ use std::collections::HashSet;
 use axum::extract::Request;
 
 use crate::server::core::api_keys::ApiKeyEntry;
+use crate::server::core::key_usage::KeyUsageLimit;
 
 /// 本次请求命中的 Key 所带来的限制（**已归一**：空列表 = 不限制）。
 ///
@@ -45,6 +46,11 @@ pub struct KeyScope {
     allowed_providers: HashSet<String>,
     /// 允许的对外模型名（小写），空集合 = 不限制
     allowed_models: HashSet<String>,
+    /// 命中的 Key id / 名称（仅用于用量限额核对与提示）
+    key_id: Option<String>,
+    key_name: Option<String>,
+    /// 用量限制配置（`None` = 不限制）
+    usage_limit: Option<KeyUsageLimit>,
     account_id: Option<String>,
     require_account: bool,
 }
@@ -55,6 +61,9 @@ impl KeyScope {
         Self {
             allowed_providers: normalize(&entry.allowed_providers),
             allowed_models: normalize(&entry.allowed_models),
+            key_id: (!entry.id.is_empty()).then(|| entry.id.clone()),
+            key_name: (!entry.name.is_empty()).then(|| entry.name.clone()),
+            usage_limit: entry.usage_limit.clone().filter(KeyUsageLimit::is_active),
             account_id: None,
             require_account: false,
         }
@@ -75,6 +84,9 @@ impl KeyScope {
         Self {
             allowed_providers,
             allowed_models: HashSet::new(),
+            key_id: None,
+            key_name: None,
+            usage_limit: None,
             account_id: None,
             require_account: false,
         }
@@ -86,6 +98,9 @@ impl KeyScope {
         }
         let mut scope = Self::provider_only(provider);
         scope.allowed_models = self.allowed_models.clone();
+        scope.key_id = self.key_id.clone();
+        scope.key_name = self.key_name.clone();
+        scope.usage_limit = self.usage_limit.clone();
         Some(scope)
     }
 
@@ -121,6 +136,28 @@ impl KeyScope {
     /// 是否限制模型
     pub fn restricts_models(&self) -> bool {
         !self.allowed_models.is_empty()
+    }
+
+    /// 是否设置了用量限制
+    pub fn restricts_usage(&self) -> bool {
+        self.usage_limit.as_ref().is_some_and(KeyUsageLimit::is_active)
+    }
+
+    /// 是否为受限 Key（任一维度受限，均不允许用于无管理员会话的管理面访问）
+    pub fn is_restricted(&self) -> bool {
+        self.restricts_providers() || self.restricts_models() || self.restricts_usage()
+    }
+
+    pub fn key_id(&self) -> Option<&str> {
+        self.key_id.as_deref()
+    }
+
+    pub fn key_name(&self) -> Option<&str> {
+        self.key_name.as_deref()
+    }
+
+    pub fn usage_limit(&self) -> Option<&KeyUsageLimit> {
+        self.usage_limit.as_ref().filter(|limit| limit.is_active())
     }
 
     /// 允许请求 `model`（**对外模型名**，含映射 alias）？

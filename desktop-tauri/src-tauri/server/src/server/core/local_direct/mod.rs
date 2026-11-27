@@ -3,6 +3,7 @@
 
 pub mod antigravity;
 pub mod antigravity_account;
+pub mod antigravity_backfill;
 pub mod preview;
 pub mod protobuf;
 pub mod registry;
@@ -12,6 +13,7 @@ pub mod sqlite_reader;
 #[cfg(test)]
 mod tests;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -35,6 +37,7 @@ struct RuntimeSyncState {
 static RUNTIME_STATE: OnceLock<Mutex<RuntimeSyncState>> = OnceLock::new();
 static SYNC_MUTEX: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static WAKE_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
+static REASONING_BACKFILL_DONE: AtomicBool = AtomicBool::new(false);
 
 fn runtime_state() -> &'static Mutex<RuntimeSyncState> {
     RUNTIME_STATE.get_or_init(|| Mutex::new(RuntimeSyncState::default()))
@@ -83,6 +86,23 @@ pub fn scan_and_ingest_blocking(
 
     let antigravity_selected = only_agent.is_none_or(|id| id == "antigravity");
     if antigravity_selected && (cfg.agent_enabled("antigravity") || (force_rescan && only_agent == Some("antigravity"))) {
+        if force_rescan || !REASONING_BACKFILL_DONE.swap(true, Ordering::AcqRel) {
+            let backfilled = antigravity_backfill::backfill_antigravity_reasoning(stats);
+            if backfilled > 0 {
+                let msg = format!("已为 {backfilled} 条历史本机直连请求补全思考等级");
+                logging::console_line("[LocalDirect]", &msg);
+                logging::log_event(
+                    "info",
+                    "server",
+                    &format!("[LocalDirect] {msg}"),
+                    Some(json!({
+                        "routine": true,
+                        "component": "LocalDirect",
+                        "backfilledReasoning": backfilled,
+                    })),
+                );
+            }
+        }
         if force_rescan {
             stats.clear_local_direct_file_states(Some("antigravity"));
         }

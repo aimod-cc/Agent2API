@@ -98,15 +98,23 @@ pub(crate) fn parse_object<T: DeserializeOwned>(
         .map_err(|_| "JSON 对象字段无效")
 }
 
-/// 与 `parse_object` 校验规则一致，额外区分超体积、嵌套过深、重复字段与普通格式错误。
+/// 与 `parse_object` 校验规则一致，额外区分超体积、嵌套过深、重复字段与普通格式错误，
+/// 并允许调用方按场景指定最大容器嵌套层数（受 serde_json 默认 128 层上限约束）。
 pub(crate) fn parse_object_detailed<T: DeserializeOwned>(
     bytes: &[u8],
     limit: usize,
+    max_depth: usize,
 ) -> Result<T, ParseObjectError> {
-    strict_json::validate_detailed(bytes, limit)?;
+    strict_json::validate_detailed_with_depth(bytes, limit, max_depth)?;
     serde_json::from_slice::<Object<T>>(bytes)
         .map(|object| object.0)
-        .map_err(|_| ParseObjectError::Invalid)
+        .map_err(|error| {
+            if error.is_syntax() && error.to_string().contains("recursion limit exceeded") {
+                ParseObjectError::DepthExceeded
+            } else {
+                ParseObjectError::Invalid
+            }
+        })
 }
 
 impl Declaration {

@@ -111,6 +111,7 @@ fn commit(store: &AccountStore, job: &Arc<jobs::Job>, mut row: Value) {
         return;
     };
     let mut disabled = false;
+    let mut balance_reconcile = crate::server::core::account_store::policy_cooldowns::BalanceCooldownReconcile::Unchanged;
     let written = jobs::finish(job, || {
         if config::of(&record) != job.config { return None; }
         let outcome = usage_records::UsageOutcome {
@@ -123,18 +124,40 @@ fn commit(store: &AccountStore, job: &Arc<jobs::Job>, mut row: Value) {
             row["usage"] = Value::Null;
             row["error"] = json!("余额结果保存失败，请重新查询");
             row["code"] = json!("usage_storage_failed");
-        } else if outcome.usage.is_some() && record.enabled() {
-            let public = store.public_account(&record);
-            let hit = if public.get("limiterGroups").is_some() {
-                limiter::evaluate::disable_hit(&public, &limiter::sources::facts(), &limiter::counter::facts(), logging::now_ms())
-            } else {
-                usage_records::low_balance_disable_threshold(&public).zip(outcome.usage.as_ref()
-                    .and_then(|usage| usage_records::extract_remaining(usage).0)).is_some_and(|(threshold, remaining)| remaining < threshold)
-            };
-            if hit {
-                record.set("enabled", json!(false));
-                record.set_updated_at(logging::now_ms());
-                disabled = store.with_conn(&guard, |conn| sql::update_in_place(conn, &record)).is_ok();
+        } else if let Some(usage) = outcome.usage.as_ref() {
+            let now = logging::now_ms();
+            let (remaining, unlimited) = usage_records::extract_remaining(usage);
+            balance_reconcile = crate::server::core::account_store::policy_cooldowns::reconcile_balance_cooldown(
+                &mut record,
+                remaining,
+                unlimited,
+                now,
+            );
+            let mut record_dirty = !matches!(
+                balance_reconcile,
+                crate::server::core::account_store::policy_cooldowns::BalanceCooldownReconcile::Unchanged
+            );
+            if record.enabled() {
+                let public = store.public_account(&record);
+                let hit = if public.get("limiterGroups").is_some() {
+                    limiter::evaluate::disable_hit(&public, &limiter::sources::facts(), &limiter::counter::facts(), now)
+                } else {
+                    usage_records::low_balance_disable_threshold(&public).zip(remaining)
+                        .is_some_and(|(threshold, remaining)| remaining < threshold)
+                };
+                if hit {
+                    record.set("enabled", json!(false));
+                    record.set_updated_at(now);
+                    record_dirty = true;
+                    disabled = true;
+                }
+            }
+            if record_dirty {
+                let updated = store.with_conn(&guard, |conn| sql::update_in_place(conn, &record)).is_ok();
+                if !updated {
+                    disabled = false;
+                    balance_reconcile = crate::server::core::account_store::policy_cooldowns::BalanceCooldownReconcile::Unchanged;
+                }
             }
         }
         let saved = usage_records::load(&job.id);
@@ -150,5 +173,18 @@ fn commit(store: &AccountStore, job: &Arc<jobs::Job>, mut row: Value) {
     if written && disabled {
         store.invalidate_catpaw_sessions(&job.id, &record.provider());
         logging::log_with_level("[Usage]", &format!("账号「{}」余额限制条件已触发，已自动禁用（需手动重新启用）", record.name()), "warn");
+    }
+    if written {
+        if let crate::server::core::account_store::policy_cooldowns::BalanceCooldownReconcile::Cleared { from, to, unlimited } = balance_reconcile {
+            let detail = if unlimited {
+                "余额状态已变为无上限".to_string()
+            } else if let (Some(from), Some(to)) = (from, to) {
+                format!("余额已从 {from} 回升至 {to}")
+            } else {
+                "余额已回升".to_string()
+            };
+            logging::log("[Usage]", &format!("账号「{}」{detail}，已自动解除余额不足暂停", record.name()));
+            crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Accounts);
+        }
     }
 }

@@ -402,6 +402,15 @@ impl Context {
                 if params["body"].as_str().is_some_and(|body| body.len() > super::MAX_MESSAGE) {
                     return Err(super::error("插件请求体过大"));
                 }
+                if !websocket
+                    && self.conversation.is_some()
+                    && !self.upstream_protocol_explicit
+                    && params["method"].as_str().unwrap_or("GET").eq_ignore_ascii_case("POST")
+                {
+                    if let Some(inferred) = infer_upstream_protocol_from_url(text(&params, "url")) {
+                        self.note_upstream_protocol(inferred, false);
+                    }
+                }
                 let id = format!("wasm-{}", crate::server::core::protocol::random_id("net"));
                 // 沿用旧入口：这些字段始终由宿主覆盖；绝对 deadline 只走 Rust 类型，不读 JSON。
                 params["id"] = json!(id);
@@ -486,6 +495,9 @@ impl Context {
                 sink.events.send(super::super::StreamEvent::Head(proto::StreamHead {
                     status, headers: headers.into_iter().collect(), upstream: proto::UpstreamKind::Chat,
                 })).map_err(|_| super::error("下游请求已结束"))?;
+                if self.conversation.is_some() && !self.upstream_protocol_noted {
+                    self.note_upstream_protocol("proprietary", false);
+                }
                 if (200..400).contains(&status) {
                     self.confirm_stream_started();
                 }
@@ -510,5 +522,26 @@ impl Context {
             }
             _ => Err(proto::WireError::with_code("插件请求了未支持的主程序能力", proto::WireError::NO_METHOD)),
         }
+    }
+}
+
+fn infer_upstream_protocol_from_url(raw: &str) -> Option<&'static str> {
+    let parsed = url::Url::parse(raw).ok()?;
+    let path = parsed.path().trim_end_matches('/').to_ascii_lowercase();
+    if path.ends_with("/chat/completions") {
+        Some("chat_completions")
+    } else if path.ends_with("/responses") {
+        Some("responses")
+    } else if path.ends_with("/messages") {
+        Some("anthropic")
+    } else if path.contains(":streamgeneratecontent")
+        || path.contains(":generatecontent")
+        || path.ends_with("/generatecontent")
+    {
+        Some("gemini")
+    } else if path.ends_with("/images/generations") || path.ends_with("/images/edits") {
+        Some("images")
+    } else {
+        None
     }
 }

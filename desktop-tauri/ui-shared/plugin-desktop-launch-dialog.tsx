@@ -41,8 +41,9 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   const selected = clients.find(item => item.id === client)
   const processing = !!result && launchPending(result.phase)
   const locked = busy || processing
+  const switchOnly = result ? result.switchOnly : !!settings?.switchOnly
   const activeClient = result?.client.label || selected?.label
-  const argsDirty = !!settings && args.trim() !== settings.args
+  const argsDirty = !!settings && !settings.switchOnly && args.trim() !== settings.args
   const pathInput = React.useId()
   const argsInput = React.useId()
 
@@ -117,6 +118,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   }
 
   async function load() {
+    useProxyRef.current = undefined
     setSettings(null)
     await cancelPending(true)
     setShowPath(false)
@@ -176,7 +178,10 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
   async function savePath() {
     if (!settings) return
     await action(async () => {
-      await request('PATCH', `${BASE}/settings`, { selection, path: path.trim(), args: args.trim(), revision: settings.revision }, { retry: 'never' })
+      const payload = settings.switchOnly
+        ? { selection, path: path.trim(), revision: settings.revision }
+        : { selection, path: path.trim(), args: args.trim(), revision: settings.revision }
+      await request('PATCH', `${BASE}/settings`, payload, { retry: 'never' })
       await load()
     })
   }
@@ -275,9 +280,9 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
 
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
     <DialogContent className='desktop-launch-dialog w-[min(560px,calc(100vw-32px))]'>
-      <DialogHeader className='py-4'><DialogTitle>{recoveryBackup ? t('恢复原凭证') : result?.hotSwitch ? t('切换客户端账号') : t('启动客户端')}</DialogTitle></DialogHeader>
+      <DialogHeader className='py-4'><DialogTitle>{recoveryBackup ? t('恢复原凭证') : (result?.hotSwitch || switchOnly) ? t('切换客户端账号') : t('启动客户端')}</DialogTitle></DialogHeader>
       <DialogBody className='gap-4 py-4'>
-        <DialogDescription>{recoveryBackup ? t('关闭客户端并恢复上次切换前的登录凭证') : result?.hotSwitch ? t('在线切换当前客户端的登录账号，无需重启') : t('将本机客户端切换到此账号后启动')}</DialogDescription>
+        <DialogDescription>{recoveryBackup ? t('关闭客户端并恢复上次切换前的登录凭证') : result?.hotSwitch ? t('在线切换当前客户端的登录账号，无需重启') : switchOnly ? t('将本机客户端切换到此账号，不自动启动') : t('将本机客户端切换到此账号后启动')}</DialogDescription>
         <dl className='grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm'>
           <dt className='text-muted-foreground'>{t('账号')}</dt><dd className='break-words'>{name}</dd>
           <dt className='text-muted-foreground'>{t('客户端')}</dt><dd>
@@ -300,7 +305,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
                 aria-label={t('使用账号代理启动')} onCheckedChange={checked => void toggleProxy(checked === true)} />
             </dd>
           </> : null}
-          {!recoveryBackup && settings ? <>
+          {!recoveryBackup && settings && !settings.switchOnly ? <>
             <dt className='self-center text-muted-foreground'><label htmlFor={argsInput}>{t('启动参数')}</label></dt>
             <dd className='flex min-w-0 items-center gap-2'>
               <Input id={argsInput} className='min-w-0 flex-1 font-mono text-xs' value={args}
@@ -328,7 +333,10 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
           <div className='flex items-center gap-2'>
             <Button size='sm' variant='outline' disabled={locked} onClick={() => void savePath()}>{t('保存并继续')}</Button>
             <Button size='sm' variant='ghost' disabled={locked} onClick={() => { setPath(''); void action(async () => {
-              await request('PATCH', `${BASE}/settings`, { selection, path: '', args: args.trim(), revision: settings.revision }, { retry: 'never' }); await load()
+              const payload = settings.switchOnly
+                ? { selection, path: '', revision: settings.revision }
+                : { selection, path: '', args: args.trim(), revision: settings.revision }
+              await request('PATCH', `${BASE}/settings`, payload, { retry: 'never' }); await load()
             }) }}>{t('自动探测')}</Button>
           </div>
           {settings.error ? <p className='text-xs text-warning'>{launchMessage(settings.error, t)}</p> : null}
@@ -349,14 +357,18 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
               ? t('仅恢复备份中的登录凭证，完成后客户端保持关闭')
               : result.hotSwitch
                 ? t('确认后将备份并替换上述登录凭证，仅重载后台服务，已打开的窗口与内容保持不变')
-                : t('确认后将备份并替换上述登录凭证；不会改变反代优先级')}</p>
+                : result.switchOnly
+                  ? t('确认后将备份并替换上述登录凭证，不会自动启动客户端；不会改变反代优先级')
+                  : t('确认后将备份并替换上述登录凭证；不会改变反代优先级')}</p>
             {result.proxy.enabled && !result.proxy.available && result.proxy.error && !recoveryBackup
               ? <Alert variant='warning'>{launchMessage(result.proxy.error, t)}</Alert> : null}
-            {result.requiresRestart && !result.hotSwitch && !recoveryBackup ? <Alert variant='warning'>{t('客户端正在运行，继续会关闭并重启，请先保存未完成的内容')}</Alert> : null}
+            {result.requiresRestart && !result.hotSwitch && !recoveryBackup ? <Alert variant='warning'>{result.switchOnly
+              ? t('客户端正在运行，继续会关闭客户端后切换，请先保存未完成的内容')
+              : t('客户端正在运行，继续会关闭并重启，请先保存未完成的内容')}</Alert> : null}
             {result.pendingBackup && !recoveryBackup ? <Alert variant='warning'>{t('上次切换未完整结束，请先恢复原凭证')}</Alert> : null}
           </> : <div role='status' className='flex flex-col gap-2'>
-            <p className='flex items-center gap-2 text-sm'>{processing ? <Spinner className='size-4' /> : null}{launchPhaseText(result.phase, t)}</p>
-            {result.message && launchMessage(result.message, t) !== launchPhaseText(result.phase, t)
+            <p className='flex items-center gap-2 text-sm'>{processing ? <Spinner className='size-4' /> : null}{launchPhaseText(result.phase, t, result.switchOnly)}</p>
+            {result.message && launchMessage(result.message, t) !== launchPhaseText(result.phase, t, result.switchOnly)
               ? <p className={`text-xs ${result.error ? 'text-warning' : 'text-muted-foreground'}`}>{launchMessage(result.message, t)}</p> : null}
           </div>}
         </> : null}
@@ -383,7 +395,7 @@ export function PluginDesktopLaunchDialog({ provider, account, name, clients, re
           {t('确认关闭并重启')}</Button> : null}
         {result?.phase === 'awaiting_confirmation' && !result.pendingBackup && !showPath && !restoreConfirm && !restartConfirm ? <Button
           disabled={locked || unknown || sent.current.has(`confirm:${result.intent}`) || result.remainingMs === 0 || (result.proxy.enabled && !result.proxy.available)}
-          onClick={() => void execute('confirm')}>{result.hotSwitch ? t('立即切换') : result.requiresRestart ? t('切换并重启') : t('切换并启动')}</Button> : null}
+          onClick={() => void execute('confirm')}>{result.hotSwitch ? t('立即切换') : result.switchOnly ? (result.requiresRestart ? t('关闭并切换') : t('立即切换')) : result.requiresRestart ? t('切换并重启') : t('切换并启动')}</Button> : null}
       </DialogFooter>
     </DialogContent>
   </Dialog>

@@ -667,13 +667,24 @@ pub fn plan_route(
         }
         let reset_at = rate_limit_reset_at(account, keys, now);
         if reset_at > 0 {
-            let scope = if account.pointer("/providerCooldown/resetAt").and_then(Value::as_i64).unwrap_or(0) == reset_at { "提供商" }
-                else if account.pointer("/routingCooldowns/@account/resetAt").and_then(Value::as_i64).unwrap_or(0) == reset_at { "账号" }
-                else { "该账号的当前模型" };
-            blocked.push(entry(
-                "cooldown",
-                format!("{scope}冷却中，{} 恢复（恢复后自动回来）", clock_text(reset_at, now)),
-            ));
+            let account_cooldown = account.pointer("/routingCooldowns/@account");
+            let account_reset = account_cooldown.and_then(|entry| entry.get("resetAt")).and_then(Value::as_i64).unwrap_or(0);
+            let balance_paused = account_reset == reset_at
+                && account_cooldown.and_then(|entry| entry.get("kind")).and_then(Value::as_str) == Some("balance");
+            if balance_paused {
+                blocked.push(entry(
+                    "cooldown",
+                    format!("上游已报余额不足，已暂停派单（{} 后重试或余额回升自动恢复）", clock_text(reset_at, now)),
+                ));
+            } else {
+                let scope = if account.pointer("/providerCooldown/resetAt").and_then(Value::as_i64).unwrap_or(0) == reset_at { "提供商" }
+                    else if account_reset == reset_at { "账号" }
+                    else { "该账号的当前模型" };
+                blocked.push(entry(
+                    "cooldown",
+                    format!("{scope}冷却中，{} 恢复（恢复后自动回来）", clock_text(reset_at, now)),
+                ));
+            }
             continue;
         }
         if super::plugin_host::wasm::catalog::route_allowed(account, &keys.for_account(account)) == Some(false) {

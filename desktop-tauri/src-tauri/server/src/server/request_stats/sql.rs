@@ -81,7 +81,8 @@ pub(super) const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_nam
      cache_read_tokens, provider, client_model, upstream_model, attempt_details, sensitive_hits, \
      client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, client, \
      api_key_id, api_key_name, api_key_source, credit, client_evidence, \
-     cache_creation_tokens, cache_creation_1h_tokens, cost_usd, privacy_hits, origin";
+     cache_creation_tokens, cache_creation_1h_tokens, cost_usd, privacy_hits, origin, \
+     client_protocol, upstream_protocol";
 
 /// 列表页轻量查询列：跳过四个大 JSON 文本列，仅在 SQL 里判定极轻量布尔/字符串提示，
 /// 彻底省掉整页行上的 JSON 解析与超大对象序列化开销。
@@ -110,7 +111,7 @@ pub(super) const REQUEST_LIST_SELECT: &str = "row_id, id, ts, model, account_id,
      CASE WHEN privacy_hits <> '' AND privacy_hits <> '[]' AND instr(privacy_hits, '\"block\"') > 0 THEN 'block' \
           WHEN privacy_hits <> '' AND privacy_hits <> '[]' AND instr(privacy_hits, '\"mask\"') > 0 THEN 'mask' \
           WHEN privacy_hits <> '' AND privacy_hits <> '[]' AND instr(privacy_hits, '\"warn\"') > 0 THEN 'warn' \
-          ELSE '' END AS privacy_action, origin";
+          ELSE '' END AS privacy_action, origin, client_protocol, upstream_protocol";
 
 // `request_daily`（按天聚合）那一支的列常量、编解码与读-改-写语句在
 // `daily.rs` —— 两张表的语句分文件后各自独立演化。
@@ -191,6 +192,8 @@ pub(super) fn decode_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
         cost_usd: row.get(33)?,
         privacy_hits: decode_json_list(&row.get::<_, String>(34)?),
         origin: row.get(35)?,
+        client_protocol: row.get(36)?,
+        upstream_protocol: row.get(37)?,
     })
 }
 
@@ -238,6 +241,8 @@ pub(super) fn decode_request_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<R
         has_privacy_hits: row.get::<_, i64>(39)? != 0,
         privacy_action: row.get(40)?,
         origin: row.get(41)?,
+        client_protocol: row.get(42)?,
+        upstream_protocol: row.get(43)?,
     })
 }
 
@@ -607,7 +612,7 @@ pub(super) fn select_detail_by_row_id(
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![row_id])?;
     let Some(row) = rows.next()? else { return Ok(None); };
-    Ok(Some((row.get(36)?, decode_request(row)?)))
+    Ok(Some((row.get(38)?, decode_request(row)?)))
 }
 
 pub(super) fn select_detail_by_id(
@@ -622,7 +627,7 @@ pub(super) fn select_detail_by_id(
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![id, ts])?;
     let Some(row) = rows.next()? else { return Ok(None); };
-    Ok(Some((row.get(36)?, decode_request(row)?)))
+    Ok(Some((row.get(38)?, decode_request(row)?)))
 }
 
 /// 取区间 `[from_ms, to_ms]` 内的**完整明细**，按写入顺序（ts 升序、同 ts 按 row_id）。
@@ -670,7 +675,8 @@ pub(super) const REQUEST_REPRICE_COLUMNS: &str = "id, ts, model, account_id, acc
           THEN json_object('visionCompatibility', json_object('mode', json_extract(route, '$.visionCompatibility.mode'))) \
           ELSE NULL END AS route, \
      client, api_key_id, api_key_name, api_key_source, credit, client_evidence, \
-     cache_creation_tokens, cache_creation_1h_tokens, cost_usd, '[]' AS privacy_hits, origin";
+     cache_creation_tokens, cache_creation_1h_tokens, cost_usd, '[]' AS privacy_hits, origin, \
+     client_protocol, upstream_protocol";
 
 pub(super) fn select_between_with_row_id(
     conn: &Connection,
@@ -687,7 +693,7 @@ pub(super) fn select_between_with_row_id(
     let mut rows = stmt.query(params![from_ms, to_ms])?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
-        let row_id: i64 = row.get(36)?;
+        let row_id: i64 = row.get(38)?;
         out.push((row_id, decode_request(row)?));
     }
     Ok(out)
@@ -730,6 +736,7 @@ pub(super) fn insert_started_request(
     model: &str,
     client_model: &str,
     client_reasoning: &str,
+    client_protocol: &str,
     source: &super::RequestSource,
     is_test: bool,
 ) -> rusqlite::Result<bool> {
@@ -741,6 +748,7 @@ pub(super) fn insert_started_request(
     if existing > 0 {
         return Ok(false);
     }
+    let client_protocol = crate::server::core::upstream::usage::normalize_protocol(client_protocol);
     // client_reasoning 随首发写入：下游等级在请求开始时就定稿了（与 client_model
     // 同一时刻、同一来源），进行中行就能显示「请求的什么(等级)」
     // is_test 同样随首发写入：来源是入口就知道的事实，等收尾再补会让「进行中」
@@ -749,10 +757,12 @@ pub(super) fn insert_started_request(
     // 进行中行也应带上 —— 等收尾再补会让列表里「客户端」列在转发期间空一格
     conn.execute(
         "INSERT INTO requests (id, ts, model, client_model, client_reasoning, status, \
-         phase, phase_started_at, is_test, client, api_key_id, api_key_name, api_key_source, client_evidence) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'connecting', ?2, ?6, ?7, ?8, ?9, ?10, ?11)",
+         phase, phase_started_at, is_test, client, api_key_id, api_key_name, api_key_source, \
+         client_evidence, client_protocol) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'connecting', ?2, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![id, ts, model, client_model, client_reasoning, is_test as i64,
-            source.client, source.api_key.id, source.api_key.name, source.api_key.source, source.evidence_json()],
+            source.client, source.api_key.id, source.api_key.name, source.api_key.source,
+            source.evidence_json(), client_protocol],
     )?;
     Ok(true)
 }
@@ -837,7 +847,8 @@ pub(super) fn update_running_progress(
         "UPDATE requests SET provider = ?2, account_id = ?3, account_name = ?4, \
          upstream_model = ?5, upstream_reasoning = ?6, attempts = ?7, first_response_ms = ?8, \
          attempt_details = ?9, sensitive_hits = ?10, phase = ?11, phase_started_at = ?12, \
-         route = COALESCE(?13, route), privacy_hits = ?14 WHERE id = ?1 AND status = 0",
+         route = COALESCE(?13, route), privacy_hits = ?14, upstream_protocol = ?15 \
+         WHERE id = ?1 AND status = 0",
         params![
             id,
             progress.provider,
@@ -853,6 +864,7 @@ pub(super) fn update_running_progress(
             progress.phase_started_at,
             progress.route.as_ref().map(Value::to_string),
             encode_json_list(&progress.privacy_hits),
+            crate::server::core::upstream::usage::normalize_protocol(&progress.upstream_protocol),
         ],
     )
 }
@@ -888,7 +900,7 @@ pub(super) fn update_running_request(
          is_test = ?22, route = ?23, client = ?24, \
          api_key_id = ?25, api_key_name = ?26, api_key_source = ?27, credit = ?28, client_evidence = ?29, \
          cache_creation_tokens = ?30, cache_creation_1h_tokens = ?31, cost_usd = ?32, privacy_hits = ?33, \
-         origin = ?34 \
+         origin = ?34, client_protocol = ?35, upstream_protocol = ?36 \
          WHERE id = ?1 AND status = 0",
         params![
             entry.id,
@@ -929,6 +941,8 @@ pub(super) fn update_running_request(
             entry.cost_usd,
             encode_json_list(&entry.privacy_hits),
             entry.origin,
+            entry.client_protocol,
+            entry.upstream_protocol,
         ],
     )
 }
@@ -956,9 +970,10 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
          cache_read_tokens, provider, client_model, upstream_model, attempt_details, \
          sensitive_hits, client_reasoning, upstream_reasoning, is_test, route, client, \
          api_key_id, api_key_name, api_key_source, credit, client_evidence, \
-         cache_creation_tokens, cache_creation_1h_tokens, cost_usd, privacy_hits, origin) \
+         cache_creation_tokens, cache_creation_1h_tokens, cost_usd, privacy_hits, origin, \
+         client_protocol, upstream_protocol) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)",
         params![
             entry.id,
             entry.ts,
@@ -994,6 +1009,8 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
             entry.cost_usd,
             encode_json_list(&entry.privacy_hits),
             entry.origin,
+            entry.client_protocol,
+            entry.upstream_protocol,
         ],
     )?;
     Ok(())

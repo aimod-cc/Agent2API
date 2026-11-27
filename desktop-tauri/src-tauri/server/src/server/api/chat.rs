@@ -91,7 +91,7 @@ pub async fn chat_completions(
     let parsed = serde_json::from_slice::<Value>(&body).ok();
     let Some(mut payload) = parsed.filter(Value::is_object) else {
         let error = GatewayError::bad_request("请求体必须是 JSON 对象");
-        record_early_failure(&state, started_at, "", "", &request_source, &error);
+        record_early_failure(&state, started_at, "", "", "chat_completions", &request_source, &error);
         return error.payload_response();
     };
     // ② messages 必须是数组
@@ -103,7 +103,7 @@ pub async fn chat_completions(
         let error = GatewayError::bad_request("缺少 messages 数组");
         let model = model_field_text(&payload);
         let reasoning = pipeline::client_reasoning_of(&payload);
-        record_early_failure(&state, started_at, &model, &reasoning, &request_source, &error);
+        record_early_failure(&state, started_at, &model, &reasoning, "chat_completions", &request_source, &error);
         return error.payload_response();
     }
 
@@ -148,6 +148,7 @@ pub async fn chat_completions(
                 started_at,
                 &model_field_text(&payload),
                 &client_reasoning,
+                "chat_completions",
                 &request_source,
                 &error,
             );
@@ -179,6 +180,7 @@ pub async fn chat_completions(
             &requested_model,
             &client_model,
             &client_reasoning,
+            "chat_completions",
             &request_source,
             false,
         ).await;
@@ -240,7 +242,7 @@ pub async fn chat_completions(
         Ok(ForwardOutcome::Native(response)) => {
             let context = RecordContext {
                 stats, telemetry, started_at, model: requested_model.clone(), client_model,
-                client_reasoning, status: i64::from(response.status), raw_request, raw_response: None,
+                client_reasoning, client_protocol: "chat_completions".to_string(), status: i64::from(response.status), raw_request, raw_response: None,
                 is_test: false, source: request_source,
             };
             super::protocol::native_response::respond(response, context, &mut guard)
@@ -265,6 +267,7 @@ pub async fn chat_completions(
                 model: requested_model.clone(),
                 client_model: client_model.clone(),
                 client_reasoning: client_reasoning.clone(),
+                client_protocol: "chat_completions".to_string(),
                 status: i64::from(status.as_u16()),
                 // 请求侧正文已抄好；响应侧由 RecordingStream 在流结束时定稿
                 raw_request,
@@ -308,6 +311,7 @@ pub async fn chat_completions(
                     model: requested_model.clone(),
                     client_model: client_model.clone(),
                     client_reasoning: client_reasoning.clone(),
+                    client_protocol: "chat_completions".to_string(),
                     status: i64::from(response.status().as_u16()),
                     raw_request,
                     raw_response,
@@ -339,6 +343,7 @@ pub async fn chat_completions(
                     model: requested_model.clone(),
                     client_model: client_model.clone(),
                     client_reasoning: client_reasoning.clone(),
+                    client_protocol: "chat_completions".to_string(),
                     status,
                     // 请求侧正文沿用入口采好的那份（失败请求的请求体同样是
                     // 排障材料；调试模式关着时它本就是 None）；响应体由网关

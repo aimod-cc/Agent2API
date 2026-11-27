@@ -177,6 +177,7 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
     let store = ctx.store.clone();
     let target_copy = target.clone();
     blocking::run(move || image_config::validate_target(&store, &target_copy, operation)).await??;
+    let usage_lease = super::model_access::check_usage_limit(Some(&scope))?;
     let timeout = tool_services::timeout_seconds(tool_services::IMAGE_GENERATION_SERVICE_ID);
     let db = db.clone();
     let db_copy = db.clone();
@@ -194,6 +195,7 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
         if created {
             let id = job.id.clone();
             tokio::spawn(async move {
+                let _usage_lease = usage_lease;
                 run_job(state, db, id, payload, ImageExecution { operation, headers: HeaderMap::new(),
                     scope: Some(scope), key_source, source, started_at: logging::now_ms(), is_assistant: false }, timeout).await;
             });

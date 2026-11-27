@@ -43,7 +43,7 @@ import {
   useMediaQuery,
 } from '@ui'
 import { readFileAsDataUrl } from './file-read'
-import { PLUGIN_GRID_CLASS, PluginSectionHeading } from './plugins-store'
+import { PLUGIN_GRID_CLASS, PluginDownloadCount, PluginSectionHeading } from './plugins-store'
 import { PluginStreamFooter, usePluginStream } from './plugins-stream-footer'
 import type { PluginStatusFilter } from './plugins-filters'
 import {
@@ -150,6 +150,7 @@ export function TaskPluginsSection({
 
   const installed = payload?.plugins ?? []
   const storeItems = payload?.store ?? []
+  const storeDownloadsById = new Map(storeItems.map(item => [item.id, item.downloads ?? 0]))
   const storeUninstalledCount = storeItems.filter(item => !item.installed).length
   const updates = payload?.updates ?? []
   const q = effectiveQuery.trim().toLowerCase()
@@ -362,6 +363,7 @@ export function TaskPluginsSection({
                         <div className='flex flex-wrap items-center gap-1.5'>
                           <CardTitle className='truncate'>{plugin.name}</CardTitle>
                           <span className='text-[11px] text-muted-foreground'>v{plugin.version}</span>
+                          <PluginDownloadCount downloads={storeDownloadsById.get(plugin.id)} t={t} className='text-[11px] text-muted-foreground' />
                         </div>
                         <div className='mt-1 flex flex-wrap gap-1'>
                           {plugin.signed ? (
@@ -442,9 +444,10 @@ export function TaskPluginsSection({
                       {item.icon ? <img src={item.icon} alt='' className='size-7 rounded object-contain' /> : item.name.slice(0, 1)}
                     </div>
                     <div className='min-w-0 flex-1'>
-                      <div className='flex items-center gap-1.5'>
+                      <div className='flex flex-wrap items-center gap-1.5'>
                         <CardTitle className='truncate'>{item.name}</CardTitle>
                         {item.version ? <span className='text-[11px] text-muted-foreground'>v{item.version}</span> : null}
+                        <PluginDownloadCount downloads={item.downloads} t={t} className='text-[11px] text-muted-foreground' />
                       </div>
                       <div className='mt-1 flex gap-1'>
                         <Badge variant='brand' shape='tag'>{t('官方商店')}</Badge>

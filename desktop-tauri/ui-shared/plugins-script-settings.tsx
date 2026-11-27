@@ -39,6 +39,7 @@ export function ScriptPluginSettings({ pack, recommended, disabled, error, initi
   const diagnostics = () => { onClose(); requestPluginDiagnostics(pack.id) }
 
   return <PluginDetailsDialog name={name} version={pack.version} sourceLabel={scriptSourceLabel(pack, t)} icon={icon}
+    downloads={pack.downloads}
     description={scriptPluginDescription(pack, recommended, t)} initialPane={initialPane ?? 'settings'} onClose={onClose} t={t}
     metadata={<ScriptRepository item={pack} onOpenExternal={onOpenExternal} t={t} />}
     more={<PluginDiagnosticsMenu onDiagnostics={diagnostics} t={t} />}

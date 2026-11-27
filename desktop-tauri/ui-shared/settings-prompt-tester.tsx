@@ -8,7 +8,7 @@ export function PromptRuleTester({ api, config, view, t, onLocate }: {
   api: PromptApi; config: PromptConfigView; view: PromptView; t: Translate; onLocate(id: string): void
 }) {
   const [sample, setSample] = React.useState<PromptSample>(() => ({
-    provider: view.providers[0]?.id || '', client: view.clients[0]?.id || 'other', model: view.models[0] || '',
+    provider: view.providers[0]?.id || '', client: view.clients[0]?.id || 'other', model: view.models[0] || '', upstreamModel: '',
   }))
   const [result, setResult] = React.useState<PromptPreview | null>(null)
   const [busy, setBusy] = React.useState(false)
@@ -28,7 +28,10 @@ export function PromptRuleTester({ api, config, view, t, onLocate }: {
       }).finally(() => { if (current === sequence.current) setBusy(false) })
     }, 300)
     return () => { window.clearTimeout(timer); ++sequence.current }
-  }, [api, configKey, sample.provider, sample.client, sample.model])
+  }, [api, configKey, sample.provider, sample.client, sample.model, sample.upstreamModel])
+
+  const resolvedUpstream = result?.upstreamModel?.trim() || ''
+  const showResolvedUpstream = Boolean(resolvedUpstream) && resolvedUpstream !== sample.model.trim()
 
   return <Card className='sp-tester'>
     <CardHeader className='sp-tester-head'><CardTitle>{t('命中测试')}</CardTitle></CardHeader>
@@ -44,11 +47,18 @@ export function PromptRuleTester({ api, config, view, t, onLocate }: {
             options={view.clients.map(option => ({ value: option.id, label: option.label }))}
             placeholder={t('选择客户端')} searchPlaceholder={t('搜索客户端')} onValueChange={client => setSample(current => ({ ...current, client }))} />
         </div>
-        <div><Label htmlFor='sp-sample-model'>{t('模型')}</Label>
+        <div><Label htmlFor='sp-sample-model'>{t('请求模型')}</Label>
           <Input id='sp-sample-model' value={sample.model} list='sp-model-choices' spellCheck={false}
             placeholder={t('客户端请求的模型名')} onChange={event => {
               const model = event.currentTarget.value
               setSample(current => ({ ...current, model }))
+            }} />
+        </div>
+        <div><Label htmlFor='sp-sample-upstream-model'>{t('上游模型')}</Label>
+          <Input id='sp-sample-upstream-model' value={sample.upstreamModel} list='sp-upstream-model-choices' spellCheck={false}
+            placeholder={t('留空按映射自动解析')} onChange={event => {
+              const upstreamModel = event.currentTarget.value
+              setSample(current => ({ ...current, upstreamModel }))
             }} />
         </div>
       </div>
@@ -57,6 +67,7 @@ export function PromptRuleTester({ api, config, view, t, onLocate }: {
           <span className={result.ruleId ? 'sp-match-dot' : 'sp-match-dot is-fallback'} />
           <span className='sp-match-name'>{result.ruleId ? t('规则 {index} · {name}', { index: (result.index ?? 0) + 1, name: result.name || t('未命名规则') }) : t('兜底 · 未命中任何规则')}</span>
           <Badge variant={result.ruleId ? 'brand' : 'outline'} shape='tag'>{modeLabel(result.mode, t)}</Badge>
+          {showResolvedUpstream ? <span className='sp-tester-upstream' title={resolvedUpstream}>{t('上游：{model}', { model: resolvedUpstream })}</span> : null}
           {result.ruleId ? <Button variant='ghost' size='xs' className='ml-auto' onClick={() => onLocate(result.ruleId!)}>{t('定位')}</Button> : null}
         </> : <span className='sp-muted'>{t('请选择提供商')}</span>}
       </div>

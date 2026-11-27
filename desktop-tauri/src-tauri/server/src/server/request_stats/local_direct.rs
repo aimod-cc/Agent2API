@@ -64,6 +64,17 @@ pub struct LocalDirectAgentStats {
     pub last_ts: Option<i64>,
 }
 
+/// 待补全思考等级的历史本机直连请求定位条目。
+#[derive(Clone, Debug)]
+pub struct LocalDirectReasoningCandidate {
+    pub row_id: i64,
+    pub db_path: String,
+    pub transcript_path: String,
+    pub step_index: i64,
+    pub response_id: String,
+    pub model: String,
+}
+
 const GATEWAY_DEDUP_WINDOW_MS: i64 = 180_000;
 const ZERO_TOKEN_DEDUP_WINDOW_MS: i64 = 15_000;
 
@@ -343,6 +354,88 @@ impl RequestStats {
         .flatten()
     }
 
+    /// 查询缺少思考等级的历史 Antigravity 本机直连请求，供后台原地补全使用。
+    pub fn list_antigravity_missing_reasoning(&self) -> Vec<LocalDirectReasoningCandidate> {
+        let guard = self.guard();
+        self.with_conn(&guard, |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT r.row_id, l.db_path, l.transcript_path, l.step_index, l.response_id, r.model \
+                 FROM local_direct_refs l \
+                 JOIN requests r ON r.id = l.request_id \
+                 WHERE l.agent_id = 'antigravity' \
+                   AND r.origin = ?1 \
+                   AND r.client_reasoning = '' \
+                   AND r.upstream_reasoning = '' \
+                 ORDER BY r.row_id ASC",
+            )?;
+            let mut rows = stmt.query(params![ORIGIN_LOCAL_DIRECT])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                out.push(LocalDirectReasoningCandidate {
+                    row_id: row.get(0)?,
+                    db_path: row.get(1)?,
+                    transcript_path: row.get(2)?,
+                    step_index: row.get(3)?,
+                    response_id: row.get(4)?,
+                    model: row.get(5)?,
+                });
+            }
+            Ok(out)
+        })
+        .unwrap_or_default()
+    }
+
+    /// 按主键 `row_id` 升序分批原地回填历史本机直连请求的思考等级（单批 500 行、批次间释放锁，避免长时间占用数据库）。
+    pub fn apply_local_direct_reasoning_updates(&self, updates: &[(i64, String)]) -> usize {
+        if updates.is_empty() {
+            return 0;
+        }
+        const BATCH_SIZE: usize = 500;
+        let mut sorted: Vec<(i64, &str)> = updates
+            .iter()
+            .filter_map(|(row_id, reasoning)| {
+                let level = reasoning.trim();
+                (*row_id > 0 && !level.is_empty()).then_some((*row_id, level))
+            })
+            .collect();
+        if sorted.is_empty() {
+            return 0;
+        }
+        sorted.sort_unstable_by_key(|(row_id, _)| *row_id);
+
+        let mut total_updated = 0usize;
+        for chunk in sorted.chunks(BATCH_SIZE) {
+            let guard = self.guard();
+            let batch_changed = self
+                .with_conn_mut(&guard, |conn| {
+                    let tx = conn.transaction()?;
+                    let mut changed = 0usize;
+                    {
+                        let mut stmt = tx.prepare(
+                            "UPDATE requests \
+                             SET client_reasoning = CASE WHEN client_reasoning = '' THEN ?1 ELSE client_reasoning END, \
+                                 upstream_reasoning = CASE WHEN upstream_reasoning = '' THEN ?1 ELSE upstream_reasoning END \
+                             WHERE row_id = ?2 AND origin = ?3 \
+                               AND (client_reasoning = '' OR upstream_reasoning = '')",
+                        )?;
+                        for &(row_id, level) in chunk {
+                            changed += stmt.execute(params![level, row_id, ORIGIN_LOCAL_DIRECT])?;
+                        }
+                    }
+                    tx.commit()?;
+                    Ok(changed)
+                })
+                .unwrap_or(0);
+            total_updated += batch_changed;
+        }
+
+        if total_updated > 0 {
+            self.filters_cache.invalidate();
+            crate::server::core::panel_events::notify_requests();
+        }
+        total_updated
+    }
+
     /// 单事务批量写入本机直连请求、指针引用、日报聚合与扫描水位，自动双重去重。
     pub fn ingest_local_direct(
         &self,
@@ -363,11 +456,12 @@ impl RequestStats {
             })
             .collect();
 
-        let report = {
+        let outcome = {
             let guard = self.guard();
             self.with_conn_mut(&guard, |conn| {
                 let tx = conn.transaction()?;
                 let mut report = LocalDirectIngestReport::default();
+                let mut updated_existing = 0usize;
                 let mut seen_keys: HashSet<String> = HashSet::with_capacity(normalized.len());
                 let mut dirty_days: BTreeMap<String, DailyEntry> = BTreeMap::new();
 
@@ -379,12 +473,32 @@ impl RequestStats {
                         report.deduped_existing += 1;
                         continue;
                     }
-                    let already_indexed: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM local_direct_refs WHERE source_key = ?1 OR request_id = ?2)",
-                        params![reference.source_key, entry.id],
-                        |row| row.get::<_, i64>(0),
-                    )? != 0;
-                    if already_indexed {
+                    let existing_request_id: Option<String> = {
+                        let mut stmt = tx.prepare_cached(
+                            "SELECT request_id FROM local_direct_refs WHERE source_key = ?1 OR request_id = ?2 LIMIT 1",
+                        )?;
+                        let mut rows = stmt.query(params![reference.source_key, entry.id])?;
+                        match rows.next()? {
+                            Some(row) => Some(row.get(0)?),
+                            None => None,
+                        }
+                    };
+                    if let Some(existing_id) = existing_request_id {
+                        if !entry.client_reasoning.is_empty() || !entry.upstream_reasoning.is_empty() {
+                            let mut upd = tx.prepare_cached(
+                                "UPDATE requests \
+                                 SET client_reasoning = CASE WHEN client_reasoning = '' THEN ?1 ELSE client_reasoning END, \
+                                     upstream_reasoning = CASE WHEN upstream_reasoning = '' THEN ?2 ELSE upstream_reasoning END \
+                                 WHERE id = ?3 AND origin = ?4 \
+                                   AND (client_reasoning = '' OR upstream_reasoning = '')",
+                            )?;
+                            updated_existing += upd.execute(params![
+                                entry.client_reasoning,
+                                entry.upstream_reasoning,
+                                existing_id,
+                                ORIGIN_LOCAL_DIRECT,
+                            ])?;
+                        }
                         report.deduped_existing += 1;
                         continue;
                     }
@@ -459,16 +573,16 @@ impl RequestStats {
                 }
 
                 tx.commit()?;
-                Ok(report)
+                Ok((report, updated_existing))
             })
         };
 
-        if let Some(ref res) = report {
-            if res.inserted > 0 {
+        if let Some((ref res, updated_existing)) = outcome {
+            if res.inserted > 0 || updated_existing > 0 {
                 self.filters_cache.invalidate();
                 crate::server::core::panel_events::notify_requests();
             }
         }
-        report
+        outcome.map(|(report, _)| report)
     }
 }

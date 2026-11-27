@@ -154,6 +154,19 @@ pub fn wire_target_for_provider(model: &str, provider_id: &str, _account: Option
     resolved.unwrap_or_else(|| WireTarget { model: requested.to_string(), reasoning: None })
 }
 
+/// 某一家实际会收到的上游模型真名（内置 / 插件与自定义提供商统一口径，供提示词规则与命中测试使用）。
+pub fn effective_upstream_model(model: &str, provider_id: &str, account: Option<&Value>) -> String {
+    let requested = model.trim();
+    if requested.is_empty() {
+        return String::new();
+    }
+    if custom_providers::is_custom_provider_id(provider_id) {
+        custom_providers::wire_model_for(provider_id, requested).0
+    } else {
+        wire_target_for_provider(requested, provider_id, account).model
+    }
+}
+
 pub fn default_model_catalog() -> Vec<Value> {
     let rules = model_rules::shared();
     let mut result = Vec::new();

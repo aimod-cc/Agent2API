@@ -1489,7 +1489,7 @@ impl ProviderAdapter for RpcAdapter {
                 }
             };
 
-            let head = match first {
+            let mut head = match first {
                 super::StreamEvent::Head(head) => head,
                 // 与控制面还原同一状态/业务码；只有显式 provider_http 才交分类器。
                 super::StreamEvent::Done(Err(error)) => {
@@ -1565,6 +1565,20 @@ impl ProviderAdapter for RpcAdapter {
                 }
             };
 
+            let mut observed_protocol: Option<String> = None;
+            head.headers.retain(|name, value| {
+                if name.eq_ignore_ascii_case("x-agent2api-upstream-protocol") {
+                    if !value.trim().is_empty() {
+                        observed_protocol = Some(value.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if let Some(protocol) = observed_protocol.as_deref() {
+                telemetry.note_upstream_protocol(protocol);
+            }
             let conversation = opening.take().and_then(ErrorBodyScope::handoff_conversation);
             execution.finish_stream(id, head.status, stream, events, None, wire_model, telemetry, Some(head.headers), lease, conversation, workbuddy_failure, prepared_tools.and_then(|prepared| prepared.context))
                 .await

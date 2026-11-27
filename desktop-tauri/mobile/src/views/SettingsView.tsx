@@ -213,6 +213,10 @@ export function SettingsView() {
       }
     } catch (err) {
       setUpdateErr(err instanceof Error ? err.message : '安装失败')
+      const cached = await hasDownloadedApk()
+      if (!cached.exists) {
+        setUpdatePhase(updateInfo?.hasUpdate === true ? 'available' : 'idle')
+      }
     }
   }
 

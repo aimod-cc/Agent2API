@@ -62,6 +62,7 @@ export type StorePlugin = {
   platforms: ReleasePlatform[]
   homepage?: string | null
   icon?: string | null
+  downloads?: number | null
   category?: 'agent' | 'web' | 'scheduled_task' | string
   providers?: Array<{ id: string; label?: string }>
   requireSigned?: boolean
@@ -152,6 +153,7 @@ export type ScriptCatalogInfo = {
   repositoryUrl?: string | null
   stars?: number | null
   starsAt?: number
+  downloads?: number | null
 }
 
 export type ScriptIdentityRecord = {

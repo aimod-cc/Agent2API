@@ -11,6 +11,7 @@ import {
   saveAutoContinue,
   saveCompatSwitch,
   saveDebugMode,
+  savePrivacyQuickSettings,
   saveRetrySettings,
   saveTimeoutSettings,
   type ForwardingBundle,
@@ -25,6 +26,7 @@ import {
   providerDisplayName,
 } from '../core/format'
 import { formatCost, pricingSourceLabel, syncPricingDisplay, usePricingDisplay } from '../core/pricing'
+import { describeRequestProtocol } from '../../../ui-shared/request-protocol'
 import { baseLabel, normalizeBase } from '../core/servers'
 import { store, useStore } from '../core/store'
 import {
@@ -325,6 +327,14 @@ export function RequestsSheet({ onClose }: { onClose: () => void }) {
             <div className='fc-mono' style={{ fontSize: 13.5, fontWeight: 700 }}>
               {selected.model || selected.clientModel || '未知模型'}
             </div>
+            {(() => {
+              const proto = describeRequestProtocol(selected.clientProtocol, selected.upstreamProtocol)
+              return proto.inlineText ? (
+                <div style={{ fontSize: 12.5, color: 'var(--fc-text-secondary)' }}>
+                  协议：<span className='fc-mono'>{proto.inlineText}</span>
+                </div>
+              ) : null
+            })()}
             <div style={{ fontSize: 12.5, color: 'var(--fc-text-secondary)' }}>
               状态码：{selected.status ?? '进行中'} · 耗时：{formatDuration(selected.durationMs)}
             </div>
@@ -372,6 +382,7 @@ export function RequestsSheet({ onClose }: { onClose: () => void }) {
         entries.map((row, idx) => {
           const ok = row.status && row.status >= 200 && row.status < 300
           const running = !row.status
+          const proto = describeRequestProtocol(row.clientProtocol, row.upstreamProtocol)
           return (
             <RecordCard
               key={row.rowId || row.id || idx}
@@ -401,6 +412,23 @@ export function RequestsSheet({ onClose }: { onClose: () => void }) {
                   {running ? '进行中' : `HTTP ${row.status}`}
                 </TonalChip>
               </div>
+              {proto.mainLabel ? (
+                <div
+                  className='fc-mono'
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 1,
+                    fontSize: 11.5,
+                    color: 'var(--fc-text-secondary)',
+                  }}
+                >
+                  <span>{proto.mainLabel}</span>
+                  {proto.subLabel ? (
+                    <span style={{ color: 'var(--fc-text-tertiary)' }}>↳ {proto.subLabel}</span>
+                  ) : null}
+                </div>
+              ) : null}
               <div
                 style={{
                   display: 'flex',
@@ -713,18 +741,74 @@ export function ForwardingConfigSheet({ onClose }: { onClose: () => void }) {
         <ListItem
           icon='shield'
           title='隐私脱敏'
-          subtitle='转发前遮罩密钥、个人隐私与自定义保密词，并在响应时还原'
+          subtitle='转发前遮罩密钥、钱包与个人隐私并在响应时还原（配置不参与云同步）'
           trailing={
             <CommonSwitch
               checked={Boolean(bundle?.privacyEnabled)}
               onChange={async next => {
-                setBundle(prev => (prev ? { ...prev, privacyEnabled: next } : prev))
-                await saveCompatSwitch('privacy', next).catch(() => {})
-                store.toast('已更新隐私脱敏', 'success')
+                const prev = bundle
+                setBundle(cur => (cur ? { ...cur, privacyEnabled: next } : cur))
+                try {
+                  const res = await savePrivacyQuickSettings({
+                    enabled: next,
+                    revision: prev?.privacyRevision || undefined,
+                  })
+                  setBundle(cur =>
+                    cur
+                      ? {
+                          ...cur,
+                          privacyEnabled: res.enabled ?? next,
+                          privacyEphemeral: res.ephemeralPlaceholders ?? cur.privacyEphemeral,
+                          privacyRevision: res.revision ?? cur.privacyRevision,
+                        }
+                      : cur,
+                  )
+                  store.toast('已更新隐私脱敏', 'success')
+                } catch (err) {
+                  const latest = await fetchForwardingBundle().catch(() => prev)
+                  if (latest) setBundle(latest)
+                  store.toast(err instanceof Error ? err.message : '更新隐私脱敏失败', 'danger')
+                }
               }}
             />
           }
         />
+        {bundle?.privacyEnabled ? (
+          <ListItem
+            icon='shield'
+            title='每次请求随机隐藏占位符类型'
+            subtitle='隐私更强但会降低提示词缓存，且不支持引用上游历史会话'
+            trailing={
+              <CommonSwitch
+                checked={Boolean(bundle?.privacyEphemeral)}
+                onChange={async next => {
+                  const prev = bundle
+                  setBundle(cur => (cur ? { ...cur, privacyEphemeral: next } : cur))
+                  try {
+                    const res = await savePrivacyQuickSettings({
+                      ephemeralPlaceholders: next,
+                      revision: prev?.privacyRevision || undefined,
+                    })
+                    setBundle(cur =>
+                      cur
+                        ? {
+                            ...cur,
+                            privacyEphemeral: res.ephemeralPlaceholders ?? next,
+                            privacyRevision: res.revision ?? cur.privacyRevision,
+                          }
+                        : cur,
+                    )
+                    store.toast('已更新占位符策略', 'success')
+                  } catch (err) {
+                    const latest = await fetchForwardingBundle().catch(() => prev)
+                    if (latest) setBundle(latest)
+                    store.toast(err instanceof Error ? err.message : '更新占位符策略失败', 'danger')
+                  }
+                }}
+              />
+            }
+          />
+        ) : null}
         <ListItem
           icon='sliders'
           title='Developer 角色自动降级'

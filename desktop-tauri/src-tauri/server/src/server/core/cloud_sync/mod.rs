@@ -367,6 +367,7 @@ pub(crate) async fn download_locked(
     crate::server::core::usage_records::reload_facts();
     crate::server::core::limiter::sources::reload();
     crate::server::core::limiter::counter::invalidate();
+    crate::server::core::key_usage::invalidate();
     if let Err(error) = crate::server::core::plugin_host::script::reconcile_after_restore(db).await {
         logging::log_with_level(
             "[CloudSync]",

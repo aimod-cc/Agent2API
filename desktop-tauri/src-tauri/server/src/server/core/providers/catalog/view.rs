@@ -114,6 +114,45 @@ pub fn advertised_model_ids(store: &AccountStore) -> Vec<String> {
     super::validation_snapshot(store).models.clone()
 }
 
+/// 所有活跃提供商与已配置映射指向的上游模型真名列表（去重排序，供提示词「上游模型」条件联想）。
+pub fn upstream_model_ids(store: &AccountStore) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    let mut push = |id: String| {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() && seen.insert(trimmed.to_ascii_lowercase()) {
+            ids.push(trimmed.to_string());
+        }
+    };
+    for (_, manifest) in active_manifests(store) {
+        for item in manifest {
+            push(model_id(&item));
+        }
+    }
+    for (_, items) in super::super::custom::catalog_providers(store) {
+        for item in items {
+            push(model_id(&item));
+        }
+    }
+    for mapping in &model_rules::shared().mappings {
+        if mapping.enabled {
+            push(mapping.target.clone());
+        }
+    }
+    for provider in crate::server::core::custom_providers::list() {
+        for item in provider.get("models").and_then(Value::as_array).into_iter().flatten() {
+            push(model_id(item));
+        }
+        for mapping in provider.get("mappings").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(target) = mapping.get("target").and_then(Value::as_str) {
+                push(target.to_string());
+            }
+        }
+    }
+    ids.sort_by_key(|name| name.to_ascii_lowercase());
+    ids
+}
+
 pub fn advertised_manifest_contains(store: &AccountStore, model: &str) -> bool {
     super::validation_snapshot(store).models.iter().any(|id| id.eq_ignore_ascii_case(model))
 }

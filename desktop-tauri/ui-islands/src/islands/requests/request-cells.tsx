@@ -7,6 +7,7 @@ import { numberText } from '../accounts-shared'
 import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
 import { ClientBrand, ProviderBrand } from './request-brand'
 import { visionDetail } from '../../../../ui-shared/request-vision-detail'
+import { describeRequestProtocol } from '../../../../ui-shared/request-protocol'
 import { formatCost, pricingSourceLabel, usePricingDisplay, type ModelPricingInfo } from '../model-pricing'
 
 export type RequestEntry = {
@@ -15,6 +16,7 @@ export type RequestEntry = {
   provider?: string; providerLabel?: string; accountId?: string; accountName?: string
   model?: string; clientModel?: string; upstreamModel?: string
   clientReasoning?: string; upstreamReasoning?: string
+  clientProtocol?: string; upstreamProtocol?: string
   durationMs?: number; firstResponseMs?: number | null
   promptTokens?: number; completionTokens?: number; totalTokens?: number; cacheReadTokens?: number
   cacheCreationTokens?: number; cacheCreation1hTokens?: number
@@ -168,6 +170,24 @@ function countRetries(entry: RequestEntry): number {
     const retries = (item as { retries?: unknown[] } | null)?.retries
     return sum + (Array.isArray(retries) ? retries.length : 0)
   }, 0)
+}
+
+export function formatModelWithReasoning(name: string, level: string, origin?: string): string {
+  if (!level) return name
+  const lowerName = name.toLowerCase()
+  const lowerLevel = level.toLowerCase()
+  if (lowerName.endsWith(`(${lowerLevel})`) || lowerName.endsWith(`（${lowerLevel}）`)) {
+    return name
+  }
+  if (
+    origin === 'local_direct'
+    && lowerLevel !== 'max'
+    && (lowerName.endsWith(`-${lowerLevel}`) || lowerName.endsWith(`_${lowerLevel}`))
+    && name.length > level.length + 1
+  ) {
+    return `${name.slice(0, -(level.length + 1))}(${level})`
+  }
+  return `${name}(${level})`
 }
 
 export function providerLabelOf(id: string): string {
@@ -414,7 +434,7 @@ export function RequestCell({
       const shown = String(entry.model ?? '').trim()
       const clientLevel = String(entry.clientReasoning ?? '').trim()
       const upstreamLevel = String(entry.upstreamReasoning ?? '').trim()
-      const tag = (name: string, level: string) => (level ? `${name}(${level})` : name)
+      const tag = (name: string, level: string) => formatModelWithReasoning(name, level, entry.origin)
       const isMapped = Boolean(client && upstream && upstream.toLowerCase() !== client.toLowerCase())
       const mainText = isMapped ? tag(upstream, upstreamLevel) : tag(shown, upstreamLevel || clientLevel)
       const subText = isMapped ? tag(client, clientLevel) : ''
@@ -429,6 +449,32 @@ export function RequestCell({
           {subText ? (
             <span className='req-model-line sub' title={t('下游请求的模型：{model}', { model: subText })}>
               ↳ {subText}
+            </span>
+          ) : null}
+        </span>
+      )
+    }
+
+    case 'protocol': {
+      const proto = describeRequestProtocol(entry.clientProtocol, entry.upstreamProtocol, t)
+      if (!proto.mainLabel) {
+        return (
+          <span key={key} className={`${className} req-protocol-stack`}>
+            <span className='req-model-line is-empty'>—</span>
+          </span>
+        )
+      }
+      const mainTitle = proto.converted
+        ? t('转发到上游的协议：{protocol}', { protocol: proto.mainFullLabel })
+        : t('请求协议：{protocol}', { protocol: proto.mainFullLabel })
+      return (
+        <span key={key} className={`${className} req-protocol-stack`}>
+          <span className='req-model-line' title={mainTitle}>
+            {proto.mainLabel}
+          </span>
+          {proto.subLabel ? (
+            <span className='req-model-line sub' title={t('下游请求的协议：{protocol}', { protocol: proto.subFullLabel })}>
+              ↳ {proto.subLabel}
             </span>
           ) : null}
         </span>

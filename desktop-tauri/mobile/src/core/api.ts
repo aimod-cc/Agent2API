@@ -16,6 +16,7 @@ export type RateLimitInfo = {
   status?: number | string
   code?: string | number
   resetAt?: number
+  kind?: string
   message?: string
 }
 
@@ -659,6 +660,32 @@ export function fetchRoutingQueue(model?: string, signal?: AbortSignal): Promise
 
 /* ─── 网关 API Key ───────────────────────────────────────── */
 
+export type KeyUsageMetric = 'tokens' | 'requests'
+
+export type KeyUsageLimit = {
+  metric: KeyUsageMetric
+  daily?: number | null
+  weekly?: number | null
+  monthly?: number | null
+  total?: number | null
+}
+
+export type KeyUsageWindow = {
+  tokens: number
+  requests: number
+  resetsAt?: number
+}
+
+export type KeyUsageSnapshot = {
+  daily: KeyUsageWindow
+  weekly: KeyUsageWindow
+  monthly: KeyUsageWindow
+  total: KeyUsageWindow
+  exceeded: boolean
+  exceededPeriod?: 'daily' | 'weekly' | 'monthly' | 'total' | null
+  exceededReason?: string | null
+}
+
 export type GatewayKey = {
   id?: string
   name?: string
@@ -668,6 +695,8 @@ export type GatewayKey = {
   createdAt?: number
   allowedProviders?: string[]
   allowedModels?: string[]
+  usageLimit?: KeyUsageLimit | null
+  usage?: KeyUsageSnapshot | null
 }
 
 export type KeysPayload = {
@@ -686,6 +715,7 @@ export function createKey(payload: {
   key?: string
   allowedProviders: string[]
   allowedModels: string[]
+  usageLimit?: KeyUsageLimit | null
 }): Promise<KeysPayload & { created?: GatewayKey }> {
   return apiCall('/api/keys', { method: 'POST', body: payload })
 }
@@ -697,6 +727,7 @@ export function updateKey(
     enabled?: boolean
     allowedProviders?: string[]
     allowedModels?: string[]
+    usageLimit?: KeyUsageLimit | null
   },
 ): Promise<KeysPayload> {
   return apiCall<KeysPayload>(`/api/keys/${encodeURIComponent(id)}`, {
@@ -707,6 +738,13 @@ export function updateKey(
 
 export function deleteKey(id: string): Promise<KeysPayload> {
   return apiCall<KeysPayload>(`/api/keys/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function resetKeyUsage(id: string): Promise<KeysPayload> {
+  return apiCall<KeysPayload>(`/api/keys/${encodeURIComponent(id)}/reset-usage`, {
+    method: 'POST',
+    body: {},
+  })
 }
 
 /* ─── 代理池（供账号出站代理选择） ───────────────────────── */

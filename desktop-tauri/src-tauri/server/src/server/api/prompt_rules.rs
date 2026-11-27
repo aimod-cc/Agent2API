@@ -41,6 +41,7 @@ fn view(config: &config::RuntimeConfig, state: &ServerState, providers: Value) -
         "revision": prompt_rules::revision(config.raw()),
         "providers": providers, "clients": client_options(),
         "models": crate::server::core::providers::catalog::advertised_model_ids(&state.store()),
+        "upstreamModels": crate::server::core::providers::catalog::upstream_model_ids(&state.store()),
         "maxRules": rules::MAX_RULES, "maxConditions": rules::MAX_CONDITIONS,
         "maxValues": rules::MAX_VALUES, "maxTextBytes": rules::MAX_TEXT_BYTES,
         "configError": settings.rules_error,
@@ -98,6 +99,8 @@ struct Sample {
     provider: String,
     client: String,
     model: String,
+    #[serde(default)]
+    upstream_model: String,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +108,46 @@ struct Sample {
 struct PreviewSettings {
     config: Settings,
     sample: Sample,
+}
+
+fn resolve_preview_upstream_model(provider: &str, model: &str, explicit_upstream: &str) -> String {
+    let explicit = explicit_upstream.trim();
+    if !explicit.is_empty() {
+        return explicit.to_string();
+    }
+    let requested = model.trim();
+    if requested.is_empty() {
+        return String::new();
+    }
+    let provider = provider.trim();
+    if !provider.is_empty() {
+        if let Some(group_model) = config::routing_profiles()
+            .groups
+            .values()
+            .find(|group| group.model.eq_ignore_ascii_case(requested))
+            .and_then(|group| {
+                group
+                    .members
+                    .iter()
+                    .find(|member| member.included && member.provider.eq_ignore_ascii_case(provider))
+            })
+            .and_then(|member| {
+                let raw = member.model.trim();
+                if raw.is_empty() {
+                    return None;
+                }
+                Some(
+                    crate::server::core::routing_groups::catalog_model(&member.provider, raw)
+                        .map(|item| crate::server::core::models::model_id(&item))
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| raw.to_string()),
+                )
+            })
+        {
+            return group_model;
+        }
+    }
+    crate::server::core::providers::catalog::effective_upstream_model(requested, provider, None)
 }
 
 pub async fn preview_settings(body: Bytes) -> Response {
@@ -116,21 +159,124 @@ pub async fn preview_settings(body: Bytes) -> Response {
     if let Err(error) = rules::validate_rules(&payload.config.rules).and_then(|_| rules::validate_content(&payload.config.fallback)) {
         return errors::management_error(400, error);
     }
-    if payload.sample.provider.len() > 128 || payload.sample.client.len() > 128 || payload.sample.model.len() > 4096
-        || [&payload.sample.provider, &payload.sample.client, &payload.sample.model].iter().any(|value| value.chars().any(char::is_control)) {
+    if payload.sample.provider.len() > 128 || payload.sample.client.len() > 128
+        || payload.sample.model.len() > 4096 || payload.sample.upstream_model.len() > 4096
+        || [&payload.sample.provider, &payload.sample.client, &payload.sample.model, &payload.sample.upstream_model]
+            .iter().any(|value| value.chars().any(char::is_control)) {
         return errors::management_error(400, "命中测试的请求条件无效或过长");
     }
+    let upstream_model = resolve_preview_upstream_model(
+        &payload.sample.provider,
+        &payload.sample.model,
+        &payload.sample.upstream_model,
+    );
     for (index, rule) in payload.config.rules.iter().enumerate() {
         if !rule.enabled || rule.conditions.is_empty() { continue; }
         let matchers = match rule.conditions.iter().map(rules::Matcher::compile).collect::<Result<Vec<_>, _>>() {
             Ok(matchers) => matchers,
             Err(error) => return errors::management_error(400, error),
         };
-        let matches = |matcher: &rules::Matcher| matcher.matches(&payload.sample.provider, &payload.sample.client, &payload.sample.model);
+        let matches = |matcher: &rules::Matcher| {
+            matcher.matches(
+                &payload.sample.provider,
+                &payload.sample.client,
+                &payload.sample.model,
+                &upstream_model,
+            )
+        };
         let hit = match rule.logic { rules::Logic::All => matchers.iter().all(matches), rules::Logic::Any => matchers.iter().any(matches) };
         if hit {
-            return ok_json(json!({ "ruleId": rule.id, "index": index, "name": rule.name, "mode": rule.mode.as_str() }));
+            return ok_json(json!({
+                "ruleId": rule.id,
+                "index": index,
+                "name": rule.name,
+                "mode": rule.mode.as_str(),
+                "upstreamModel": upstream_model,
+            }));
         }
     }
-    ok_json(json!({ "ruleId": null, "index": null, "name": null, "mode": payload.config.fallback.mode.as_str() }))
+    ok_json(json!({
+        "ruleId": null,
+        "index": null,
+        "name": null,
+        "mode": payload.config.fallback.mode.as_str(),
+        "upstreamModel": upstream_model,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn preview_json(payload: Value) -> (axum::http::StatusCode, Value) {
+        let response = preview_settings(Bytes::from(payload.to_string())).await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn preview_matches_upstream_model_and_preserves_legacy_sample_shape() {
+        let config = json!({
+            "rules": [
+                {
+                    "id": "r-upstream",
+                    "name": "DeepSeek 上游",
+                    "enabled": true,
+                    "logic": "all",
+                    "conditions": [
+                        { "id": "c1", "field": "upstream_model", "op": "contains", "values": ["deepseek"] }
+                    ],
+                    "mode": "custom",
+                    "file": "",
+                    "text": "deepseek prompt"
+                },
+                {
+                    "id": "r-client",
+                    "name": "Haiku 客户端",
+                    "enabled": true,
+                    "logic": "all",
+                    "conditions": [
+                        { "id": "c2", "field": "model", "op": "contains", "values": ["claude-haiku"] }
+                    ],
+                    "mode": "append",
+                    "file": "",
+                    "text": "haiku prompt"
+                }
+            ],
+            "fallback": { "mode": "passthrough", "file": "", "text": "" }
+        });
+
+        // 显式指定映射后的上游模型：命中 r-upstream
+        let (status, body) = preview_json(json!({
+            "config": config,
+            "sample": {
+                "provider": "workbuddy",
+                "client": "claude-code",
+                "model": "claude-haiku-4-5",
+                "upstreamModel": "deepseek-v4.1-flash"
+            }
+        })).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["ruleId"], "r-upstream");
+        assert_eq!(body["data"]["mode"], "custom");
+        assert_eq!(body["data"]["upstreamModel"], "deepseek-v4.1-flash");
+
+        // 省略 upstreamModel（向后兼容旧前端）：无映射时自动回落为请求名，命中 r-client
+        let (status, body) = preview_json(json!({
+            "config": config,
+            "sample": {
+                "provider": "workbuddy",
+                "client": "claude-code",
+                "model": "claude-haiku-4-5"
+            }
+        })).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["ruleId"], "r-client");
+        assert_eq!(body["data"]["mode"], "append");
+        assert_eq!(body["data"]["upstreamModel"], "claude-haiku-4-5");
+    }
 }

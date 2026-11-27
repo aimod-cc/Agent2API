@@ -4,7 +4,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
-use crate::server::core::{cloud_sync, limiter, usage_records};
+use crate::server::core::{cloud_sync, key_usage, limiter, usage_records};
 use crate::server::db::schema;
 use crate::server::{access, config, logging};
 
@@ -132,6 +132,7 @@ pub(super) fn import(
     usage_records::reload_facts();
     limiter::sources::reload();
     limiter::counter::invalidate();
+    key_usage::invalidate();
     access::load_refresh_tokens();
     access::clear_access_tokens();
     drop(suppression);

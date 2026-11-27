@@ -75,6 +75,15 @@ pub(crate) fn decide_with_declared(snapshot: &config::ErrorPolicySnapshot, decla
             kind = inferred;
         }
     }
+    let classified_specific = classified.is_some_and(|item| {
+        !item.codes.is_empty() && !matches!(item.kind, ErrorKind::RateLimit | ErrorKind::Quota | ErrorKind::Unknown)
+    });
+    if !local && !classified_specific
+        && matches!(kind, ErrorKind::RateLimit | ErrorKind::Quota | ErrorKind::Unknown)
+        && evidence::balance_message_signal(body, class)
+    {
+        kind = ErrorKind::Balance;
+    }
     let (resolved, rule_source) = settings.resolve_with(&declared.rules, kind, status, &code_refs, provider, model);
     let rule = resolved.clone();
     let upstream_scope = evidence::scope(body);
@@ -197,8 +206,18 @@ pub(super) fn remember_cooldown(service: &super::UpstreamService, settings: &con
     error: &GatewayError, decision: &ErrorDecision) -> Option<Value> {
     if account_id.is_empty() { return None; }
     let rule = decision.cooldown_rule(settings)?;
-    crate::server::core::blocking::in_place(|| service.store.mark_policy_cooldown(account_id, model, decision.scope,
-        error.status_code, error.upstream_code, decision.reset_at, &error.message, &rule, decision.floor_ms))
+    let balance_baseline = if decision.kind == ErrorKind::Balance && decision.scope == CooldownScope::Account {
+        crate::server::core::usage_records::balance_facts()
+            .get(account_id)
+            .and_then(|fact| fact.remaining)
+            .filter(|value| value.is_finite())
+    } else {
+        None
+    };
+    crate::server::core::blocking::in_place(|| service.store.mark_policy_cooldown_with_baseline(
+        account_id, model, decision.scope, error.status_code, error.upstream_code,
+        decision.reset_at, &error.message, &rule, decision.floor_ms, balance_baseline,
+    ))
 }
 
 pub(super) fn exclude_provider(service: &super::UpstreamService, providers: &[&str], model: &str, provider: &str,

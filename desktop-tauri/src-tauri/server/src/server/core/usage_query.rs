@@ -292,6 +292,32 @@ pub(crate) fn supports_usage_provider(provider_id: &str) -> bool {
 
 pub fn refresh_configuration(store: &AccountStore) { jobs::reconcile(store); }
 
+/// 转发遇到上游明确报余额/积分不足时，触发一次带防抖（15 秒）的异步余额补查，
+/// 尽快把真实余额读数拉平并与账号级余额暂停水位线对齐，避免阻塞当前转发链路。
+pub(crate) fn refresh_after_balance_error(store: &AccountStore, account_id: &str) {
+    if account_id.is_empty() {
+        return;
+    }
+    const DEBOUNCE_MS: i64 = 15_000;
+    let now = logging::now_ms();
+    if now.saturating_sub(usage_records::load(account_id).last_attempt_at) < DEBOUNCE_MS {
+        return;
+    }
+    let Some(account) = store.route_account(account_id) else {
+        return;
+    };
+    if !supports_usage(&account)
+        || account.get("needsRelogin").and_then(Value::as_bool) == Some(true)
+        || recovery::waiting_for_change(store, account_id)
+    {
+        return;
+    }
+    let store = store.clone();
+    crate::spawn_task(async move {
+        let _ = run::start(&store, &account, false);
+    });
+}
+
 pub fn start_queries(store: &AccountStore, id: Option<&str>, replace: bool) -> Result<Value, TargetError> {
     let single = id.filter(|value| !value.is_empty());
     let (targets, skipped) = resolve_batch_targets(store, None, single)?;

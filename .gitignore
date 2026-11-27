@@ -13,6 +13,7 @@ desktop-tauri/target/
 # 本地开发过程产物
 .zcode/
 .verify/
+.antigravitycli
 prototype/
 prototypes/
 .codeartsdoer/

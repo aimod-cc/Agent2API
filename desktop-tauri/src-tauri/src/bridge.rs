@@ -367,6 +367,7 @@ const BRIDGE_JS: &str = r#"
     createKey: payload => call('POST', '/api/keys', payload || {}),
     updateKey: (id, patch) => call('PATCH', '/api/keys/' + encodeURIComponent(id), patch),
     deleteKey: id => call('DELETE', '/api/keys/' + encodeURIComponent(id)),
+    resetKeyUsage: id => call('POST', '/api/keys/' + encodeURIComponent(id) + '/reset-usage', {}),
 
     // ── 多账号 ──
     getAccounts: query => call('GET', '/api/accounts' + toQuery(query)),

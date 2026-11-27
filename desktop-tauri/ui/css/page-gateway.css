@@ -277,10 +277,11 @@
 .models-table .c-caps { width: 11%; }
 .models-table .c-alias { width: 25%; }
 .models-table .c-act { width: 8.5%; }
-.keys-table .k-name { width: 22%; }
-.keys-table .k-key { width: 44%; }
-.keys-table .k-time { width: 16%; }
-.keys-table .k-state { width: 8%; }
+.keys-table .k-name { width: 18%; }
+.keys-table .k-key { width: 30%; }
+.keys-table .k-usage { width: 22%; }
+.keys-table .k-time { width: 13%; }
+.keys-table .k-state { width: 7%; }
 .keys-table .k-act { width: 10%; }
 .proxies-table .p-pick { width: 38px; }
 .proxies-table .p-addr { width: 19%; }
@@ -579,6 +580,42 @@
 /* 摘要行：与上面的说明同款小字，首行前留一点空隙（它是「当前选择」而不是
    「使用说明」，视觉上要分得开） */
 #key-restrict-summary { margin-top: 2px; }
+
+/* 网关 Key 用量限制：表格进度单元与弹窗编辑网格 */
+.key-usage-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.key-usage-status { display: flex; align-items: center; gap: 4px; }
+.key-usage-bars { display: flex; flex-direction: column; gap: 5px; }
+.key-usage-row { display: flex; flex-direction: column; gap: 2px; }
+.key-usage-row-text { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; font-size: 11.5px; line-height: 1.25; }
+.key-usage-period { color: var(--text-3); font-weight: 600; flex: none; }
+.key-usage-nums { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key-usage-nums.is-danger { color: var(--danger); font-weight: 600; }
+.key-usage-track { height: 3px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.key-usage-fill { height: 100%; border-radius: 999px; background: var(--primary); transition: width .15s ease; }
+.key-usage-fill.is-warn { background: var(--warn); }
+.key-usage-fill.is-danger { background: var(--danger); }
+
+.key-usage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
+@media (max-width: 560px) { .key-usage-grid { grid-template-columns: minmax(0, 1fr); } }
+.key-usage-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.key-usage-field-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.key-usage-used { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.key-usage-input-row { display: flex; align-items: center; gap: 6px; }
+.key-usage-input-row input { min-width: 0; flex: 1 1 auto; }
+.key-usage-suffix { font-size: 12px; color: var(--text-3); white-space: nowrap; flex: none; padding: 0 4px; }
+.key-usage-preview { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.key-usage-reset-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+}
+.key-usage-reset-meta { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-2); }
+.key-usage-reset-nums { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--text-3); }
 
 /* ─────────────────────────────────────────────
    模型管理与网络代理页：占满剩余高度，滚动只发生在列表内部

@@ -31,6 +31,9 @@ async fn enter(operation: &Arc<Operation>, phase: &'static str) -> Result<OwnedM
 
 pub async fn retry_start(manager: Source, intent: &str, restart_confirmed: bool) -> Result<Value, String> {
     let operation = find(&manager, intent)?;
+    if operation.binding.client.switch_only {
+        return Err("当前客户端无需自动启动".into());
+    }
     {
         let state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;
         if state.worker { drop(state); return Ok(operation.public()); }
@@ -54,11 +57,11 @@ pub async fn retry_start(manager: Source, intent: &str, restart_confirmed: bool)
                 let current = super::super::Secret(edit.target.snapshot()?);
                 if current.0 != edit.after { return Err("客户端凭证已改变，未用旧账号启动".into()); }
             }
-            let running = windows::running(&runner.executable)?;
+            let running = windows::running(&runner.executable, false)?;
             if running {
                 if !restart_confirmed { return Err("客户端正在运行，请先保存未完成的内容并确认重启".into()); }
                 runner.state.lock().map_err(|_| "本机启动状态不可用")?.phase = "closing";
-                windows::close(&runner.executable)?;
+                windows::close(&runner.executable, false)?;
                 runner.state.lock().map_err(|_| "本机启动状态不可用")?.client_running = false;
                 for edit in &journal.edits {
                     let current = super::super::Secret(edit.target.snapshot()?);
@@ -82,7 +85,7 @@ pub async fn retry_start(manager: Source, intent: &str, restart_confirmed: bool)
                 operation.finish("started", message, false);
             }
             Ok(Err(error)) => {
-                if let Ok(running) = windows::running(&operation.executable) {
+                if let Ok(running) = windows::running(&operation.executable, false) {
                     if let Ok(mut state) = operation.state.lock() { state.client_running = running; }
                 }
                 let phase = if operation.state.lock().is_ok_and(|state| state.started) { "started" } else { "committed" };
@@ -126,7 +129,8 @@ pub async fn restore(manager: Source, intent: &str, confirmed: bool) -> Result<V
                 if current.0 != edit.before && current.0 != edit.after { return Err("客户端登录态已被其他程序更新，未覆盖新凭证".into()); }
             }
             runner.state.lock().map_err(|_| "本机启动状态不可用")?.phase = "closing";
-            if windows::running(&runner.executable)? { windows::close(&runner.executable)?; }
+            let include_all_args = runner.binding.client.switch_only;
+            if windows::running(&runner.executable, include_all_args)? { windows::close(&runner.executable, include_all_args)?; }
             runner.state.lock().map_err(|_| "本机启动状态不可用")?.client_running = false;
             if !runner.manager.is_current() || runner.binding.current().is_err() { return Err("本机恢复来源已变化，未写入凭证".into()); }
             journal.phase = "restoring".into(); journal.save()?;

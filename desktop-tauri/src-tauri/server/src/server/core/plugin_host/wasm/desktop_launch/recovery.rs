@@ -51,7 +51,8 @@ pub async fn prepare(manager: Source, db: Db, id: String) -> Result<Value, Strin
     if !manager.is_current() { return Err("本机管理会话已变化".into()); }
     binding.current()?;
     let running_executable = executable.clone();
-    let running = crate::server::core::blocking::run(move || windows::running(&running_executable)).await
+    let include_all_args = binding.client.switch_only;
+    let running = crate::server::core::blocking::run(move || windows::running(&running_executable, include_all_args)).await
         .map_err(|_| "本机恢复进程检查中断")??;
     let operation = Arc::new(Operation {
         id: super::operations::random_id()?, manager, binding, db, executable: PathBuf::from(executable), targets: Arc::new(targets), setting, launch_args: Vec::new(),

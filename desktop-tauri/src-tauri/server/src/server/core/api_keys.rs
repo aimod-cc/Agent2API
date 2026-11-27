@@ -66,6 +66,7 @@ use serde_json::{json, Map, Value};
 
 use crate::server::config;
 use crate::server::core::crypto::{self, SecretScope};
+use crate::server::core::key_usage::KeyUsageLimit;
 use crate::server::logging;
 
 /// 现役形态：`apiKeys` 数组（本模块的读写主体）
@@ -99,6 +100,8 @@ pub struct ApiKeyEntry {
     pub allowed_providers: Vec<String>,
     /// 可用模型白名单（**对外模型名**，含映射 alias）；**空 = 不限制**
     pub allowed_models: Vec<String>,
+    /// 用量限制（Token 用量或请求次数二选一，支持日/周/月/累计上限）；`None` = 不限制
+    pub usage_limit: Option<KeyUsageLimit>,
     /// 这条记录的 `key` **解不开**（密钥文件被删/被换），处于降级态。
     ///
     /// 为 true 时 `key` 里放的是**原样的密文信封**（不是明文）：
@@ -247,6 +250,7 @@ impl ApiKeyEntry {
             created_at: value.get("createdAt").and_then(Value::as_i64).unwrap_or(0),
             allowed_providers: string_list(value.get("allowedProviders")),
             allowed_models: string_list(value.get("allowedModels")),
+            usage_limit: KeyUsageLimit::from_value(value.get("usageLimit")),
             key_unreadable,
         })
     }
@@ -279,6 +283,7 @@ impl ApiKeyEntry {
             "createdAt": self.created_at,
             "allowedProviders": list_value(&self.allowed_providers),
             "allowedModels": list_value(&self.allowed_models),
+            "usageLimit": self.usage_limit.as_ref().map(KeyUsageLimit::to_value).unwrap_or(Value::Null),
         }))
     }
 
@@ -297,6 +302,7 @@ impl ApiKeyEntry {
             "createdAt": self.created_at,
             "allowedProviders": list_value(&self.allowed_providers),
             "allowedModels": list_value(&self.allowed_models),
+            "usageLimit": self.usage_limit.as_ref().map(KeyUsageLimit::to_value).unwrap_or(Value::Null),
         })
     }
 }
@@ -402,6 +408,7 @@ fn legacy_entry_from_str(stored: &str) -> Option<ApiKeyEntry> {
         // 与它升级前的行为（放行一切）逐字一致
         allowed_providers: Vec::new(),
         allowed_models: Vec::new(),
+        usage_limit: None,
         key_unreadable,
     })
 }
@@ -647,6 +654,7 @@ pub fn add(
     key: Option<&str>,
     allowed_providers: Vec<String>,
     allowed_models: Vec<String>,
+    usage_limit: Option<KeyUsageLimit>,
 ) -> Result<ApiKeyEntry, String> {
     let mut entries = list();
     let key = match key.map(str::trim).filter(|k| !k.is_empty()) {
@@ -670,6 +678,7 @@ pub fn add(
         created_at,
         allowed_providers,
         allowed_models,
+        usage_limit: usage_limit.filter(KeyUsageLimit::is_active),
         // 刚生成的 Key 当然是明文可读的，与降级态无关
         key_unreadable: false,
     };
@@ -680,7 +689,7 @@ pub fn add(
     Ok(entry)
 }
 
-/// 改名 / 启停 / 改白名单（`None` = 该项不动，与原来的两字段语义一致）。
+/// 改名 / 启停 / 改白名单 / 改用量限制（`None` = 该项不动，与原来的两字段语义一致）。
 ///
 /// ── 白名单为什么用 `Option<Vec<String>>` 而不是 `Vec<String>` ──────
 /// `PATCH /api/keys/{id}` 是部分更新：旧版前端只发 `{name}` / `{enabled}`，
@@ -693,6 +702,7 @@ pub fn update(
     enabled: Option<bool>,
     allowed_providers: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
+    usage_limit: Option<Option<KeyUsageLimit>>,
 ) -> Result<ApiKeyEntry, String> {
     let mut entries = list();
     let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
@@ -709,6 +719,9 @@ pub fn update(
     }
     if let Some(list) = allowed_models {
         entry.allowed_models = list;
+    }
+    if let Some(limit) = usage_limit {
+        entry.usage_limit = limit.filter(KeyUsageLimit::is_active);
     }
     let updated = entry.clone();
     save(&entries)?;

@@ -149,6 +149,7 @@
         { key: 'source', sel: '.req-source', track: 'minmax(116px, 0.95fr)' },
         { key: 'target', sel: '.req-target', track: 'minmax(144px, 1.15fr)' },
         { key: 'model', sel: '.req-model', track: 'minmax(156px, 1.4fr)' },
+        { key: 'protocol', sel: '.req-protocol', track: '108px' },
         { key: 'dur', sel: '.req-dur', track: '88px' },
         { key: 'speed', sel: '.req-speed', track: '88px' },
         { key: 'usage', sel: '.req-usage', track: '148px' },

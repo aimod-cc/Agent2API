@@ -2,7 +2,7 @@ import * as React from 'react'
 import { Badge, Button, Input, MultiSelect, SegmentedControl, Select, SelectContent, SelectItem, SelectTrigger,
   SelectValue, Switch } from '@ui'
 import type { Translate } from './assistant-read-types'
-import { conditionText, fieldLabel, modeHint, modeLabel, operatorLabel, operators, sourceLabel, uid,
+import { conditionText, fieldLabel, isModelField, modeHint, modeLabel, operatorLabel, operators, sourceLabel, uid,
   type PromptCondition, type PromptField, type PromptMode, type PromptOperator, type PromptRuleView, type PromptView } from './settings-prompt-types'
 
 function Arrow({ direction }: { direction: 'up' | 'down' }) {
@@ -16,11 +16,15 @@ function ValueField({ condition, view, disabled, t, immediate, onChange }: {
 }) {
   const [draft, setDraft] = React.useState<string | null>(null)
   React.useEffect(() => { setDraft(null) }, [condition.field, condition.op])
-  if (condition.field === 'model') {
+  if (isModelField(condition.field)) {
     const shown = draft ?? condition.values[0] ?? ''
+    const upstream = condition.field === 'upstream_model'
     return <Input className='sp-model-condition' value={shown} spellCheck={false} disabled={disabled}
-      aria-label={t('模型匹配内容')} placeholder={condition.op === 'glob' ? 'claude-*' : condition.op === 'regex' ? '^gpt-5' : t('模型名称')}
-      list={condition.op === 'is' || condition.op === 'is_not' ? 'sp-model-choices' : undefined}
+      aria-label={upstream ? t('上游模型匹配内容') : t('请求模型匹配内容')}
+      placeholder={condition.op === 'glob' ? (upstream ? 'deepseek-*' : 'claude-*')
+        : condition.op === 'regex' ? (upstream ? '^deepseek-' : '^gpt-5')
+        : (upstream ? t('映射后的上游模型名') : t('客户端请求的模型名'))}
+      list={condition.op === 'is' || condition.op === 'is_not' ? (upstream ? 'sp-upstream-model-choices' : 'sp-model-choices') : undefined}
       onChange={event => {
         const value = event.currentTarget.value
         setDraft(value)
@@ -50,7 +54,7 @@ function ConditionRow({ condition, view, disabled, t, immediate, onChange, onRem
       onChange({ ...condition, field, values: [], op: operators(field).includes(condition.op) ? condition.op : 'is' })
     }}>
       <SelectTrigger aria-label={t('条件字段')}><SelectValue>{fieldLabel(condition.field, t)}</SelectValue></SelectTrigger>
-      <SelectContent>{(['provider', 'client', 'model'] as const).map(field => <SelectItem key={field} value={field}>{fieldLabel(field, t)}</SelectItem>)}</SelectContent>
+      <SelectContent>{(['provider', 'client', 'model', 'upstream_model'] as const).map(field => <SelectItem key={field} value={field}>{fieldLabel(field, t)}</SelectItem>)}</SelectContent>
     </Select>
     <Select value={condition.op} disabled={disabled} onValueChange={next => { if (next) onChange({ ...condition, op: next as PromptOperator }) }}>
       <SelectTrigger aria-label={t('匹配方式')}><SelectValue>{operatorLabel(condition.op, t)}</SelectValue></SelectTrigger>
@@ -85,7 +89,7 @@ export function PromptRuleFields({ rule, view, disabled, t, immediate = false, o
           {t('＋ 添加条件')}
         </Button>
         {!rule.conditions.length ? <span className='sp-muted'>{t('没有条件，这条规则不会生效。')}</span> : null}
-        {rule.conditions.some(condition => condition.field === 'model' && condition.op === 'glob') ?
+        {rule.conditions.some(condition => isModelField(condition.field) && condition.op === 'glob') ?
           <span className='sp-expression-hint'>{t('* 匹配任意字符，? 匹配一个字符')}</span> : null}
       </div>
     </div>

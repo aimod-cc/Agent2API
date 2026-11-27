@@ -11,7 +11,13 @@ pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Field { Provider, Client, Model }
+pub enum Field { Provider, Client, Model, UpstreamModel }
+
+impl Field {
+    pub fn is_model(self) -> bool {
+        matches!(self, Self::Model | Self::UpstreamModel)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,9 +80,9 @@ pub struct CompiledRule {
 }
 
 impl CompiledRule {
-    pub fn matches(&self, provider: &str, client: &str, model: &str) -> bool {
+    pub fn matches(&self, provider: &str, client: &str, model: &str, upstream_model: &str) -> bool {
         if !self.rule.enabled || self.matchers.is_empty() { return false; }
-        let matches = |matcher: &Matcher| matcher.matches(provider, client, model);
+        let matches = |matcher: &Matcher| matcher.matches(provider, client, model, upstream_model);
         match self.rule.logic {
             Logic::All => self.matchers.iter().all(matches),
             Logic::Any => self.matchers.iter().any(matches),
@@ -93,7 +99,7 @@ pub struct Matcher {
 impl Matcher {
     pub fn compile(condition: &Condition) -> Result<Self, String> {
         let value = condition.values.first().map(String::as_str).unwrap_or("");
-        let pattern = if condition.field == Field::Model && !value.is_empty() {
+        let pattern = if condition.field.is_model() && !value.is_empty() {
             match condition.op {
                 Operator::Glob => {
                     let mut body = String::from("\\A");
@@ -114,15 +120,16 @@ impl Matcher {
         Ok(Self { condition: condition.clone(), pattern })
     }
 
-    pub fn matches(&self, provider: &str, client: &str, model: &str) -> bool {
+    pub fn matches(&self, provider: &str, client: &str, model: &str, upstream_model: &str) -> bool {
         let actual = match self.condition.field {
             Field::Provider => provider,
             Field::Client => client,
             Field::Model => model,
+            Field::UpstreamModel => upstream_model,
         };
         // 空条件不能扩大范围；未指定模型也不参与「不是 / 不包含」。
         if actual.is_empty() || self.condition.values.is_empty() { return false; }
-        if self.condition.field != Field::Model {
+        if !self.condition.field.is_model() {
             let hit = self.condition.values.iter().any(|value| actual.eq_ignore_ascii_case(value));
             return if self.condition.op == Operator::IsNot { !hit } else { hit };
         }
@@ -175,10 +182,10 @@ pub fn validate_rules(rules: &[Rule]) -> Result<(), String> {
             if !valid_id(&condition.id) || !conditions.insert(&condition.id) {
                 return Err("条件标识无效或重复".into());
             }
-            if condition.field != Field::Model && !matches!(condition.op, Operator::Is | Operator::IsNot) {
+            if !condition.field.is_model() && !matches!(condition.op, Operator::Is | Operator::IsNot) {
                 return Err("提供商和客户端条件只能使用「是 / 不是」".into());
             }
-            let limit = if condition.field == Field::Model { 1 } else { MAX_VALUES };
+            let limit = if condition.field.is_model() { 1 } else { MAX_VALUES };
             if condition.values.len() > limit { return Err("条件值数量超过上限".into()); }
             let mut values = HashSet::new();
             for value in &condition.values {
@@ -186,7 +193,7 @@ pub fn validate_rules(rules: &[Rule]) -> Result<(), String> {
                     || value.chars().any(char::is_control) || !values.insert(value) {
                     return Err("条件值不能为空、重复或含控制字符，最长 256 个字符".into());
                 }
-                if condition.field != Field::Model && !valid_id(value) {
+                if !condition.field.is_model() && !valid_id(value) {
                     return Err("提供商或客户端标识无效".into());
                 }
             }
@@ -194,4 +201,62 @@ pub fn validate_rules(rules: &[Rule]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule_with(id: &str, field: Field, op: Operator, value: &str) -> Rule {
+        Rule {
+            id: id.into(),
+            name: "test".into(),
+            enabled: true,
+            logic: Logic::All,
+            conditions: vec![Condition {
+                id: format!("c-{id}"),
+                field,
+                op,
+                values: vec![value.into()],
+            }],
+            mode: PromptMode::Custom,
+            file: String::new(),
+            text: "custom prompt".into(),
+        }
+    }
+
+    #[test]
+    fn model_and_upstream_model_match_independently() {
+        let client_rule = rule_with("r1", Field::Model, Operator::Contains, "claude-haiku");
+        let upstream_rule = rule_with("r2", Field::UpstreamModel, Operator::Contains, "deepseek");
+        assert!(validate_rules(&[client_rule.clone(), upstream_rule.clone()]).is_ok());
+
+        let client_matcher = Matcher::compile(&client_rule.conditions[0]).unwrap();
+        let upstream_matcher = Matcher::compile(&upstream_rule.conditions[0]).unwrap();
+
+        assert!(client_matcher.matches("workbuddy", "claude-code", "claude-haiku-4-5", "deepseek-v4.1-flash"));
+        assert!(!client_matcher.matches("workbuddy", "claude-code", "gpt-5", "claude-haiku-4-5"));
+
+        assert!(upstream_matcher.matches("workbuddy", "claude-code", "claude-haiku-4-5", "deepseek-v4.1-flash"));
+        assert!(upstream_matcher.matches("loomy", "claude-code", "claude-haiku-4-5", "DeepSeek-V4.1-Flash"));
+        assert!(!upstream_matcher.matches("workbuddy", "claude-code", "deepseek-v4.1-flash", "claude-haiku-4-5"));
+        assert!(!upstream_matcher.matches("workbuddy", "claude-code", "claude-haiku-4-5", ""));
+    }
+
+    #[test]
+    fn upstream_model_supports_glob_regex_and_serde_roundtrip() {
+        let glob_rule = rule_with("r3", Field::UpstreamModel, Operator::Glob, "deepseek-*-flash*");
+        let regex_rule = rule_with("r4", Field::UpstreamModel, Operator::Regex, "^deepseek-v4\\.1");
+        assert!(validate_rules(&[glob_rule.clone(), regex_rule.clone()]).is_ok());
+
+        let glob_matcher = Matcher::compile(&glob_rule.conditions[0]).unwrap();
+        let regex_matcher = Matcher::compile(&regex_rule.conditions[0]).unwrap();
+        assert!(glob_matcher.matches("trae", "other", "claude-haiku-4-5", "deepseek-v4.1-flash-max"));
+        assert!(regex_matcher.matches("loomy", "other", "claude-haiku-4-5", "DeepSeek-V4.1-Flash"));
+
+        let json = serde_json::to_string(&glob_rule).unwrap();
+        assert!(json.contains("\"upstream_model\""));
+        let decoded: Rule = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.conditions[0].field, Field::UpstreamModel);
+    }
 }

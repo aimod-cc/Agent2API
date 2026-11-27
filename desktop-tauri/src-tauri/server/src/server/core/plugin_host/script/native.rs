@@ -40,6 +40,7 @@ pub async fn forward(
     proxy: Option<crate::server::core::proxies::ResolvedProxy>, protocol: WireProtocol,
     requested: &str, stream: bool, telemetry: &Arc<RequestTelemetry>,
 ) -> Result<crate::server::core::upstream::ForwardOutcome, GatewayError> {
+    telemetry.note_upstream_protocol(protocol.as_str());
     let host: Arc<Host> = crate::server::core::plugin_host::host_for_provider(provider)
         .ok_or_else(|| GatewayError::with_status(503, "脚本提供商尚未就绪"))?;
     let lease = host.activity.acquire().ok_or_else(|| GatewayError::with_status(503, "插件正在切换"))?;
@@ -100,6 +101,11 @@ pub async fn forward(
     }
     let mut kept = axum::http::HeaderMap::new();
     for (key, value) in &head.headers {
+        if key.eq_ignore_ascii_case("x-agent2api-native")
+            || key.eq_ignore_ascii_case("x-agent2api-upstream-protocol")
+        {
+            continue;
+        }
         if let (Ok(key), Ok(value)) = (axum::http::HeaderName::from_bytes(key.as_bytes()), axum::http::HeaderValue::from_str(value)) { kept.insert(key, value); }
     }
     let response = crate::server::core::upstream::native::receive_plugin(Box::new(source), protocol, head.status,

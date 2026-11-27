@@ -1,0 +1,339 @@
+/* ─── 请求详情抽屉（方案 A：路由摘要卡 + 四格指标 + 尝试卡片流 + 舒展来源识别）─── */
+
+.req-detail-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.req-detail-group-head .req-detail-group-title {
+  padding-left: 0;
+}
+
+.req-detail-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.req-detail-hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.req-detail-hero-model {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.req-detail-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+}
+
+.req-detail-flow-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.req-detail-flow-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--text-3);
+  flex: none;
+}
+
+/* ─── 四宫格核心指标 ─── */
+.req-detail-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.req-detail-kpi-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+}
+
+.req-detail-kpi-label {
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.req-detail-kpi-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.req-detail-kpi-value.is-muted {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.req-detail-kpi-value.is-good { color: var(--ok); }
+.req-detail-kpi-value.is-info { color: var(--info); }
+.req-detail-kpi-value.is-warn { color: var(--warn); }
+
+.req-detail-kpi-sub {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--text-3);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* ─── 卡片式尝试明细 ─── */
+.req-detail-attempts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.req-detail-attempt {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.req-detail-attempt.is-failed {
+  border-color: color-mix(in srgb, var(--danger-bd) 65%, var(--border));
+}
+
+.req-detail-attempt-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.req-detail-attempt-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--hairline);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.req-detail-attempt.is-failed .req-detail-attempt-num {
+  border-color: var(--danger-bd);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.req-detail-attempt.is-ok .req-detail-attempt-num {
+  border-color: var(--ok-bd);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.req-detail-attempt-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding-left: 28px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.req-detail-retry-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--warn-bd);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.req-detail-retry-toggle:hover {
+  opacity: 0.9;
+}
+
+.req-detail-retry-box {
+  margin-left: 28px;
+  padding: 6px 10px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--hairline);
+  background: var(--surface-inset);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.req-detail-attempt-err {
+  margin-left: 28px;
+  padding: 6px 9px;
+  border-radius: var(--r-xs);
+  border: 1px solid color-mix(in srgb, var(--danger-bd) 55%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 55%, transparent);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* ─── 内容处理（关键词替换 + 隐私脱敏合并行）─── */
+.req-detail-process-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.req-detail-process-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.req-detail-process-row:last-child {
+  border-bottom: none;
+}
+
+.req-detail-process-label {
+  flex: none;
+  width: 72px;
+  padding-top: 2px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+/* ─── 来源识别 / 本机直连卡片 ─── */
+.req-detail-id-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.req-detail-id-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--surface-inset) 65%, var(--surface));
+}
+
+.req-detail-id-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.req-detail-id-kv {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.req-detail-id-k {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.req-detail-id-v {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .req-detail-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .req-detail-flow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .req-detail-flow-arrow {
+    transform: rotate(90deg);
+    justify-self: center;
+  }
+
+  .req-detail-id-kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}

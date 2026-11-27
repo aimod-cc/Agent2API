@@ -37,6 +37,7 @@ export function PluginPackSettingsDialog({ pack, store, update, operation, disab
   const diagnostics = () => { onClose(); requestPluginDiagnostics(pack.id) }
 
   return <PluginDetailsDialog name={pluginName(pack.id, store?.name || pack.name)} version={pack.version} sourceLabel={t('社区插件')}
+    downloads={store?.downloads}
     description={pluginDescription(pack.id, store?.description || pack.description)} icon={pack.icon || store?.icon}
     artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'} initialPane={initialPane ?? 'settings'}
     onClose={onClose} t={t}

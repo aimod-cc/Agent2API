@@ -39,6 +39,18 @@ impl RequestStats {
     }
 
     pub(crate) fn record_with_limiter(&self, entry: NewRequestEntry, limiter_event: Option<LimiterEvent<'_>>) {
+        let raw_tokens = entry.total_tokens.max(0);
+        let succeeded = (200..300).contains(&entry.status)
+            && entry.error.as_deref().is_none_or(|text| text.is_empty());
+        let key_usage_event = (entry.source.api_key.source == "key"
+            && !entry.source.api_key.id.is_empty()
+            && (succeeded || raw_tokens > 0))
+            .then(|| (
+                entry.id.clone(),
+                entry.source.api_key.id.clone(),
+                entry.ts.unwrap_or_else(now_ms),
+                raw_tokens,
+            ));
         let record = entry.normalize();
         let bounds = self.retention_bounds();
         let maintain = self.should_maintain();
@@ -71,8 +83,15 @@ impl RequestStats {
                 }
                 // 僵尸收尾可能先于真实用量到达；终态不覆盖，额度仍按请求 ID 幂等补记。
                 let row_id = limiter_event.as_ref().map(|event| event.insert(&tx)).transpose()?.flatten();
+                let key_usage_inserted = key_usage_event
+                    .as_ref()
+                    .map(|(req_id, key_id, ts, tokens)| {
+                        crate::server::core::key_usage::insert_event(&tx, req_id, key_id, *ts, *tokens, 1)
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
                 tx.commit()?;
-                Ok(row_id)
+                Ok((row_id, key_usage_inserted))
             })
         };
         if outcome.is_some() {
@@ -87,10 +106,17 @@ impl RequestStats {
         }
         if let Some(event) = limiter_event {
             match outcome {
-                Some(Some(row_id)) => event.committed(row_id),
+                Some((Some(row_id), _)) => event.committed(row_id),
                 // 日报等统计失败时保留独立额度台账的降级路径，不能因此漏计真实消耗。
                 None => event.persist_without_stats(),
-                Some(None) => {}
+                Some((None, _)) => {}
+            }
+        }
+        if let Some((req_id, key_id, ts, tokens)) = key_usage_event {
+            match outcome {
+                Some((_, true)) => crate::server::core::key_usage::note_committed(&key_id, ts, tokens, 1),
+                None => crate::server::core::key_usage::persist_without_stats(&req_id, &key_id, ts, tokens, 1),
+                Some((_, false)) => {}
             }
         }
     }
@@ -102,6 +128,7 @@ impl RequestStats {
         model: &str,
         client_model: &str,
         client_reasoning: &str,
+        client_protocol: &str,
         source: &RequestSource,
         is_test: bool,
     ) {
@@ -113,7 +140,7 @@ impl RequestStats {
         let guard = self.guard();
         let ok = self.with_conn_mut(&guard, |conn| {
             let tx = conn.transaction()?;
-            sql::insert_started_request(&tx, id, ts, model, client_model, client_reasoning, source, is_test)?;
+            sql::insert_started_request(&tx, id, ts, model, client_model, client_reasoning, client_protocol, source, is_test)?;
             lifecycle::finish_stale(&tx, stale_cutoff(), now_ms())?;
             if maintain {
                 sql::delete_expired_requests(&tx, bounds.requests_ms)?;

@@ -25,8 +25,9 @@ pub(crate) enum StrictJsonError {
 }
 
 struct Shape<'a> {
-    // 标量不增加深度；根对象/数组算第一层，最多 32 层容器。
+    // 标量不增加深度；根对象/数组算第一层，最多 max_depth 层容器。
     containers: usize,
+    max_depth: usize,
     cause: &'a mut Option<StrictJsonError>,
 }
 
@@ -68,13 +69,14 @@ impl<'de> Visitor<'de> for Shape<'_> {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
-        if self.containers >= MAX_JSON_DEPTH {
+        if self.containers >= self.max_depth {
             *self.cause = Some(StrictJsonError::DepthExceeded);
             return Err(de::Error::custom("JSON depth exceeded"));
         }
         while sequence
             .next_element_seed(Shape {
                 containers: self.containers + 1,
+                max_depth: self.max_depth,
                 cause: &mut *self.cause,
             })?
             .is_some()
@@ -83,7 +85,7 @@ impl<'de> Visitor<'de> for Shape<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut object: A) -> Result<(), A::Error> {
-        if self.containers >= MAX_JSON_DEPTH {
+        if self.containers >= self.max_depth {
             *self.cause = Some(StrictJsonError::DepthExceeded);
             return Err(de::Error::custom("JSON depth exceeded"));
         }
@@ -95,6 +97,7 @@ impl<'de> Visitor<'de> for Shape<'_> {
             }
             object.next_value_seed(Shape {
                 containers: self.containers + 1,
+                max_depth: self.max_depth,
                 cause: &mut *self.cause,
             })?;
         }
@@ -103,6 +106,14 @@ impl<'de> Visitor<'de> for Shape<'_> {
 }
 
 pub(super) fn validate_detailed(bytes: &[u8], limit: usize) -> Result<(), StrictJsonError> {
+    validate_detailed_with_depth(bytes, limit, MAX_JSON_DEPTH)
+}
+
+pub(super) fn validate_detailed_with_depth(
+    bytes: &[u8],
+    limit: usize,
+    max_depth: usize,
+) -> Result<(), StrictJsonError> {
     if bytes.len() > limit {
         return Err(StrictJsonError::TooLarge);
     }
@@ -111,14 +122,20 @@ pub(super) fn validate_detailed(bytes: &[u8], limit: usize) -> Result<(), Strict
     }
     let mut cause = None;
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    if (Shape {
+    if let Err(error) = (Shape {
         containers: 0,
+        max_depth,
         cause: &mut cause,
     })
     .deserialize(&mut deserializer)
-    .is_err()
     {
-        return Err(cause.unwrap_or(StrictJsonError::Invalid));
+        if let Some(reason) = cause {
+            return Err(reason);
+        }
+        if error.is_syntax() && error.to_string().contains("recursion limit exceeded") {
+            return Err(StrictJsonError::DepthExceeded);
+        }
+        return Err(StrictJsonError::Invalid);
     }
     deserializer.end().map_err(|_| StrictJsonError::Invalid)
 }

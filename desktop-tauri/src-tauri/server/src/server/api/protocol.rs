@@ -38,13 +38,14 @@ fn parse_object(
     state: &ServerState,
     started_at: i64,
     path: &str,
+    client_protocol: &str,
     body: &Bytes,
     source: &crate::server::request_stats::RequestSource,
 ) -> Result<Value, Response> {
     let parsed = serde_json::from_slice::<Value>(body).ok();
     let Some(payload) = parsed.filter(Value::is_object) else {
         let error = GatewayError::bad_request("请求体必须是 JSON 对象");
-        record_early_failure(state, started_at, "", "", source, &error);
+        record_early_failure(state, started_at, "", "", client_protocol, source, &error);
         logging::verbose("[Model]", &format!("← POST {path} 请求体不是 JSON 对象"));
         return Err(error.payload_response());
     };
@@ -143,7 +144,7 @@ pub async fn responses_endpoint(
     let reasoning_collapse = source.behavior_client == crate::server::core::client::CLIENT_CODEX
         && config::third_party_reasoning_collapse();
     let path = "/v1/responses";
-    let raw = match parse_object(&state, started_at, path, &body, &source) {
+    let raw = match parse_object(&state, started_at, path, "responses", &body, &source) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -170,7 +171,7 @@ pub async fn responses_endpoint(
         Ok(body) => body,
         Err(message) => {
             let error = GatewayError::bad_request(message);
-            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, &source, &error);
+            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, "responses", &source, &error);
             return error.payload_response();
         }
     };
@@ -180,7 +181,7 @@ pub async fn responses_endpoint(
         .unwrap_or(false)
     {
         let error = GatewayError::bad_request("input 必须能转换成对话消息");
-        record_early_failure(&state, started_at, "", &client_reasoning, &source, &error);
+        record_early_failure(&state, started_at, "", &client_reasoning, "responses", &source, &error);
         return error.payload_response();
     }
 
@@ -189,7 +190,7 @@ pub async fn responses_endpoint(
     let requested_model = match super::request_prepare::resolve_client_model(&state, &mut chat_body, scope.as_ref(), special).await {
         Ok(model) => model,
         Err(error) => {
-            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, &source, &error);
+            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, "responses", &source, &error);
             return error.payload_response();
         }
     };
@@ -225,6 +226,7 @@ pub async fn responses_endpoint(
         &requested_model,
         &client_model,
         &client_reasoning,
+        "responses",
         &source,
         false,
     ).await;
@@ -261,6 +263,7 @@ pub async fn responses_endpoint(
         // 下游原始名取自客户端原始请求体（转换前的 model 字段）
         client_model,
         client_reasoning,
+        client_protocol: "responses".to_string(),
         status: 200,
         // 下游原始请求体：客户端发来的那一份（协议翻译前）——仅调试模式
         // 开启时采集（`capture_raw_body`）。响应侧非流式在聚合完成后补，
@@ -377,7 +380,7 @@ pub async fn messages_endpoint(
     // 请求来源客户端（UA 识别，见 `core::client`）：早失败路径与收尾记账共用
     let source = pipeline::request_source(&headers, key_identity);
     let path = "/v1/messages";
-    let raw = match parse_object(&state, started_at, path, &body, &source) {
+    let raw = match parse_object(&state, started_at, path, "anthropic", &body, &source) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -396,7 +399,7 @@ pub async fn messages_endpoint(
         Ok(body) => body,
         Err(message) => {
             let error = GatewayError::bad_request(message);
-            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), "", &source, &error);
+            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), "", "anthropic", &source, &error);
             return anthropic_error_response(&error);
         }
     };
@@ -407,7 +410,7 @@ pub async fn messages_endpoint(
     let requested_model = match super::request_prepare::resolve_client_model(&state, &mut chat_body, scope.as_ref(), special).await {
         Ok(model) => model,
         Err(error) => {
-            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, &source, &error);
+            record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, "anthropic", &source, &error);
             return anthropic_error_response(&error);
         }
     };
@@ -446,6 +449,7 @@ pub async fn messages_endpoint(
         &requested_model,
         &client_model,
         &client_reasoning,
+        "anthropic",
         &source,
         false,
     ).await;
@@ -482,6 +486,7 @@ pub async fn messages_endpoint(
         // 下游原始名取自客户端原始请求体（转换前的 model 字段）
         client_model,
         client_reasoning,
+        client_protocol: "anthropic".to_string(),
         status: 200,
         // 下游原始请求体：客户端发来的那一份（协议翻译前）——仅调试模式
         // 开启时采集（`capture_raw_body`）。响应侧非流式在聚合完成后补，

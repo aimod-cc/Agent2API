@@ -504,6 +504,38 @@ impl UpstreamService {
         let config = crate::server::config::current();
         let sanitize = config.sanitize_settings();
         let privacy = config.privacy_settings();
+        if images.is_some() && privacy.settings.enabled {
+            return Err(GatewayError::bad_request(
+                "隐私脱敏已开启，图片生成与编辑接口不支持本地脱敏，未转发",
+            )
+            .with_code("privacy_unsupported_endpoint"));
+        }
+        if privacy.settings.enabled
+            && privacy.settings.ephemeral_placeholders
+            && native.as_ref().is_some_and(|n| {
+                n.protocol == crate::server::core::protocol::native::WireProtocol::Responses
+                    && crate::server::core::privacy::is_stateful_responses_request(&n.body)
+            })
+        {
+            return Err(GatewayError::bad_request(
+                "已开启「每次请求随机占位符」，不支持引用上游历史（previous_response_id / conversation）；请关闭该选项或发送完整上下文，未转发",
+            )
+            .with_code("privacy_stateful_responses"));
+        }
+        let privacy_vault = crate::server::core::privacy::RequestVault::for_ephemeral_mode(
+            privacy.settings.enabled && privacy.settings.ephemeral_placeholders,
+        );
+        let privacy_json_output = if let Some(native_req) = native.as_ref() {
+            crate::server::core::privacy::request_expects_json_output(
+                &native_req.body,
+                native_req.protocol,
+            )
+        } else {
+            crate::server::core::privacy::request_expects_json_output(
+                &upstream_body,
+                crate::server::core::protocol::native::WireProtocol::Chat,
+            )
+        };
         let developer_role_compat = config.developer_role_compat();
         let prompt_request = request.telemetry.prompt_request().unwrap_or_else(|| {
             let snapshot = crate::server::config::client_identification::current();
@@ -546,7 +578,8 @@ impl UpstreamService {
             client_headers: &request.client_headers,
             telemetry: &request.telemetry,
             sanitize,
-            privacy,
+            privacy: privacy.clone(),
+            privacy_vault: privacy_vault.clone(),
             developer_role_compat,
             image_compress,
             prompt,
@@ -566,8 +599,18 @@ impl UpstreamService {
         } else {
             outcome
         };
-        Ok(if images.is_none() && request.telemetry.needs_privacy_restore() {
-            crate::server::core::privacy::unmask_outcome(outcome, request.telemetry.clone())
+        let should_restore = images.is_none()
+            && privacy.settings.enabled
+            && privacy.settings.reversible
+            && (request.telemetry.needs_privacy_restore()
+                || (!privacy_vault.is_ephemeral() && privacy_vault.stats() > 0));
+        Ok(if should_restore {
+            crate::server::core::privacy::unmask_outcome_with_options(
+                outcome,
+                request.telemetry.clone(),
+                privacy_vault,
+                privacy_json_output,
+            )
         } else {
             outcome
         })

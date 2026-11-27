@@ -12,6 +12,35 @@ export type PluginCardSelection = { checked: boolean; disabled?: boolean; onChan
 // 断点包含卡片间距，保证多列时卡片空间舒适不拥挤。
 export const PLUGIN_GRID_CLASS = 'grid grid-cols-1 gap-3 @min-[600px]/plugin-gallery:grid-cols-2 @min-[920px]/plugin-gallery:grid-cols-3 @min-[1280px]/plugin-gallery:grid-cols-4'
 
+export function formatPluginDownloads(count?: number | null): string | null {
+  if (typeof count !== 'number' || !Number.isFinite(count) || count <= 0) return null
+  const value = Math.floor(count)
+  if (value >= 100_000) {
+    const k = value / 1000
+    return `${(value >= 1_000_000 ? k.toFixed(0) : k.toFixed(1)).replace(/\.0$/, '')}k`
+  }
+  return value.toLocaleString()
+}
+
+export function PluginDownloadCount({ downloads, t, className }: {
+  downloads?: number | null
+  t: PluginTranslate
+  className?: string
+}) {
+  const formatted = formatPluginDownloads(downloads)
+  if (!formatted || !downloads) return null
+  const exact = Math.floor(downloads).toLocaleString()
+  const label = t('{count} 次下载', { count: exact })
+  return <span className={cn('inline-flex shrink-0 items-center gap-1 tabular-nums', className)}
+    title={label} aria-label={label}>
+    <svg viewBox='0 0 16 16' className='size-3 shrink-0' fill='none' stroke='currentColor' strokeWidth='1.6'
+      strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+      <path d='M8 2.5v7.5m0 0-3-3m3 3 3-3M3 13h10' />
+    </svg>
+    {formatted}
+  </span>
+}
+
 export function PluginSettingsButton({ name, onClick, t }: { name: string; onClick: () => void; t: PluginTranslate }) {
   const label = `${name} · ${t('设置')}`
   return <Button variant='ghost' size='icon-sm' aria-label={label} title={label} aria-haspopup='dialog' onClick={onClick}>
@@ -70,6 +99,7 @@ export type PluginStoreCardProps = {
   startup?: PluginLoadStatus | null
   providerCount?: number
   enabledCount?: number
+  downloads?: number | null
   actions: React.ReactNode
   feedback?: React.ReactNode
   footerAction?: React.ReactNode
@@ -93,7 +123,7 @@ function isInteractiveTarget(target: EventTarget | null): boolean {
 }
 
 export const PluginStoreCard = React.memo(function PluginStoreCard({ name, description, version, icon, artwork, highlightedSource = false, sourceLabel, badges, status,
-  providerCount, enabledCount, actions, feedback, footerAction, metadata, startup, selection, onDetails, t }: PluginStoreCardProps) {
+  providerCount, enabledCount, downloads, actions, feedback, footerAction, metadata, startup, selection, onDetails, t }: PluginStoreCardProps) {
   const { pending, failed, running, statusText } = resolveStatusInfo(status, startup, t)
   return <Card render={<article />} data-plugin-card='' aria-label={name}
     onClick={event => {
@@ -139,6 +169,10 @@ export const PluginStoreCard = React.memo(function PluginStoreCard({ name, descr
           count: enabledCount === undefined ? providerCount : `${enabledCount}/${providerCount}`,
         })}</span>
       </> : null}
+      {downloads && downloads > 0 ? <>
+        <span className='opacity-40' aria-hidden='true'>·</span>
+        <PluginDownloadCount downloads={downloads} t={t} />
+      </> : null}
       {version ? <span className='ml-auto tabular-nums'>v{version}</span> : null}
       {footerAction ? <span className='flex flex-wrap items-center justify-end gap-1.5'>{footerAction}</span> : null}
     </div>
@@ -147,7 +181,7 @@ export const PluginStoreCard = React.memo(function PluginStoreCard({ name, descr
 })
 
 export const PluginStoreListRow = React.memo(function PluginStoreListRow({ name, description, version, icon, artwork, highlightedSource = false, sourceLabel, badges, status,
-  providerCount, enabledCount, actions, feedback, footerAction, metadata, startup, selection, onDetails, t }: PluginStoreCardProps) {
+  providerCount, enabledCount, downloads, actions, feedback, footerAction, metadata, startup, selection, onDetails, t }: PluginStoreCardProps) {
   const { pending, failed, running, statusText } = resolveStatusInfo(status, startup, t)
   return <article data-plugin-row='' data-selected={selection?.checked ? 'true' : undefined} aria-label={name}
     onClick={event => {
@@ -190,6 +224,7 @@ export const PluginStoreListRow = React.memo(function PluginStoreListRow({ name,
       </div>
       {metadata ? <div className='hidden shrink-0 items-center lg:flex'>{metadata}</div> : null}
       <div className='hidden shrink-0 items-center gap-3 text-[11px] text-muted-foreground sm:flex'>
+        <PluginDownloadCount downloads={downloads} t={t} />
         {version ? <span className='w-14 text-right tabular-nums'>v{version}</span> : <span className='w-14' />}
         <span className={cn('inline-flex w-16 items-center gap-1.5', running && 'text-success', failed && 'text-warning')}>
           {pending ? <Spinner className='size-3' /> : status !== 'missing' ? <StatusDot variant={running ? 'success' : failed ? 'warning' : 'muted'} /> : null}

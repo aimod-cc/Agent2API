@@ -878,6 +878,14 @@ async fn attempt_queue(
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear_scoped(account_id, provider_id, &clear_model);
+                        cap_cleared(
+                            service,
+                            &failed_target,
+                            &clear_model,
+                            &limit_model_label(&model, &clear_model),
+                            &Value::Null,
+                            provider_id,
+                        ).await;
                     }
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
@@ -1227,6 +1235,17 @@ async fn attempt_queue(
                     return Err(error);
                 }
             };
+            ctx.telemetry.note_upstream_protocol(match plan.response {
+                crate::server::core::providers::adapter::UpstreamResponse::Chat => "chat_completions",
+                crate::server::core::providers::adapter::UpstreamResponse::Responses => "responses",
+                crate::server::core::providers::adapter::UpstreamResponse::Anthropic => "anthropic",
+                crate::server::core::providers::adapter::UpstreamResponse::AiSdkNdjson => "ai_sdk_ndjson",
+                crate::server::core::providers::adapter::UpstreamResponse::AntigravityGemini => "gemini",
+                crate::server::core::providers::adapter::UpstreamResponse::ChatglmSnapshot => "chatglm_snapshot",
+                crate::server::core::providers::adapter::UpstreamResponse::Images(crate::server::core::providers::images::ImageResponseKind::Openai) => "images",
+                crate::server::core::providers::adapter::UpstreamResponse::Images(crate::server::core::providers::images::ImageResponseKind::Gemini) => "gemini",
+                crate::server::core::providers::adapter::UpstreamResponse::Images(_) => "proprietary",
+            });
             if crate::server::core::providers::subscriptions::native_protocol(provider_id).is_some() {
                 plan.body = strip_internal_fields(&plan.body).into_owned();
             }
@@ -2532,8 +2551,9 @@ async fn cap_cleared(
     let id = account_id.to_string();
     let wire_model = model.to_string();
     let cleared = crate::server::core::blocking::run(move || {
-        store.clear_policy_cooldown(&id, &wire_model);
-        store.clear_rate_limit(&id, &wire_model)
+        let policy = store.clear_policy_cooldown(&id, &wire_model);
+        let model_limit = store.clear_rate_limit(&id, &wire_model);
+        policy || model_limit
     }).await;
     if !matches!(cleared, Ok(true)) {
         return;

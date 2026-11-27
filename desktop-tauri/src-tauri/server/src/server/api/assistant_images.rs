@@ -43,7 +43,8 @@ async fn run(
     bytes: &[u8],
     operation: ImageOperation,
 ) -> Result<Value, GatewayError> {
-    let access = super::model_access::authenticate(headers, super::model_access::ASSISTANT_IMAGES)?;
+    let access = super::model_access::authenticate_call(headers, super::model_access::ASSISTANT_IMAGES)?;
+    let _usage_lease = access.usage_lease;
     let config = config::assistant_config();
     if !config.tool_enabled(operation.tool()) {
         return Err(GatewayError::with_status(

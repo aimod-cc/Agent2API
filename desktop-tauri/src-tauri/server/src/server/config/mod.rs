@@ -96,7 +96,7 @@ pub use account_sort::{
     AddedSortDirection, BalanceSortDirection, CreditSortDirection,
 };
 pub use assistant_config::*;
-pub use privacy_config::{set_privacy_settings, KEY_PRIVACY_REDACTION};
+pub use privacy_config::{save_privacy_settings, PrivacySaveError, KEY_PRIVACY_REDACTION};
 pub use sanitize_config::{
     default_sanitize_providers, set_sanitize_settings, SanitizePatch, SanitizeSettings,
     KEY_SANITIZE_PROVIDERS, KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
@@ -197,7 +197,7 @@ pub struct RuntimeConfig {
     debug_mode: bool,
     /// 规则在配置读取 / 保存时编译，请求间共享，同一次转发使用完整快照。
     sanitize: SanitizeSettings,
-    privacy: std::sync::Arc<crate::server::core::privacy::CompiledPrivacySettings>,
+    privacy: privacy_config::PrivacyConfigSnapshot,
     /// 开发者角色兼容开关（设置页「网关 → 开发者角色兼容」）。
     ///
     /// 与 `sanitize_fingerprints` 同一理由：转发层**每次发送前**都要判一次

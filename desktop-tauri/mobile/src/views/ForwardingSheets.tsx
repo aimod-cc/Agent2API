@@ -4,6 +4,7 @@ import {
   fetchKeys,
   fetchManageModels,
   removeModelMapping,
+  resetKeyUsage,
   saveModelMapping,
   testModelOnline,
   updateKey,
@@ -13,6 +14,7 @@ import {
   type ModelTestResponse,
   type ProviderSummary,
 } from '../core/api'
+import { KeyUsageLimitCard, mobileDraftFromLimit, parseMobileUsageDraft } from './KeyUsageLimitCard'
 import { formatDuration, providerDisplayName } from '../core/format'
 import { store } from '../core/store'
 import {
@@ -406,13 +408,16 @@ export function KeyEditorSheet({
   onClose: () => void
 }) {
   const isEdit = Boolean(item?.id)
+  const [currentItem, setCurrentItem] = useState<GatewayKey | undefined>(item)
   const [name, setName] = useState(item?.name || '')
   const [customKey, setCustomKey] = useState('')
   const [allowedProviders, setAllowedProviders] = useState<string[]>(
     () => item?.allowedProviders || [],
   )
+  const [usageDraft, setUsageDraft] = useState(() => mobileDraftFromLimit(item?.usageLimit))
   const [providers, setProviders] = useState<ProviderSummary[]>([])
   const [busy, setBusy] = useState(false)
+  const [resetting, setResetting] = useState(false)
 
   useEffect(() => {
     fetchKeys()
@@ -426,14 +431,36 @@ export function KeyEditorSheet({
     )
   }
 
+  const handleResetUsage = async () => {
+    if (!item?.id || busy || resetting) return
+    setResetting(true)
+    try {
+      const updated = await resetKeyUsage(item.id)
+      const latest = updated.keys?.find(k => k.id === item.id)
+      if (latest) setCurrentItem(latest)
+      store.toast('已清零 API Key 用量', 'success')
+      void store.refresh(true)
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : '清零失败', 'danger')
+    } finally {
+      setResetting(false)
+    }
+  }
+
   const handleSave = async () => {
     if (!name.trim() || busy) return
+    const parsedUsage = parseMobileUsageDraft(usageDraft)
+    if (!parsedUsage.ok) {
+      store.toast(parsedUsage.error, 'danger')
+      return
+    }
     setBusy(true)
     try {
       if (isEdit && item?.id) {
         await updateKey(item.id, {
           name: name.trim(),
           allowedProviders,
+          usageLimit: parsedUsage.value,
         })
         store.toast('已更新 API Key', 'success')
       } else {
@@ -442,6 +469,7 @@ export function KeyEditorSheet({
           key: customKey.trim() || undefined,
           allowedProviders,
           allowedModels: [],
+          usageLimit: parsedUsage.value,
         })
         store.toast('已创建 API Key', 'success')
       }
@@ -533,6 +561,16 @@ export function KeyEditorSheet({
           </div>
         </CommonCard>
       ) : null}
+
+      <KeyUsageLimitCard
+        draft={usageDraft}
+        onChange={setUsageDraft}
+        usage={currentItem?.usage}
+        isEdit={isEdit}
+        busy={busy}
+        resetting={resetting}
+        onResetUsage={isEdit ? () => void handleResetUsage() : undefined}
+      />
     </BottomSheet>
   )
 }

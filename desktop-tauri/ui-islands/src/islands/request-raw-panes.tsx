@@ -1,8 +1,29 @@
 import * as React from 'react'
-import { Button, Empty, HtmlContent, Spinner, Switch } from '@ui'
+import { Button, Empty, Spinner, Switch, Tooltip, TooltipContent, TooltipTrigger } from '@ui'
 import { t } from '../i18n'
 import { NOTES } from './settings-model'
 import { loadDebug, saveDebug, useSettings } from './settings-state'
+import {
+  MemoryCopyButton,
+  PagedTextViewer,
+  formatByteSize,
+  utf8ByteLength,
+} from './requests/request-detail-guard'
+
+export { PreviewPane } from './requests/request-preview-pane'
+
+const SINGLE_COLLAPSE_BYTES = 512 * 1024
+const TOTAL_COLLAPSE_BYTES = 1024 * 1024
+const LARGE_TOTAL_SEG_BYTES = 64 * 1024
+
+function DebugInfoIcon() {
+  return (
+    <svg width='13' height='13' viewBox='0 0 16 16' fill='none' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+      <circle cx='8' cy='8' r='6' />
+      <path d='M8 7.2v3.6M8 4.8h.01' />
+    </svg>
+  )
+}
 
 export function RequestDebugSwitch() {
   const { debug, busy } = useSettings()
@@ -31,7 +52,21 @@ export function RequestDebugSwitch() {
   const unavailable = !loading && debug.status === 'unavailable'
   return (
     <div className='ml-auto flex min-h-[30px] flex-wrap items-center justify-end gap-2'>
-      <label className='inline-flex items-center gap-2 whitespace-nowrap text-[12px] text-subtle' title={NOTES.debug}>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type='button'
+              className='inline-flex size-5 items-center justify-center rounded-full border-0 bg-transparent p-0 text-muted-foreground hover:bg-control-hover hover:text-foreground'
+              aria-label={t('调试模式说明')}
+            >
+              <DebugInfoIcon />
+            </button>
+          }
+        />
+        <TooltipContent variant='plain' side='bottom'>{NOTES.debug}</TooltipContent>
+      </Tooltip>
+      <label className='inline-flex items-center gap-2 whitespace-nowrap text-[12px] text-subtle'>
         <span>{t('调试模式')}</span>
         <Switch checked={debug.on} disabled={loading || debug.status !== 'ready' || busy !== null}
           aria-label={t('调试模式')} aria-busy={loading || saving}
@@ -50,8 +85,18 @@ export function RequestDebugSwitch() {
 
 export type RawBody = Record<string, unknown>
 export type DebugTraffic = Record<string, unknown>
-export type RawState = null | 'gone' | { error: string } | { body: RawBody; truncated: boolean }
-export type DebugState = null | 'gone' | { data: DebugTraffic }
+export type RawState =
+  | 'idle'
+  | 'loading'
+  | 'gone'
+  | { error: string; retryable?: boolean }
+  | { body: RawBody; truncated: boolean }
+export type DebugState =
+  | 'idle'
+  | 'loading'
+  | 'gone'
+  | { error: string; retryable?: boolean }
+  | { data: DebugTraffic }
 
 function jsonText(value: unknown): string {
   if (value === null || value === undefined) return ''
@@ -60,15 +105,32 @@ function jsonText(value: unknown): string {
 }
 
 const DEBUG_SEGS = [
-  { label: t('请求头'), pick: (data: DebugTraffic) => jsonText(data.requestHeaders) },
-  { label: t('请求体'), pick: (data: DebugTraffic) => jsonText(data.requestBody) },
-  { label: t('响应头'), pick: (data: DebugTraffic) => jsonText(data.responseHeaders) },
-  { label: t('响应体'), pick: (data: DebugTraffic) => data.responseBody ? String(data.responseBody) : '' },
-]
+  { key: 'requestHeaders', label: t('请求头'), pick: (data: DebugTraffic) => jsonText(data.requestHeaders) },
+  { key: 'requestBody', label: t('请求体'), pick: (data: DebugTraffic) => jsonText(data.requestBody) },
+  { key: 'responseHeaders', label: t('响应头'), pick: (data: DebugTraffic) => jsonText(data.responseHeaders) },
+  { key: 'responseBody', label: t('响应体'), pick: (data: DebugTraffic) => data.responseBody ? String(data.responseBody) : '' },
+] as const
 
 export function hasDebugTraffic(data: DebugTraffic): boolean {
   return [data.requestHeaders, data.requestBody, data.responseHeaders, data.responseBody]
     .some(value => typeof value === 'string' ? value.trim() !== '' : value != null)
+}
+
+export function extractFallbackPayloadText(raw: RawState, debug: DebugState): string {
+  const sections: string[] = []
+  if (typeof debug === 'object' && debug !== null && 'data' in debug) {
+    for (const seg of DEBUG_SEGS) {
+      const text = seg.pick(debug.data)
+      if (text) sections.push(`=== ${seg.label} ===\n${text}`)
+    }
+  }
+  if (sections.length === 0 && typeof raw === 'object' && raw !== null && 'body' in raw) {
+    const req = String(raw.body.requestBody ?? '')
+    const res = String(raw.body.responseBody ?? '')
+    if (req) sections.push(`=== ${t('请求体')} ===\n${req}`)
+    if (res) sections.push(`=== ${t('响应体')} ===\n${res}`)
+  }
+  return sections.join('\n\n')
 }
 
 export function RequestEmpty({ text, loading = false }: { text: string; loading?: boolean }) {
@@ -80,53 +142,46 @@ export function RequestEmpty({ text, loading = false }: { text: string; loading?
   )
 }
 
-export function PreviewPane({ state, localDirect = false }: { state: RawState; localDirect?: boolean }) {
-  if (!state) return <RequestEmpty text={t('正在读取…')} loading />
-  if (state !== 'gone' && 'error' in state) {
-    return <RequestEmpty text={state.error} />
+export function RawPane({ state, onRetry }: { state: DebugState; onRetry?: () => void }) {
+  const data = typeof state === 'object' && state !== null && 'data' in state ? state.data : null
+
+  const computed = React.useMemo(() => {
+    if (!data) return { segments: [] as Array<{ key: string; label: string; text: string; bytes: number }>, totalBytes: 0 }
+    let totalBytes = 0
+    const segments = DEBUG_SEGS.map(seg => {
+      const text = seg.pick(data)
+      const bytes = text ? utf8ByteLength(text) : 0
+      totalBytes += bytes
+      return { key: seg.key, label: seg.label, text, bytes }
+    })
+    return { segments, totalBytes }
+  }, [data])
+
+  if (state === 'idle' || state === 'loading') {
+    return <RequestEmpty text={t('正在读取…')} loading />
   }
-  const body = state === 'gone' ? null : state.body
-  const bridge = window as unknown as {
-    wbConversationPreview?: { render?: (request: unknown, response: unknown) => string }
+  if (state === 'gone') {
+    return <RequestEmpty text={t('该请求没有保存原始报文（未开启「调试模式」，或记录已超出保留条数）')} />
   }
-  const html = body ? bridge.wbConversationPreview?.render?.(body.requestBody, body.responseBody) || '' : ''
-  if (!html) {
+  if ('error' in state) {
     return (
-      <RequestEmpty
-        text={localDirect
-          ? t('未找到可展示的本机对话内容（可能原文件已删除或该版本仅记录了用量）')
-          : t('无报文原文（未开启「调试模式」，或已被清理）')}
-      />
+      <div className='flex flex-col items-center gap-2.5 py-6 text-center'>
+        <div className='text-xs text-muted-foreground'>{state.error}</div>
+        {state.retryable !== false && onRetry ? (
+          <Button type='button' variant='outline' size='xs' onClick={onRetry}>{t('重试')}</Button>
+        ) : null}
+      </div>
     )
   }
-  const sourceFile = typeof body?.sourceFile === 'string' ? body.sourceFile : ''
-  return (
-    <div className='min-w-0'>
-      {body?.liveLocal === true ? (
-        <div className='mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-[11.5px] text-subtle'>
-          <span>{t('实时读取自本机对话文件（不存入数据库）')}</span>
-          {sourceFile ? (
-            <span className='max-w-[55%] truncate font-mono text-[11px] text-muted-foreground' title={sourceFile}>
-              {sourceFile}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-      {state !== 'gone' && !('error' in state) && state.truncated && (
-        <div className='mb-2 text-[11.5px] text-warning'>{t('旧版本保存的正文可能已截断，无法恢复缺失内容')}</div>
-      )}
-      <HtmlContent html={html} />
-    </div>
-  )
-}
 
-export function RawPane({ data }: { data: DebugTraffic }) {
-  const status = data.status === null || data.status === undefined ? '-' : String(data.status)
+  const traffic = state.data
+  const status = traffic.status === null || traffic.status === undefined ? '-' : String(traffic.status)
   const meta = [
-    data.url ? `URL: ${data.url}` : '',
-    data.provider ? t('提供商: {provider}', { provider: String(data.provider) }) : '',
+    traffic.url ? `URL: ${traffic.url}` : '',
+    traffic.provider ? t('提供商: {provider}', { provider: String(traffic.provider) }) : '',
     t('上游状态码: {status}', { status }),
   ].filter(Boolean)
+
   return (
     <div className='flex flex-col gap-4'>
       {meta.length > 0 && (
@@ -134,20 +189,29 @@ export function RawPane({ data }: { data: DebugTraffic }) {
           {meta.map((line, index) => <div key={index}>{line}</div>)}
         </div>
       )}
-      {DEBUG_SEGS.map(seg => {
-        const text = seg.pick(data)
+      {computed.segments.map(seg => {
+        const defaultCollapsed = seg.bytes > SINGLE_COLLAPSE_BYTES
+          || (computed.totalBytes > TOTAL_COLLAPSE_BYTES && seg.bytes > LARGE_TOTAL_SEG_BYTES)
         return (
-          <div key={seg.label} className='flex min-w-0 flex-col gap-1.5'>
+          <div key={seg.key} className='flex min-w-0 flex-col gap-1.5'>
             <div className='flex items-center gap-2'>
               <h3 className='text-[11.5px] font-semibold tracking-[.02em] text-muted-foreground'>{seg.label}</h3>
-              {text && <Button variant='outline' size='xs' className='ml-auto' data-copy={text}>{t('复制')}</Button>}
+              {seg.bytes >= 1024 ? (
+                <span className='font-mono text-[11px] text-muted-foreground tabular-nums'>
+                  {formatByteSize(seg.bytes)}
+                </span>
+              ) : null}
+              {seg.text ? <MemoryCopyButton text={seg.text} className='ml-auto' /> : null}
             </div>
-            {text ? (
-              <pre tabIndex={0} aria-label={seg.label}
-                className='m-0 max-h-80 overflow-auto rounded-md border border-border bg-surface-2 p-[10px_12px] font-mono text-[11.5px] leading-[1.6] whitespace-pre-wrap text-subtle [overflow-wrap:anywhere]'>
-                {text}
-              </pre>
-            ) : <RequestEmpty text={t('这条请求没有保存这一段报文')} />}
+            {seg.text ? (
+              <PagedTextViewer
+                text={seg.text}
+                label={seg.label}
+                defaultCollapsed={defaultCollapsed}
+              />
+            ) : (
+              <RequestEmpty text={t('这条请求没有保存这一段报文')} />
+            )}
           </div>
         )
       })}

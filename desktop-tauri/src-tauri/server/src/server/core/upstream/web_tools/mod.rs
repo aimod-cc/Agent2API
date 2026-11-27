@@ -3,6 +3,8 @@
 mod parser;
 mod request;
 mod stream;
+#[cfg(test)]
+mod tests;
 
 pub use request::{Context, Prepared};
 

@@ -64,10 +64,13 @@ pub(crate) fn from_raw(raw: &Map<String, Value>) -> Arc<ErrorPolicySnapshot> {
 
 fn migrate_untouched_v1_defaults(settings: &mut ErrorSettings) {
     let v1 = v1_default_rules();
-    let v2 = default_rules();
+    let v2_balance = v2_default_balance_rule();
+    let latest = default_rules();
     for rule in &mut settings.rules {
-        if let (Some(old), Some(next)) = (v1.iter().find(|item| item.kind == rule.kind), v2.iter().find(|item| item.kind == rule.kind)) {
-            if *rule == *old {
+        if let Some(next) = latest.iter().find(|item| item.kind == rule.kind) {
+            let matches_v1 = v1.iter().find(|item| item.kind == rule.kind).is_some_and(|old| *rule == *old);
+            let matches_v2_balance = rule.kind == ErrorKind::Balance && *rule == v2_balance;
+            if matches_v1 || matches_v2_balance {
                 *rule = next.clone();
             }
         }

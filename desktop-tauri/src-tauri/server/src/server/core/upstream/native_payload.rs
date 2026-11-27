@@ -79,11 +79,23 @@ pub(super) fn prepare(
     if ctx.compact_routed || ctx.title_routed {
         crate::server::core::compact_routing::parameters::clear_source_reasoning(&mut body);
     }
+    let requested = ctx.body.get("model").and_then(Value::as_str).unwrap_or("").trim();
+    let direct_or_group = ctx
+        .direct_model
+        .as_deref()
+        .or_else(|| account.and_then(crate::server::core::routing_groups::candidate_model));
+    let prompt_upstream_model = direct_or_group
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::server::core::providers::catalog::effective_upstream_model(
+                requested, provider, account,
+            )
+        });
     let preserve_content = native.protocol == WireProtocol::Anthropic;
     if preserve_content || native.requires_native() {
         // 第一轮的内容同样会被后续签名绑定，不能等出现签名才停止改写。
         if !ctx.preserve_system_prompt
-            && ctx.prompt.for_provider(provider).mode != PromptMode::Passthrough
+            && ctx.prompt.for_provider(provider, &prompt_upstream_model).mode != PromptMode::Passthrough
             || ctx.sanitize.applies_to(provider)
             || ctx.image_compress.enabled
             || degraded
@@ -95,7 +107,7 @@ pub(super) fn prepare(
             });
         }
     } else {
-        let prompt = ctx.prompt.for_provider(provider);
+        let prompt = ctx.prompt.for_provider(provider, &prompt_upstream_model);
         if !ctx.preserve_system_prompt {
             apply_prompt(
                 &mut body,
@@ -141,7 +153,7 @@ pub(super) fn prepare(
             &body,
             native.protocol,
             &ctx.privacy,
-            crate::server::core::privacy::PrivacyVault::global(),
+            &ctx.privacy_vault,
         ) {
             crate::server::core::privacy::PrivacyBodyOutcome::Unchanged => {}
             crate::server::core::privacy::PrivacyBodyOutcome::Warned { hits } => {

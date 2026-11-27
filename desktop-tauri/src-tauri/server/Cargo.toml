@@ -1,6 +1,6 @@
 [package]
 name = "agent2api-server"
-version = "3.6.0"
+version = "3.6.1-beta.1"
 description = "Agent2API 网关本体 — AI 路由网关与 Agent 客户端接管（桌面端与 headless 服务器共用）"
 authors = ["Agent2API"]
 edition = "2021"
@@ -126,6 +126,10 @@ bytes = "1"
 # CatPaw 适配器的内联图片压缩（providers/catpaw/image_compress.rs）
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 base64 = "0.22"
+# 本地隐私脱敏：离线校验钱包私钥格式与邮箱顶级域名，不联网、不导出密钥。
+bs58 = { version = "0.5", features = ["check"] }
+data-encoding = "2"
+psl = "2"
 # Qoder 网页登录的 PKCE verifier / nonce
 getrandom = "0.2"
 # P-256 密钥（两家共用一份依赖）：

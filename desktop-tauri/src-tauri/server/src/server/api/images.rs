@@ -308,11 +308,19 @@ pub async fn generations(
 ) -> Response {
     let started_at = logging::now_ms();
     let source = pipeline::request_source(&headers, key_identity);
+    if crate::server::config::current().privacy_settings().settings.enabled {
+        let error = GatewayError::bad_request(
+            "隐私脱敏已开启，图片生成接口不支持本地脱敏，未转发",
+        )
+        .with_code("privacy_unsupported_endpoint");
+        pipeline::record_early_failure(&state, started_at, "", "", "images", &source, &error);
+        return error.payload_response();
+    }
     let payload = match serde_json::from_slice::<Value>(&body) {
         Ok(payload) => payload,
         Err(_) => {
             let error = GatewayError::bad_request("请求体必须是有效 JSON 对象");
-            pipeline::record_early_failure(&state, started_at, "", "", &source, &error);
+            pipeline::record_early_failure(&state, started_at, "", "", "images", &source, &error);
             return error.payload_response();
         }
     };
@@ -344,10 +352,18 @@ pub async fn edits(
 ) -> Response {
     let started_at = logging::now_ms();
     let source = pipeline::request_source(&headers, key_identity);
+    if crate::server::config::current().privacy_settings().settings.enabled {
+        let error = GatewayError::bad_request(
+            "隐私脱敏已开启，图片编辑接口不支持本地脱敏，未转发",
+        )
+        .with_code("privacy_unsupported_endpoint");
+        pipeline::record_early_failure(&state, started_at, "", "", "images", &source, &error);
+        return error.payload_response();
+    }
     let payload = match super::image_input::parse(request, &state).await {
         Ok(payload) => payload,
         Err(error) => {
-            pipeline::record_early_failure(&state, started_at, "", "", &source, &error);
+            pipeline::record_early_failure(&state, started_at, "", "", "images", &source, &error);
             return error.payload_response();
         }
     };
@@ -440,7 +456,7 @@ pub(super) async fn execute_with_telemetry(
     let model = match resolved {
         Ok(model) => model,
         Err(error) => {
-            pipeline::record_early_failure(state, started_at, &client_model, "", &source, &error);
+            pipeline::record_early_failure(state, started_at, &client_model, "", "images", &source, &error);
             return Err(error);
         }
     };
@@ -452,7 +468,7 @@ pub(super) async fn execute_with_telemetry(
     }
     if operation == image_models::ImageOperation::Edit {
         if let Err(error) = super::image_input::prepare(&mut payload).await {
-            pipeline::record_early_failure(state, started_at, &client_model, "", &source, &error);
+            pipeline::record_early_failure(state, started_at, &client_model, "", "images", &source, &error);
             return Err(error);
         }
     }
@@ -472,6 +488,7 @@ pub(super) async fn execute_with_telemetry(
         &model,
         &client_model,
         "",
+        "images",
         &source,
         is_assistant,
     ).await;
@@ -541,6 +558,7 @@ pub(super) async fn execute_with_telemetry(
             model,
             client_model,
             client_reasoning: String::new(),
+            client_protocol: "images".to_string(),
             status,
             raw_request,
             raw_response,

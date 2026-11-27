@@ -21,17 +21,19 @@ fn full_settings() -> PrivacySettings {
         personal: true,
         ..PrivacySettings::default()
     };
-    s.categories.insert("public_ip".to_string(), true);
-    s.categories.insert("home_path".to_string(), true);
+    for (id, _, _) in PERSONAL_CATEGORIES {
+        s.categories.insert((*id).to_string(), true);
+    }
     s
 }
 
 #[test]
-fn secret_detection_and_deterministic_roundtrip() {
+fn secret_detection_weak_passwords_and_deterministic_roundtrip() {
     let compiled = CompiledPrivacySettings::compile(full_settings()).unwrap();
     let vault = PrivacyVault::ephemeral();
     let input = "OPENAI_API_KEY=sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd \
                  postgres://admin:SuperSecr3tPass@db.internal:5432/app \
+                 password=abcdefgh passwd=12345678 \
                  密码：myPass1234 密钥为 2048 位 DB_PASS=${ENV_PASS} token=toBase64Url(x)";
     let MaskTextResult::Handled {
         text: Some(masked),
@@ -43,6 +45,8 @@ fn secret_detection_and_deterministic_roundtrip() {
     };
     assert!(!masked.contains("sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd"));
     assert!(!masked.contains("SuperSecr3tPass"));
+    assert!(!masked.contains("abcdefgh"), "纯字母弱密码必须遮罩: {masked}");
+    assert!(!masked.contains("12345678"), "纯数字弱密码必须遮罩: {masked}");
     assert!(!masked.contains("myPass1234"));
     // 数量词、环境变量与函数调用不误伤
     assert!(masked.contains("2048 位"));
@@ -67,19 +71,22 @@ fn secret_detection_and_deterministic_roundtrip() {
     let ph2 = masked2.split_whitespace().nth(1).unwrap();
     assert_eq!(ph1, ph2);
 
-    // 还原应与原值一致，且大小写或花括号内空格变体也容错还原
     let (restored, restored_stats) = vault.restore_text(&masked, false);
     assert_eq!(restored, input);
     assert!(!restored_stats.is_empty());
 }
 
 #[test]
-fn personal_pii_and_false_positive_guards() {
+fn personal_pii_international_and_false_positive_guards() {
     let compiled = CompiledPrivacySettings::compile(full_settings()).unwrap();
     let vault = PrivacyVault::ephemeral();
-    let input = "Mail alice@example.com or icon@2x.png, phone 13800138000, \
-                 order_id=13912345678, id 11010519491231002X, badid 110105194912310021, \
-                 pub 8.8.8.8, priv 192.168.1.10, path /Users/alice_dev/src and /Users/root/tmp";
+    let input = "Mail alice@acme-corp.com, ignore bob@example.com or icon@2x.png, \
+                 phone 13800138000, order_id=13912345678, \
+                 id 11010519491231002X, badid 110105194912310021, nonleap 110105202302290024, \
+                 pub 198.51.101.25, dns 8.8.8.8, priv 192.168.1.10, \
+                 path /Users/alice_dev/src and /Users/root/tmp, \
+                 mac aa:bb:cc:dd:ee:01, iban DE89 3704 0044 0532 0130 00, \
+                 bucket s3://prod-finance-ledger/report.csv";
     let MaskTextResult::Handled {
         text: Some(masked),
         ..
@@ -87,19 +94,152 @@ fn personal_pii_and_false_positive_guards() {
     else {
         panic!("expected pii mask");
     };
-    assert!(!masked.contains("alice@example.com"));
+    assert!(!masked.contains("alice@acme-corp.com"));
+    assert!(masked.contains("bob@example.com"), "示例域名不应误遮");
     assert!(masked.contains("icon@2x.png"));
     assert!(!masked.contains("13800138000"));
-    assert!(masked.contains("13912345678")); // 订单号上下文跳过
-    assert!(!masked.contains("11010519491231002X")); // 合法校验位身份证
-    assert!(masked.contains("110105194912310021")); // 非法校验位跳过
-    assert!(!masked.contains("8.8.8.8"));
-    assert!(masked.contains("192.168.1.10")); // 私网 IP 跳过
+    assert!(masked.contains("13912345678"));
+    assert!(!masked.contains("11010519491231002X"));
+    assert!(masked.contains("110105194912310021"));
+    assert!(masked.contains("110105202302290024"), "非闰年 2 月 29 日不应误判为身份证");
+    assert!(!masked.contains("198.51.101.25"));
+    assert!(masked.contains("8.8.8.8"), "公共 DNS 不应误遮");
+    assert!(masked.contains("192.168.1.10"));
     assert!(!masked.contains("alice_dev"));
-    assert!(masked.contains("/Users/root/tmp")); // 通用系统名跳过
+    assert!(masked.contains("/Users/root/tmp"));
+    assert!(!masked.contains("aa:bb:cc:dd:ee:01"));
+    assert!(!masked.contains("DE89 3704 0044 0532 0130 00"));
+    assert!(!masked.contains("prod-finance-ledger"));
 
     let (restored, _) = vault.restore_text(&masked, false);
     assert_eq!(restored, input);
+}
+
+#[test]
+fn wallet_seed_phrase_and_date_variants_and_overlap_merge() {
+    let mut s = full_settings();
+    s.words = vec!["1990-05-20".to_string(), "lp-example".to_string()];
+    let compiled = CompiledPrivacySettings::compile(s).unwrap();
+    let vault = PrivacyVault::ephemeral();
+
+    let key = concat!("sk-", "lp-example", "ABC123def456GHI789");
+    let mnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+    let text = format!(
+        "recovery phrase: {mnemonic}\nbirth: 1990年5月20日 and May 20, 1990 and 19900520\nkey: {key}"
+    );
+    let MaskTextResult::Handled {
+        text: Some(masked),
+        ..
+    } = mask_text(&text, &compiled, &vault)
+    else {
+        panic!("expected wallet & date variants masked");
+    };
+    assert!(!masked.contains("abandon ability"));
+    assert!(!masked.contains("1990年5月20日"));
+    assert!(!masked.contains("May 20, 1990"));
+    assert!(!masked.contains("19900520"));
+    // 重叠命中必须合并区间，不得暴露密钥剩余部分
+    assert!(!masked.contains("ABC123def456GHI789"));
+    assert!(!masked.contains("lp-example"));
+
+    let (restored, _) = vault.restore_text(&masked, false);
+    assert_eq!(restored, text);
+}
+
+#[test]
+fn tool_json_secret_fields_and_structured_json_output_restore() {
+    let mut s = full_settings();
+    s.words = vec!["A\"B\nC".to_string()];
+    let compiled = CompiledPrivacySettings::compile(s).unwrap();
+    let vault = PrivacyVault::ephemeral();
+
+    let req = json!({
+        "model": "gpt-4.1",
+        "response_format": { "type": "json_object" },
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "login",
+                        "arguments": "{\"password\":\"abc\",\"max_tokens\":100,\"public_key\":\"pk_pub_visible\",\"note\":\"A\\\"B\\nC\"}"
+                    }
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "{\"api_key\":\"tiny\",\"page_token\":\"0123456789abcdef0123456789abcdef\"}"
+            }
+        ]
+    });
+
+    assert!(request_expects_json_output(&req, WireProtocol::Chat));
+    let PrivacyBodyOutcome::Masked { body: masked, .. } = mask_chat_body(&req, &compiled, &vault)
+    else {
+        panic!("expected tool json masked");
+    };
+    let args_str = masked["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    let args_json: serde_json::Value = serde_json::from_str(args_str).unwrap();
+    assert_ne!(args_json["password"], "abc", "短密码字段必须整值遮罩");
+    assert_eq!(args_json["max_tokens"], 100);
+    assert_eq!(args_json["public_key"], "pk_pub_visible", "public_key 不应误遮");
+
+    let tool_out = masked["messages"][1]["content"].as_str().unwrap();
+    let tool_json: serde_json::Value = serde_json::from_str(tool_out).unwrap();
+    assert_ne!(tool_json["api_key"], "tiny", "短 api_key 字段必须整值遮罩");
+    assert_eq!(
+        tool_json["page_token"], "0123456789abcdef0123456789abcdef",
+        "分页游标不应误遮"
+    );
+
+    // 模拟模型在 JSON 输出模式下返回带占位符的 JSON，原值含双引号与换行，还原后仍须是合法 JSON
+    let note_ph = args_json["note"].as_str().unwrap();
+    let mut resp = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": format!("{{\"secret\":{}}}", serde_json::to_string(note_ph).unwrap())
+            }
+        }]
+    });
+    let restored_stats = unmask_json_response_with_mode(&mut resp, WireProtocol::Chat, &vault, true);
+    assert!(!restored_stats.is_empty());
+    let content = resp["choices"][0]["message"]["content"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(content).expect("还原后必须仍是合法 JSON");
+    assert_eq!(parsed["secret"], "A\"B\nC");
+}
+
+#[test]
+fn ephemeral_opaque_vault_isolates_requests_and_hides_kind() {
+    let mut s = full_settings();
+    s.ephemeral_placeholders = true;
+    let compiled = CompiledPrivacySettings::compile(s).unwrap();
+    let v1 = PrivacyVault::ephemeral_opaque();
+    let v2 = PrivacyVault::ephemeral_opaque();
+
+    let input = "mail alice@acme-corp.com";
+    let MaskTextResult::Handled {
+        text: Some(m1), ..
+    } = mask_text(input, &compiled, &v1)
+    else {
+        panic!("expected m1");
+    };
+    let MaskTextResult::Handled {
+        text: Some(m2), ..
+    } = mask_text(input, &compiled, &v2)
+    else {
+        panic!("expected m2");
+    };
+    assert!(m1.contains("{{A2A_"));
+    assert!(!m1.contains("EMAIL"), "不透明占位符不得暴露类型");
+    assert_ne!(m1, m2, "不同请求占位符必须隔离");
+    assert_eq!(v1.restore_text(&m1, false).0, input);
+    assert_eq!(v2.restore_text(&m1, false).0, m1, "跨请求保险库不得还原旧请求占位符");
 }
 
 #[test]
@@ -156,7 +296,7 @@ fn words_custom_rules_allowlist_and_block_mode() {
 }
 
 #[test]
-fn native_anthropic_preserves_signed_thinking_blocks() {
+fn native_anthropic_preserves_signed_thinking_blocks_and_debug_redaction() {
     let compiled = CompiledPrivacySettings::compile(full_settings()).unwrap();
     let vault = PrivacyVault::ephemeral();
     let body = json!({
@@ -177,7 +317,6 @@ fn native_anthropic_preserves_signed_thinking_blocks() {
     else {
         panic!("expected native body masked");
     };
-    // 签名思考块必须一字不动
     assert_eq!(
         next["messages"][0]["content"][0]["thinking"],
         "sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd"
@@ -186,6 +325,14 @@ fn native_anthropic_preserves_signed_thinking_blocks() {
         next["messages"][0]["content"][1]["text"],
         "Use sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd"
     );
+
+    let raw_bytes = serde_json::to_vec(&json!({
+        "messages": [{ "role": "user", "content": "password=mysecretpass" }]
+    }))
+    .unwrap();
+    let safe_bytes = redact_debug_body(&raw_bytes, "/v1/chat/completions", &compiled);
+    let safe_text = String::from_utf8(safe_bytes).unwrap();
+    assert!(!safe_text.contains("mysecretpass"), "调试落盘不得保留明文密码");
 }
 
 #[test]
@@ -208,32 +355,29 @@ fn stream_channel_restorer_handles_split_chunks_and_json_escape() {
 }
 
 #[tokio::test]
-async fn unmask_outcome_restores_chat_and_anthropic_sse() {
-    let vault = PrivacyVault::global();
-    let ph = vault.mint("EMAIL", "sse_test_user@example.com");
+async fn unmask_outcome_restores_bom_cr_opaque_and_anthropic_sse() {
+    // 1. 单次随机隐藏类型占位符 + 首帧 UTF-8 BOM + 单独 \r 换行 + JSON 输出模式转义
+    let vault = RequestVault::ephemeral_opaque();
+    let ph = vault.mint("TERM", "A\"B\nC");
     let mid = ph.len() / 2;
     let c1 = format!(
-        "data: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"hi {}\"}}}}]}}\n\n",
+        "\u{feff}: keepalive\r\rdata: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{{\\\"v\\\":\\\"{}\"}}}}]}}\r\r",
         &ph[..mid]
     );
     let c2 = format!(
-        "data: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}!\"}}}}]}}\n\n",
+        "data: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\\\"}}\"}}}}]}}\r\rdata: [DONE]\r\r",
         &ph[mid..]
     );
-    let c3 = "data: [DONE]\n\n".to_string();
-
     let telemetry = Arc::new(RequestTelemetry::new());
-    let s = stream::iter(vec![
-        Ok(Bytes::from(c1)),
-        Ok(Bytes::from(c2)),
-        Ok(Bytes::from(c3)),
-    ]);
-    let outcome = unmask_outcome(
+    let s = stream::iter(vec![Ok(Bytes::from(c1)), Ok(Bytes::from(c2))]);
+    let outcome = unmask_outcome_with_options(
         ForwardOutcome::Stream {
             status: 200,
             stream: Box::new(s),
         },
         telemetry.clone(),
+        vault,
+        true,
     );
     let ForwardOutcome::Stream { mut stream, .. } = outcome else {
         panic!("expected stream");
@@ -242,66 +386,57 @@ async fn unmask_outcome_restores_chat_and_anthropic_sse() {
     while let Some(item) = stream.next().await {
         joined.push_str(std::str::from_utf8(&item.unwrap()).unwrap());
     }
-    assert!(joined.contains("sse_test_user@example.com!"));
+    assert!(joined.starts_with('\u{feff}'));
+    assert!(joined.contains(": keepalive"));
     assert!(!joined.contains(&ph));
-    let snap = telemetry.snapshot();
-    assert_eq!(snap.privacy_hits.first().map(|h| h.restored), Some(1));
-
-    // Anthropic 原生 SSE 流（含 input_json_delta 转义与 content_block_stop 冲刷）
-    let ph_key = vault.mint("API_KEY", "sk-line\"1\n2");
-    let kmid = ph_key.len() / 2;
-    let a1 = format!(
-        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{{\\\"k\\\":\\\"{}\"}}}}\n\n",
-        &ph_key[..kmid]
-    );
-    let a2 = format!(
-        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{}\\\"}}\"}}}}\n\n",
-        &ph_key[kmid..]
-    );
-    let a3 = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n".to_string();
-    let a4 = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string();
-
-    let t2 = Arc::new(RequestTelemetry::new());
-    let native_outcome = unmask_outcome(
-        ForwardOutcome::Native(NativeResponse {
-            protocol: WireProtocol::Anthropic,
-            status: 200,
-            headers: Default::default(),
-            body: NativeBody::Stream(Box::new(stream::iter(vec![
-                Ok(Bytes::from(a1)),
-                Ok(Bytes::from(a2)),
-                Ok(Bytes::from(a3)),
-                Ok(Bytes::from(a4)),
-            ]))),
-        }),
-        t2,
-    );
-    let ForwardOutcome::Native(NativeResponse {
-        body: NativeBody::Stream(mut nstream),
-        ..
-    }) = native_outcome
-    else {
-        panic!("expected native stream");
-    };
-    let mut nj = String::new();
-    let mut partial_json = String::new();
-    while let Some(item) = nstream.next().await {
-        let chunk = std::str::from_utf8(&item.unwrap()).unwrap().to_string();
-        for line in chunk.lines() {
-            if let Some(raw) = line.strip_prefix("data: ") {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
-                    if let Some(p) = val
-                        .pointer("/delta/partial_json")
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        partial_json.push_str(p);
-                    }
+    // 把两个 delta.content 拼起来，验证还原后仍是合法 JSON
+    let mut content_joined = String::new();
+    for line in joined.split('\r') {
+        if let Some(payload) = line.strip_prefix("data: ") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                if let Some(piece) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str()) {
+                    content_joined.push_str(piece);
                 }
             }
         }
-        nj.push_str(&chunk);
     }
-    let parsed: serde_json::Value = serde_json::from_str(&partial_json).unwrap();
-    assert_eq!(parsed["k"], "sk-line\"1\n2");
-    assert!(!nj.contains(&ph_key));
+    let parsed: serde_json::Value = serde_json::from_str(&content_joined).expect("流式 JSON 输出必须合法");
+    assert_eq!(parsed["v"], "A\"B\nC");
+    assert_eq!(telemetry.snapshot().privacy_hits.first().map(|h| h.restored), Some(1));
+
+    // 2. Anthropic 原生 SSE 流（含 input_json_delta 转义与 content_block_stop 冲刷）
+    let global_vault = RequestVault::global();
+    let ph2 = global_vault.mint("API_KEY", "sk-live-secret\"value");
+    let cut = ph2.len() / 2;
+    let a1 = format!(
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{{\\\"k\\\":\\\"{}\"}}}}\n\n",
+        &ph2[..cut]
+    );
+    let a2 = format!(
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{}\\\"}}\"}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+        &ph2[cut..]
+    );
+    let telemetry2 = Arc::new(RequestTelemetry::new());
+    let native = ForwardOutcome::Native(NativeResponse {
+        protocol: WireProtocol::Anthropic,
+        status: 200,
+        headers: axum::http::HeaderMap::new(),
+        body: NativeBody::Stream(Box::new(stream::iter(vec![
+            Ok(Bytes::from(a1)),
+            Ok(Bytes::from(a2)),
+        ]))),
+    });
+    let ForwardOutcome::Native(NativeResponse {
+        body: NativeBody::Stream(mut nstream),
+        ..
+    }) = unmask_outcome_with_options(native, telemetry2.clone(), global_vault, false)
+    else {
+        panic!("expected native stream");
+    };
+    let mut njoined = String::new();
+    while let Some(item) = nstream.next().await {
+        njoined.push_str(std::str::from_utf8(&item.unwrap()).unwrap());
+    }
+    assert!(njoined.contains("sk-live-secret"));
+    assert!(!njoined.contains(&ph2));
 }

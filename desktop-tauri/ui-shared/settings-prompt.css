@@ -38,7 +38,7 @@
 .sp-editor-label { flex: none; min-width: 38px; color: var(--ui-text-2); font-size: 12px; font-weight: 500; }
 .sp-mode-hint { flex: 1; min-width: 0; color: var(--ui-muted-foreground); font-size: 11.5px; text-align: right; }
 .sp-conditions { display: flex; flex-direction: column; gap: 7px; }
-.sp-condition-row { display: grid; align-items: center; grid-template-columns: 106px 110px minmax(0, 1fr) 26px; gap: 7px; }
+.sp-condition-row { display: grid; align-items: center; grid-template-columns: 116px 110px minmax(0, 1fr) 26px; gap: 7px; }
 .sp-condition-row > * { width: 100%; min-width: 0; }
 .sp-condition-row > button:last-child { width: 26px; color: var(--ui-muted-foreground); }
 .sp-add-condition { align-self: flex-start; margin-top: 1px; }
@@ -55,10 +55,11 @@
 .sp-tester-head { padding: 10px 14px; }
 .sp-tester-head h3 { font-size: 12.5px; }
 .sp-tester-body { display: flex; flex-direction: column; gap: 9px; padding: 12px 14px; }
-.sp-tester-inputs { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) minmax(0, 1.6fr); gap: 8px; }
+.sp-tester-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .sp-tester-inputs > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .sp-tester-inputs label { color: var(--ui-muted-foreground); font-size: 11.5px; font-weight: 400; }
-.sp-tester-result { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 5px 10px; border: 1px solid var(--ui-hairline); border-radius: var(--radius-sm); background: var(--ui-surface-inset); }
+.sp-tester-result { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 36px; padding: 5px 10px; border: 1px solid var(--ui-hairline); border-radius: var(--radius-sm); background: var(--ui-surface-inset); }
+.sp-tester-upstream { max-width: 260px; overflow: hidden; color: var(--ui-muted-foreground); font-family: var(--ui-font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .sp-match-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ui-primary); }
 .sp-match-dot.is-fallback { background: var(--ui-muted-foreground); }
 .sp-match-name { min-width: 0; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
@@ -117,7 +118,6 @@
   .sp-fallback-title { flex-basis: calc(100% - 50px); }
   .sp-fallback > .sp-muted { flex-basis: 100%; }
   .sp-tester-inputs { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .sp-tester-inputs > div:last-child { grid-column: 1 / -1; }
   .sp-tester-result { flex-wrap: wrap; }
   .sp-degrade { align-items: flex-start; }
   .sp-body-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }

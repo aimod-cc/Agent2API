@@ -20,6 +20,7 @@ pub(super) struct Entry {
     pub repository_url: Option<String>,
     pub stars: Option<u64>,
     pub stars_at: i64,
+    pub downloads: u64,
     pub icon_sources: Vec<String>,
     pub kind: String,
     pub installable: bool,
@@ -43,7 +44,7 @@ impl Entry {
             "publisher": self.publisher, "magpieOfficial": self.publisher == "official",
             "magpieRecommended": self.publisher == "recommended", "summary": self.summary,
             "repository": self.repository, "repositoryUrl": self.repository_url,
-            "stars": self.stars, "starsAt": self.stars_at, "kind": self.kind,
+            "stars": self.stars, "starsAt": self.stars_at, "downloads": self.downloads, "kind": self.kind,
             "installable": self.installable, "unavailableReason": self.unavailable_reason,
             "providerVerified": self.is_provider(),
         })

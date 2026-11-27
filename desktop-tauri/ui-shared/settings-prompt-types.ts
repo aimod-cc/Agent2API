@@ -1,7 +1,7 @@
 import type { Translate } from './assistant-read-types'
 
 export type PromptMode = 'passthrough' | 'custom' | 'append'
-export type PromptField = 'provider' | 'client' | 'model'
+export type PromptField = 'provider' | 'client' | 'model' | 'upstream_model'
 export type PromptOperator = 'is' | 'is_not' | 'contains' | 'not_contains' | 'glob' | 'regex'
 export type PromptLogic = 'all' | 'any'
 export type GatewayBlocks = { identity: string; stable: string; dynamic: string }
@@ -42,6 +42,7 @@ export type PromptView = {
   providers: PromptProviderOption[]
   clients: PromptOption[]
   models: string[]
+  upstreamModels?: string[]
   maxRules: number
   maxConditions: number
   maxValues: number
@@ -52,8 +53,8 @@ export type PromptView = {
   gateway: Record<string, boolean>
   gatewayText: Record<string, Partial<GatewayBlocks>>
 }
-export type PromptSample = { provider: string; client: string; model: string }
-export type PromptPreview = { ruleId: string | null; index: number | null; name: string | null; mode: PromptMode }
+export type PromptSample = { provider: string; client: string; model: string; upstreamModel: string }
+export type PromptPreview = { ruleId: string | null; index: number | null; name: string | null; mode: PromptMode; upstreamModel?: string }
 export type PromptApi = {
   load(): Promise<PromptView>
   save(payload: { config: PromptConfig; revision: string }): Promise<PromptView>
@@ -103,8 +104,17 @@ export function sourceLabel(content: PromptContentView, t: Translate): string {
   return content.lines ? t('{source} · {lines} 行', { source: label, lines: content.lines }) : label
 }
 
+export function isModelField(field: PromptField): boolean {
+  return field === 'model' || field === 'upstream_model'
+}
+
 export function fieldLabel(field: PromptField, t: Translate): string {
-  return field === 'provider' ? t('提供商') : field === 'client' ? t('客户端') : t('模型')
+  switch (field) {
+    case 'provider': return t('提供商')
+    case 'client': return t('客户端')
+    case 'upstream_model': return t('上游模型')
+    default: return t('请求模型')
+  }
 }
 
 export function operatorLabel(op: PromptOperator, t: Translate): string {
@@ -120,7 +130,7 @@ export function operatorLabel(op: PromptOperator, t: Translate): string {
 
 export function conditionText(condition: PromptCondition, view: PromptView, t: Translate): string {
   const options = condition.field === 'provider' ? view.providers : view.clients
-  const values = condition.field === 'model' ? condition.values : condition.values.map(value =>
+  const values = isModelField(condition.field) ? condition.values : condition.values.map(value =>
     options.find(option => option.id === value)?.label || value)
   return t('{field} {operator} {value}', {
     field: fieldLabel(condition.field, t), operator: operatorLabel(condition.op, t), value: values.join('、') || '…',
@@ -128,7 +138,7 @@ export function conditionText(condition: PromptCondition, view: PromptView, t: T
 }
 
 export function operators(field: PromptField): PromptOperator[] {
-  return field === 'model' ? ['is', 'is_not', 'contains', 'not_contains', 'glob', 'regex'] : ['is', 'is_not']
+  return isModelField(field) ? ['is', 'is_not', 'contains', 'not_contains', 'glob', 'regex'] : ['is', 'is_not']
 }
 
 export function uid(prefix: string): string {

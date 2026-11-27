@@ -99,7 +99,7 @@ impl Context {
         match method {
             "protocol.request" => {
                 fields(params, &["protocol", "body", "model"], &[])?;
-                protocol(params, false)?;
+                let target_protocol = protocol(params, false)?.to_string();
                 text(params, "model", 512)?;
                 let body = &params["body"];
                 if !body.is_object() || ["messages", "tools"].iter().any(|key|
@@ -111,11 +111,12 @@ impl Context {
                     .map_err(|_| bad_params("请求协议转换失败，请检查消息与工具格式"))?;
                 if !result.is_object() { return Err(super::error("请求协议转换未返回对象")); }
                 json_size(&result)?;
+                self.note_upstream_protocol(&target_protocol, true);
                 Ok(result)
             }
             "protocol.open" => {
                 fields(params, &["protocol", "model"], &["session"])?;
-                let protocol = protocol(params, true)?;
+                let protocol = protocol(params, true)?.to_string();
                 let model = text(params, "model", 512)?;
                 let session = if params.get("session").is_some() { text(params, "session", 1024)? } else { self.session.as_str() };
                 if self.converters.len() >= MAX_CONVERTERS {
@@ -135,6 +136,7 @@ impl Context {
                 let converter = Conversion { id: id.clone(), line: Vec::new(), event_bytes: 0, total_bytes: 0 };
                 if value["id"].as_str() != Some(id.as_str()) { return Err(super::error("协议转换句柄无效")); }
                 self.converters.insert(id.clone(), converter);
+                self.note_upstream_protocol(&protocol, true);
                 Ok(json!({ "id": id }))
             }
             "protocol.push" | "protocol.close" => {

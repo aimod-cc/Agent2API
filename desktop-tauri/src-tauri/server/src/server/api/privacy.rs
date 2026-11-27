@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::response::Response;
 use serde_json::{json, Map, Value};
 
-use crate::server::config;
+use crate::server::config::{self, PrivacySaveError};
 use crate::server::core::privacy::{
     self, CompiledPrivacySettings, PrivacyAction, PrivacyCustomRule, PrivacyProviderMode,
     PrivacySettings, PrivacyVault,
@@ -21,7 +21,8 @@ use crate::server::ServerState;
 pub async fn get_privacy(State(_state): State<ServerState>) -> Response {
     let snapshot = config::current();
     let compiled = snapshot.privacy_settings();
-    ok_json(privacy_json(&compiled, true))
+    let revision = snapshot.privacy_revision();
+    ok_json(privacy_json(&compiled, revision, true))
 }
 
 pub async fn put_privacy(State(_state): State<ServerState>, body: Bytes) -> Response {
@@ -29,8 +30,23 @@ pub async fn put_privacy(State(_state): State<ServerState>, body: Bytes) -> Resp
         Ok(value) => value,
         Err(error) => return errors::management_error(400, error.message),
     };
-    let Some(object) = payload.as_object() else {
+    let Some(mut object) = payload.as_object().cloned() else {
         return errors::management_error(400, "请求体必须是 JSON 对象");
+    };
+    let expected_revision = match object.remove("revision") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(rev)) => {
+            if rev.len() != 64 || !rev.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return errors::management_error(
+                    400,
+                    "隐私脱敏设置版本指纹无效，请刷新后再保存",
+                );
+            }
+            Some(rev)
+        }
+        Some(_) => {
+            return errors::management_error(400, "revision 必须是字符串");
+        }
     };
     if object.is_empty() {
         return errors::management_error(400, "请提供至少一项需要修改的隐私脱敏设置");
@@ -38,19 +54,32 @@ pub async fn put_privacy(State(_state): State<ServerState>, body: Bytes) -> Resp
 
     let current = config::current().privacy_settings();
     let was_enabled = current.settings.enabled;
-    let next_settings = match merge_settings(&current.settings, object, true) {
+    let next_settings = match merge_settings(&current.settings, &object, true) {
         Ok(settings) => settings,
         Err(message) => return errors::management_error(400, message),
     };
 
-    let (saved, compiled) = match config::set_privacy_settings(next_settings) {
-        Ok(res) => res,
-        Err(message) => return errors::management_error(400, message),
-    };
+    let (compiled, revision) =
+        match config::save_privacy_settings(next_settings, expected_revision.as_deref()) {
+            Ok(res) => res,
+            Err(PrivacySaveError::Invalid(message)) => {
+                return errors::management_error(400, message);
+            }
+            Err(PrivacySaveError::Conflict) => {
+                return errors::management_error(
+                    409,
+                    "本地隐私脱敏设置已在其他位置修改，请刷新后再保存；当前草稿未丢失",
+                );
+            }
+            Err(PrivacySaveError::Storage) => {
+                logging::log("[Config]", "⚠️  隐私脱敏设置写入数据库失败");
+                return errors::management_error(
+                    500,
+                    "隐私脱敏设置未能持久化，请检查配置目录",
+                );
+            }
+        };
 
-    if !saved {
-        logging::log("[Config]", "⚠️  隐私脱敏设置写入失败，本次运行内仍生效");
-    }
     if compiled.settings.enabled != was_enabled {
         logging::log(
             "[Config]",
@@ -64,7 +93,7 @@ pub async fn put_privacy(State(_state): State<ServerState>, body: Bytes) -> Resp
         logging::log("[Config]", "隐私脱敏设置已更新");
     }
 
-    ok_json(privacy_json(&compiled, saved))
+    ok_json(privacy_json(&compiled, &revision, true))
 }
 
 pub async fn test_privacy(State(_state): State<ServerState>, body: Bytes) -> Response {
@@ -130,6 +159,11 @@ fn merge_settings(
         next.reversible = val
             .as_bool()
             .ok_or_else(|| "reversible 必须是 true 或 false".to_string())?;
+    }
+    if let Some(val) = patch.get("ephemeralPlaceholders") {
+        next.ephemeral_placeholders = val
+            .as_bool()
+            .ok_or_else(|| "ephemeralPlaceholders 必须是 true 或 false".to_string())?;
     }
     if let Some(val) = patch.get("action") {
         next.action = serde_json::from_value::<PrivacyAction>(val.clone())
@@ -234,7 +268,7 @@ fn parse_providers(
     Ok(selected)
 }
 
-fn privacy_json(compiled: &CompiledPrivacySettings, saved: bool) -> Value {
+fn privacy_json(compiled: &CompiledPrivacySettings, revision: &str, saved: bool) -> Value {
     let settings = &compiled.settings;
     let mut options = providers::summary_json(|_| 0, &[]);
     options.extend(custom_providers::summary_json(|_| 0));
@@ -249,6 +283,7 @@ fn privacy_json(compiled: &CompiledPrivacySettings, saved: bool) -> Value {
     json!({
         "enabled": settings.enabled,
         "reversible": settings.reversible,
+        "ephemeralPlaceholders": settings.ephemeral_placeholders,
         "action": settings.action,
         "secrets": settings.secrets,
         "personal": settings.personal,
@@ -264,6 +299,7 @@ fn privacy_json(compiled: &CompiledPrivacySettings, saved: bool) -> Value {
         "providerOptions": options,
         "categoryOptions": privacy::category_catalog(),
         "vaultEntries": PrivacyVault::global().stats(),
+        "revision": revision,
         "saved": saved,
         "limits": {
             "maxWords": privacy::MAX_WORDS,

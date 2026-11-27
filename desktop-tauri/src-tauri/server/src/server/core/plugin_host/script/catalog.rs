@@ -47,7 +47,7 @@ pub(super) fn package_metadata(package: &Package) -> Value {
     };
     json!({ "publisher": "third-party", "magpieOfficial": false, "magpieRecommended": false,
         "repositoryUrl": repository.as_ref().map(|repo| format!("https://github.com/{repo}")),
-        "repository": repository, "stars": Value::Null, "starsAt": 0 })
+        "repository": repository, "stars": Value::Null, "starsAt": 0, "downloads": 0 })
 }
 
 pub(super) fn package_name(package: &Package, _names: &std::collections::BTreeMap<String, String>) -> String {

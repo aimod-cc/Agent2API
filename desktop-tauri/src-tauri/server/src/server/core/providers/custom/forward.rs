@@ -80,6 +80,7 @@ pub(crate) async fn forward(
             ));
         }
     };
+    telemetry.note_upstream_protocol(protocol);
     if account_id.trim().is_empty() {
         return Err(GatewayError::with_status(
             503,

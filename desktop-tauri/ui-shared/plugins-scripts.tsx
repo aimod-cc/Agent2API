@@ -187,7 +187,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
             const item = entry.value
             const unavailable = item.installable === false ? scriptUnavailableReason(item, t) : ''
             return <PluginStoreCard key={`recommended:${recommendationKey(item)}`} t={t} name={item.label}
-              description={recommendedDescription(item, t)} version={item.version}
+              description={recommendedDescription(item, t)} version={item.version} downloads={item.downloads}
               onDetails={() => { setSettingsId(null); setDetailsRecommendation(item) }}
               highlightedSource={scriptOfficialBadge(item)} sourceLabel={scriptSourceLabel(item, t)}
               icon={iconUrl(item.icon)} status='missing' providerCount={item.providers.length > 1 ? item.providers.length : undefined}
@@ -203,7 +203,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
           const update = scriptUpdate(state, pack.id)
           const showDiagnostics = pack.enabled && (pluginFailed(startup) || startup?.phase === 'blocked' || (!startup && pack.error))
           return <PluginStoreCard key={`installed:${pack.id}`} t={t} name={name} description={scriptPluginDescription(pack, recommended, t)}
-            version={pack.version} icon={iconUrl(pack.icon)} highlightedSource={scriptOfficialBadge(pack)} sourceLabel={scriptSourceLabel(pack, t)}
+            version={pack.version} downloads={pack.downloads} icon={iconUrl(pack.icon)} highlightedSource={scriptOfficialBadge(pack)} sourceLabel={scriptSourceLabel(pack, t)}
             badges={update ? <Badge variant='warning' shape='tag'>{updateLabel(update, t)}</Badge> : undefined}
             metadata={<ScriptRepository item={pack} onOpenExternal={onOpenExternal} t={t} />}
             status={!pack.enabled ? 'disabled' : pack.running && !pack.error ? 'running' : 'unavailable'} startup={startup}
@@ -240,6 +240,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
       </Empty></Card> : null}
     </section> : null}
     {detailsItem ? <PluginDetailsDialog name={detailsItem.label} version={detailsItem.version} sourceLabel={scriptSourceLabel(detailsItem, t)}
+      downloads={detailsItem.downloads}
       description={recommendedDescription(detailsItem, t)} icon={iconUrl(detailsItem.icon)} t={t} onClose={() => setDetailsRecommendation(null)}
       metadata={<>
         <ScriptRepository item={detailsItem} onOpenExternal={onOpenExternal} t={t} />

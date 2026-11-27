@@ -111,6 +111,8 @@ pub struct Context {
     pub trace: Value,
     pub sink: Option<Sink>,
     pub head_sent: bool,
+    pub(super) upstream_protocol_explicit: bool,
+    pub(super) upstream_protocol_noted: bool,
     pub resources: HashMap<String, &'static str>,
     pub(super) http_handles: HashMap<String, super::super::script::HttpHandle>,
     pub(super) converters: HashMap<String, super::protocol::Conversion>,
@@ -136,8 +138,22 @@ impl Context {
             proxy: params.get("proxy").cloned().unwrap_or(Value::Null),
             proxy_selected: params.get("proxy").is_some(), system_proxy_when_unset, user_agent: None,
             trace: params.get("plugin_trace").cloned().unwrap_or(Value::Null),
-            sink, head_sent: false, resources: HashMap::new(), http_handles: HashMap::new(), converters: HashMap::new(),
+            sink, head_sent: false, upstream_protocol_explicit: false, upstream_protocol_noted: false,
+            resources: HashMap::new(), http_handles: HashMap::new(), converters: HashMap::new(),
             blobs: Default::default(), progress: Default::default(), guards: HashMap::new(), calls: 0, spin_calls: 0,
+        }
+    }
+
+    pub(super) fn note_upstream_protocol(&mut self, protocol: &str, explicit: bool) {
+        if !explicit && self.upstream_protocol_explicit {
+            return;
+        }
+        if let Some(conversation) = &self.conversation {
+            conversation.note_upstream_protocol(protocol);
+            self.upstream_protocol_noted = true;
+            if explicit {
+                self.upstream_protocol_explicit = true;
+            }
         }
     }
 }

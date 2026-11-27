@@ -37,17 +37,37 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use serde_json::{json, Value};
 
-use crate::server::core::api_keys;
+use crate::server::core::{api_keys, key_usage};
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
 use crate::server::ServerState;
 
+fn entry_json(
+    entry: &api_keys::ApiKeyEntry,
+    bounds: key_usage::PeriodBounds,
+    snapshots: &std::collections::HashMap<String, key_usage::KeyUsageSnapshot>,
+) -> Value {
+    let mut item = entry.public_json();
+    let usage = snapshots
+        .get(&entry.id)
+        .map(|snap| snap.to_json(entry.usage_limit.as_ref()))
+        .unwrap_or_else(|| key_usage::KeyUsageSnapshot::empty(bounds).to_json(entry.usage_limit.as_ref()));
+    if let Some(map) = item.as_object_mut() {
+        map.insert("usage".to_string(), usage);
+    }
+    item
+}
+
 fn list_json(state: &ServerState) -> Value {
     let entries = api_keys::list();
     let usable_key_count = entries.iter().filter(|entry| entry.is_usable()).count()
         + usize::from(crate::server::config::parse::env_api_key_value().is_some());
-    let keys: Vec<Value> = entries.iter().map(api_keys::ApiKeyEntry::public_json).collect();
+    let (bounds, snapshots) = key_usage::snapshots_all();
+    let keys: Vec<Value> = entries
+        .iter()
+        .map(|entry| entry_json(entry, bounds, &snapshots))
+        .collect();
     // 可用提供商多选的候选：**注册表 + 已建的自定义家**（加一家内置 provider 时
     // 这里自动多一项，前端零改动）。带上 count 让界面能显示「这家有几个账号」——
     // 用户在这里勾「允许哪几家」时，那几家有没有账号是他最需要知道的信息。
@@ -194,6 +214,19 @@ fn guard_last_active_key(entries: &[api_keys::ApiKeyEntry], target_id: &str, act
     ))
 }
 
+/// 从请求体里读取 `usageLimit`（三态：键缺失 → `Ok(None)` 不动；`null`/四项全空 → `Ok(Some(None))` 清空；
+/// 有效对象 → `Ok(Some(Some(limit)))`）。
+fn parse_usage_limit(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<Option<key_usage::KeyUsageLimit>>, Response> {
+    let Some(value) = object.get("usageLimit") else {
+        return Ok(None);
+    };
+    key_usage::KeyUsageLimit::parse_strict(value)
+        .map(Some)
+        .map_err(|message| errors::management_error(400, message))
+}
+
 /// GET /api/keys
 pub async fn list_keys(State(state): State<ServerState>) -> Response {
     ok_json(list_json(&state))
@@ -217,12 +250,22 @@ pub async fn create_key(State(state): State<ServerState>, body: Bytes) -> Respon
         Ok(value) => value.unwrap_or_default(),
         Err(response) => return response,
     };
-    match api_keys::add(name, key, allowed_providers, allowed_models) {
+    let usage_limit = match parse_usage_limit(&object) {
+        Ok(value) => value.flatten(),
+        Err(response) => return response,
+    };
+    match api_keys::add(name, key, allowed_providers, allowed_models, usage_limit) {
         Ok(entry) => {
             logging::log_with_level("[Config]", &format!("✅ 新增 API Key「{}」，客户端需带 Authorization: Bearer <key>", entry.name), "info");
             let mut payload = list_json(&state);
+            let created = payload
+                .get("keys")
+                .and_then(Value::as_array)
+                .and_then(|items| items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(entry.id.as_str())))
+                .cloned()
+                .unwrap_or_else(|| entry.public_json());
             if let Some(map) = payload.as_object_mut() {
-                map.insert("created".to_string(), entry.public_json());
+                map.insert("created".to_string(), created);
             }
             ok_json(payload)
         }
@@ -248,13 +291,17 @@ pub async fn update_key(State(state): State<ServerState>, Path(id): Path<String>
         Ok(value) => value,
         Err(response) => return response,
     };
+    let usage_limit = match parse_usage_limit(&object) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     if let Some(false) = enabled {
         // 停用受与删除同一道约束：它同样会让「启用的 Key」归零
         if let Err(response) = guard_last_active_key(&api_keys::list(), &id, "停用") {
             return response;
         }
     }
-    match api_keys::update(&id, name, enabled, allowed_providers, allowed_models) {
+    match api_keys::update(&id, name, enabled, allowed_providers, allowed_models, usage_limit) {
         Ok(entry) => {
             logging::log_with_level(
                 "[Config]",
@@ -274,9 +321,317 @@ pub async fn delete_key(State(state): State<ServerState>, Path(id): Path<String>
     }
     match api_keys::remove(&id) {
         Ok(()) => {
+            let _ = key_usage::clear_key(&id);
             logging::log("[Config]", "API Key 已删除；模型调用仍需携带启用的 Key");
             ok_json(list_json(&state))
         }
         Err(message) => errors::management_error(404, message),
+    }
+}
+
+/// POST /api/keys/{id}/reset-usage
+pub async fn reset_key_usage(State(state): State<ServerState>, Path(id): Path<String>) -> Response {
+    let Some(entry) = api_keys::list().into_iter().find(|entry| entry.id == id) else {
+        return errors::management_error(404, "Key 不存在");
+    };
+    if let Err(message) = key_usage::clear_key(&id) {
+        return errors::management_error(500, message);
+    }
+    logging::log_with_level(
+        "[Config]",
+        &format!("API Key「{}」用量已清零", if entry.name.is_empty() { &entry.id } else { &entry.name }),
+        "info",
+    );
+    ok_json(list_json(&state))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use serde_json::{json, Value};
+    use std::sync::{atomic::AtomicBool, Arc};
+    use tower::ServiceExt;
+
+    use crate::server::{
+        config,
+        core::{
+            account_store::AccountStore, auth::AuthService, auto_checkin::AutoCheckin,
+            billing::BillingService, key_usage, login::LoginService, update::UpdateManager,
+            upstream::UpstreamService,
+        },
+        db::Db,
+        http,
+        request_stats::{ApiKeyIdentity, NewRequestEntry, RequestSource, RequestStats, Retention},
+        ServerState,
+    };
+
+    async fn call_json(
+        router: &axum::Router,
+        method: Method,
+        uri: &str,
+        key: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(key) = key {
+            req = req.header("x-api-key", key);
+        }
+        let body = match body {
+            Some(v) => {
+                req = req.header("content-type", "application/json");
+                Body::from(v.to_string())
+            }
+            None => Body::empty(),
+        };
+        let resp = router
+            .clone()
+            .oneshot(req.body(body).expect("构造请求失败"))
+            .await
+            .expect("路由响应失败");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("读取响应体失败");
+        let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[test]
+    fn api_key_usage_limit_end_to_end() {
+        crate::test_support::isolated(
+            concat!(module_path!(), "::api_key_usage_limit_end_to_end"),
+            || {
+                crate::test_support::runtime().block_on(async {
+                    let dir = tempfile::tempdir().expect("创建临时目录失败");
+                    let db = Db::open(&dir.path().join("agent2api.db")).expect("打开库失败");
+                    config::init(Some(db.clone()));
+                    key_usage::install(Some(db.clone()));
+
+                    let store = AccountStore::with_db(Some(db.clone()));
+                    let auth = AuthService::new(store.clone());
+                    let billing = BillingService::new(auth.clone());
+                    let stats = Arc::new(RequestStats::with_db(Some(db.clone()), Retention::default));
+                    let state = ServerState {
+                        port: 0,
+                        panel_port: None,
+                        host: "127.0.0.1".parse().unwrap(),
+                        local_panel: false,
+                        config_dir: dir.path().to_path_buf(),
+                        ui_dir: None,
+                        ui_assets: None,
+                        login: LoginService::new(store.clone()),
+                        upstream: UpstreamService::new(store.clone(), auth.clone()),
+                        auto_checkin: AutoCheckin::new(store.clone(), billing.clone()),
+                        update: UpdateManager::new(dir.path().join("updates")),
+                        store,
+                        auth,
+                        billing,
+                        request_stats: stats.clone(),
+                        advertisements: crate::server::core::advertisements::AdvertisementCache::new(Some(db.clone())),
+                        panel_events_stop: tokio_util::sync::CancellationToken::new(),
+                        db: Some(db.clone()),
+                        upgrade_pending: Arc::new(AtomicBool::new(false)),
+                        startup_maintenance: Arc::new(AtomicBool::new(false)),
+                    };
+                    let router = http::router(state);
+
+                    // 1. 先建一把无限制的管理 Key
+                    let (st, _, res) = call_json(
+                        &router,
+                        Method::POST,
+                        "/api/keys",
+                        None,
+                        Some(json!({ "name": "管理 Key" })),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                    let admin_key = res["data"]["created"]["key"].as_str().unwrap().to_string();
+
+                    // 2. 非法用量限制应返回 400
+                    let (st, _, _) = call_json(
+                        &router,
+                        Method::POST,
+                        "/api/keys",
+                        Some(&admin_key),
+                        Some(json!({
+                            "name": "非法",
+                            "usageLimit": { "metric": "tokens", "daily": 0 }
+                        })),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+                    // 3. 创建带每日 1000 Token 限制的 Key
+                    let (st, _, res) = call_json(
+                        &router,
+                        Method::POST,
+                        "/api/keys",
+                        Some(&admin_key),
+                        Some(json!({
+                            "name": "限额 Key",
+                            "usageLimit": { "metric": "tokens", "daily": 1000 }
+                        })),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                    let created = &res["data"]["created"];
+                    let key_id = created["id"].as_str().unwrap().to_string();
+                    let limited_key = created["key"].as_str().unwrap().to_string();
+                    assert_eq!(created["usageLimit"]["metric"], "tokens");
+                    assert_eq!(created["usageLimit"]["daily"], 1000);
+                    assert_eq!(created["usage"]["exceeded"], false);
+
+                    // 4. PATCH 改名时不带 usageLimit 应原样保留限额
+                    let (st, _, res) = call_json(
+                        &router,
+                        Method::PATCH,
+                        &format!("/api/keys/{key_id}"),
+                        Some(&admin_key),
+                        Some(json!({ "name": "限额 Key v2" })),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                    let kept = res["data"]["keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["id"] == key_id)
+                        .unwrap();
+                    assert_eq!(kept["usageLimit"]["daily"], 1000);
+
+                    // 5. 带用量限制的 Key 无管理员会话不能访问管理接口（403）
+                    let (st, _, body) = call_json(
+                        &router,
+                        Method::GET,
+                        "/api/keys",
+                        Some(&limited_key),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::FORBIDDEN);
+                    assert_eq!(body["error"]["code"], "management_access_denied");
+
+                    // 6. 记入一条 1000 Token 成功请求 → 列表显示已达上限
+                    let mut entry = NewRequestEntry::new("gpt-4o", 200);
+                    entry.id = "req-smoke-1".to_string();
+                    entry.total_tokens = 1000;
+                    entry.source = RequestSource {
+                        client: "smoke".to_string(),
+                        api_key: ApiKeyIdentity {
+                            id: key_id.clone(),
+                            name: "限额 Key v2".to_string(),
+                            source: "key".to_string(),
+                        },
+                        ..Default::default()
+                    };
+                    stats.record(entry);
+
+                    let (st, _, res) = call_json(
+                        &router,
+                        Method::GET,
+                        "/api/keys",
+                        Some(&admin_key),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                    let item = res["data"]["keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["id"] == key_id)
+                        .unwrap();
+                    assert_eq!(item["usage"]["exceeded"], true);
+                    assert_eq!(item["usage"]["exceededPeriod"], "daily");
+                    assert_eq!(item["usage"]["daily"]["tokens"], 1000);
+                    assert_eq!(item["usage"]["daily"]["requests"], 1);
+
+                    // 7. 模型调用被 429 key_usage_limit_exceeded 拦下，但 /v1/models 仍 200
+                    let (st, headers, body) = call_json(
+                        &router,
+                        Method::POST,
+                        "/v1/chat/completions",
+                        Some(&limited_key),
+                        Some(json!({ "model": "gpt-4o", "messages": [] })),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+                    assert_eq!(body["error"]["code"], "key_usage_limit_exceeded");
+                    assert!(headers.contains_key("retry-after"));
+
+                    let (st, _, _) = call_json(
+                        &router,
+                        Method::GET,
+                        "/v1/models",
+                        Some(&limited_key),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+
+                    // 8. 清零用量后立即恢复，不再返回 429
+                    let (st, _, res) = call_json(
+                        &router,
+                        Method::POST,
+                        &format!("/api/keys/{key_id}/reset-usage"),
+                        Some(&admin_key),
+                        Some(json!({})),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                    let item = res["data"]["keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["id"] == key_id)
+                        .unwrap();
+                    assert_eq!(item["usage"]["exceeded"], false);
+                    assert_eq!(item["usage"]["total"]["tokens"], 0);
+
+                    let (st, _, _) = call_json(
+                        &router,
+                        Method::POST,
+                        "/v1/chat/completions",
+                        Some(&limited_key),
+                        Some(json!({ "model": "gpt-4o" })),
+                    )
+                    .await;
+                    // 已放行过用量闸门，落到参数校验（缺少 messages → 400）
+                    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+                    // 9. 清空用量限制后 usageLimit 归 null，删除 Key 顺带清理台账
+                    let (st, _, res) = call_json(
+                        &router,
+                        Method::PATCH,
+                        &format!("/api/keys/{key_id}"),
+                        Some(&admin_key),
+                        Some(json!({ "usageLimit": null })),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                    let item = res["data"]["keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["id"] == key_id)
+                        .unwrap();
+                    assert!(item["usageLimit"].is_null());
+
+                    let (st, _, _) = call_json(
+                        &router,
+                        Method::DELETE,
+                        &format!("/api/keys/{key_id}"),
+                        Some(&admin_key),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+
+                    key_usage::install(None);
+                });
+            },
+        );
     }
 }

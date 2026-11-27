@@ -3,6 +3,7 @@
 #[derive(Clone, Debug, Default)]
 pub struct ParsedGenMetadata {
     pub model: Option<String>,
+    pub reasoning: Option<String>,
     pub step_indices: Vec<(i64, i64)>,
 }
 
@@ -133,6 +134,107 @@ pub fn strip_gemini_deployment_suffix(raw: &str) -> String {
     trimmed.to_string()
 }
 
+/// 将 Antigravity 展示名称或模型后缀中的思考等级归一化为标准小写档位。
+pub fn canonical_reasoning_level(raw: &str) -> Option<&'static str> {
+    let normalized: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| !matches!(ch, ' ' | '-' | '_' | '\t'))
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    match normalized.as_str() {
+        "off" => Some("off"),
+        "none" => Some("none"),
+        "minimal" => Some("minimal"),
+        "xlow" | "extralow" => Some("xlow"),
+        "low" => Some("low"),
+        "medium" | "med" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" | "extrahigh" => Some("xhigh"),
+        "max" => Some("max"),
+        "ultra" => Some("ultra"),
+        _ => None,
+    }
+}
+
+/// 从 Antigravity 展示名称末尾括号提取思考等级（如 `Gemini 4 Neon (XHigh)` -> `("Gemini 4 Neon", Some("xhigh"))`）。
+pub fn extract_reasoning_from_display_label(raw: &str) -> (String, Option<String>) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+    let (inner_trimmed, open_char) = if let Some(rest) = trimmed.strip_suffix(')') {
+        (rest, '(')
+    } else if let Some(rest) = trimmed.strip_suffix('）') {
+        (rest, '（')
+    } else {
+        return (trimmed.to_string(), None);
+    };
+    let Some(open_pos) = inner_trimmed.rfind(open_char) else {
+        return (trimmed.to_string(), None);
+    };
+    let inside = &inner_trimmed[open_pos + open_char.len_utf8()..];
+    let Some(level) = canonical_reasoning_level(inside) else {
+        return (trimmed.to_string(), None);
+    };
+    let base = inner_trimmed[..open_pos].trim_end();
+    if base.is_empty() {
+        return (trimmed.to_string(), Some(level.to_string()));
+    }
+    (base.to_string(), Some(level.to_string()))
+}
+
+/// 拆分模型名末尾携带的思考等级后缀（如 `gemini-4-neon-xhigh` -> `("gemini-4-neon", Some("xhigh"))`）。
+/// `allow_max` 仅在展示名已明确标注 `(Max)` 时开启，避免误伤 `qwen3-max` 等本名含 `-max` 的模型。
+pub fn split_model_effort_suffix(raw: &str, allow_max: bool) -> (String, Option<String>) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    const SUFFIXES: &[(&str, &str, bool)] = &[
+        ("-extra-high", "xhigh", false),
+        ("_extra_high", "xhigh", false),
+        ("-extra_high", "xhigh", false),
+        ("_extra-high", "xhigh", false),
+        ("-extra-low", "xlow", false),
+        ("_extra_low", "xlow", false),
+        ("-extra_low", "xlow", false),
+        ("_extra-low", "xlow", false),
+        ("-minimal", "minimal", false),
+        ("_minimal", "minimal", false),
+        ("-xhigh", "xhigh", false),
+        ("_xhigh", "xhigh", false),
+        ("-medium", "medium", false),
+        ("_medium", "medium", false),
+        ("-xlow", "xlow", false),
+        ("_xlow", "xlow", false),
+        ("-high", "high", false),
+        ("_high", "high", false),
+        ("-low", "low", false),
+        ("_low", "low", false),
+        ("-max", "max", true),
+        ("_max", "max", true),
+    ];
+    for &(suffix, level, requires_allow_max) in SUFFIXES {
+        if requires_allow_max && !allow_max {
+            continue;
+        }
+        if lower.ends_with(suffix) {
+            let base = trimmed[..trimmed.len() - suffix.len()].trim_end_matches(['-', '_']);
+            let looks_like_model = base.len() >= 2
+                && (base.contains('-')
+                    || base.contains('_')
+                    || base.contains('.')
+                    || base.chars().any(|ch| ch.is_ascii_digit()));
+            if looks_like_model {
+                return (base.to_string(), Some(level.to_string()));
+            }
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
 fn parse_kv_entry(data: &[u8]) -> Option<(String, String)> {
     let mut key = None;
     let mut val = None;
@@ -211,7 +313,32 @@ pub fn parse_gen_metadata(gen_idx: i64, data: &[u8]) -> ParsedGenMetadata {
             }
         }
     }
-    result.model = f19.or(f21).or(f22);
+    let f21_parsed = f21.as_deref().map(extract_reasoning_from_display_label);
+    let f22_parsed = f22.as_deref().map(extract_reasoning_from_display_label);
+    let label_reasoning = f21_parsed
+        .as_ref()
+        .and_then(|(_, level)| level.clone())
+        .or_else(|| f22_parsed.as_ref().and_then(|(_, level)| level.clone()));
+
+    if let Some(raw_model) = f19 {
+        let deploy_stripped = strip_gemini_deployment_suffix(&raw_model);
+        let (base, suffix_level) = split_model_effort_suffix(
+            &deploy_stripped,
+            label_reasoning.as_deref() == Some("max"),
+        );
+        if suffix_level.is_some() {
+            result.model = Some(base);
+        } else {
+            result.model = Some(raw_model);
+        }
+        result.reasoning = label_reasoning.or(suffix_level);
+    } else if let Some((base, level)) = f21_parsed {
+        result.model = (!base.is_empty()).then_some(base);
+        result.reasoning = level.or(label_reasoning);
+    } else if let Some((base, level)) = f22_parsed {
+        result.model = (!base.is_empty()).then_some(base);
+        result.reasoning = level;
+    }
     result
 }
 

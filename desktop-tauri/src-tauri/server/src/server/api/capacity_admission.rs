@@ -9,6 +9,8 @@ use axum::response::Response;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+use std::sync::Arc;
+use crate::server::core::key_usage::KeyUsageLease;
 use crate::server::core::runtime_capacity::{self as capacity, AcquireError, Class, MemoryBudget, Ticket};
 use crate::server::errors::GatewayError;
 use crate::server::logging;
@@ -17,6 +19,8 @@ struct Admitted<S> {
     inner: S,
     _ticket: Ticket,
     _memory: MemoryBudget,
+    // 排在 inner 之后：确保流式收尾（RecordingStream::Drop）先落账，再释放并发占额。
+    _usage_lease: Option<Arc<KeyUsageLease>>,
 }
 
 impl<S: Stream + Unpin> Stream for Admitted<S> {
@@ -70,7 +74,16 @@ pub async fn admit(mut request: Request, next: Next) -> Response {
         Ok::<_, std::io::Error>(chunk)
     });
     *request.body_mut() = Body::from_stream(body);
+    let usage_lease = request.extensions_mut().remove::<Arc<KeyUsageLease>>();
     let response = capacity::caller_scope(caller, next.run(request)).await;
     let (parts, body) = response.into_parts();
-    Response::from_parts(parts, Body::from_stream(Admitted { inner: body.into_data_stream(), _ticket: ticket, _memory: memory }))
+    Response::from_parts(
+        parts,
+        Body::from_stream(Admitted {
+            inner: body.into_data_stream(),
+            _ticket: ticket,
+            _memory: memory,
+            _usage_lease: usage_lease,
+        }),
+    )
 }

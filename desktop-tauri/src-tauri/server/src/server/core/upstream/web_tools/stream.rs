@@ -305,6 +305,14 @@ impl State {
     }
 
     fn fail(&mut self, error: GatewayError) {
+        if !self.content.is_empty() {
+            let preview = diagnostic_preview(&self.content, 480);
+            crate::server::logging::log_with_level(
+                "[WebTools]",
+                &format!("{}（模型输出片段：{}）", error.message, preview),
+                "warn",
+            );
+        }
         self.content.clear();
         self.terminal.take();
         self.usage.clear();
@@ -316,4 +324,20 @@ impl State {
         self.ended = true;
         self.source.take();
     }
+}
+
+fn diagnostic_preview(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let count = trimmed.chars().count();
+    let compact: String = if count <= max_chars {
+        trimmed.to_string()
+    } else {
+        let head: String = trimmed.chars().take(max_chars / 2).collect();
+        let tail: String = trimmed
+            .chars()
+            .skip(count.saturating_sub(max_chars / 2))
+            .collect();
+        format!("{head} …(共 {count} 字符)… {tail}")
+    };
+    compact.replace('\r', "\\r").replace('\n', "\\n")
 }

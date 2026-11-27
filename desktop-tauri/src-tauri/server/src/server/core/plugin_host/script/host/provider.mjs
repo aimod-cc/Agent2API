@@ -125,6 +125,7 @@ async function conversation(provider, params, call) {
   await noteSignIn(response.headers.get("x-magpie-sign-in"))
   await send({ id: call.id, event: "head", status: response.status,
     headers: { ...Object.fromEntries([...response.headers].filter(([name]) => name !== "set-cookie")),
+      "x-agent2api-upstream-protocol": protocol,
       ...(native ? { "x-agent2api-native": params.native_protocol } : {}) }, upstream: "chat" })
   if (!response.ok) {
     const reader = response.body?.getReader()

@@ -217,14 +217,14 @@ export function ClientBrand({
   )
 }
 
-export function ProviderBrand({
+export function ProviderIcon({
   providerId,
-  label,
-  title,
+  size = 18,
+  className = '',
 }: {
   providerId: string
-  label: string
-  title?: string
+  size?: number
+  className?: string
 }) {
   const normalized = providerId.trim().toLowerCase()
   const isLocalDirect = normalized === 'local-direct' || normalized === 'local_direct'
@@ -236,21 +236,44 @@ export function ProviderBrand({
       || '')
   const { src, onError } = useProviderIcon(isLocalDirect ? '' : providerId, fallback)
 
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=''
+        aria-hidden='true'
+        width={size}
+        height={size}
+        className={`req-brand-logo is-rounded${className ? ` ${className}` : ''}`}
+        style={{ width: size, height: size }}
+        onError={onError}
+      />
+    )
+  }
+
+  return (
+    <span
+      className={`req-brand-glyph${className ? ` ${className}` : ''}`}
+      style={{ width: size, height: size }}
+      aria-hidden='true'
+    >
+      <FallbackProviderGlyph localDirect={isLocalDirect} />
+    </span>
+  )
+}
+
+export function ProviderBrand({
+  providerId,
+  label,
+  title,
+}: {
+  providerId: string
+  label: string
+  title?: string
+}) {
   return (
     <span className='req-brand-cell' title={title || label}>
-      {src ? (
-        <img
-          src={src}
-          alt=''
-          aria-hidden='true'
-          className='req-brand-logo is-rounded'
-          onError={onError}
-        />
-      ) : (
-        <span className='req-brand-glyph' aria-hidden='true'>
-          <FallbackProviderGlyph localDirect={isLocalDirect} />
-        </span>
-      )}
+      <ProviderIcon providerId={providerId} size={15} />
       <span className='req-brand-text'>{label}</span>
     </span>
   )

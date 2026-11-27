@@ -36,8 +36,7 @@ fn authorized(headers: &HeaderMap) -> bool {
         return true;
     }
     if let Ok(access) = model_access::authenticate(headers, "") {
-        return !access.scope.as_ref().is_some_and(|scope|
-            scope.restricts_models() || scope.restricts_providers());
+        return !access.scope.as_ref().is_some_and(crate::server::core::key_scope::KeyScope::is_restricted);
     }
     !access::panel_gate() && !access::panel_auth_enabled()
         && crate::server::config::current().active_api_keys().is_empty()

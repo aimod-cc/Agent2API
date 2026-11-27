@@ -173,11 +173,12 @@ pub(super) async fn record_started(
     model: &str,
     client_model: &str,
     reasoning: &str,
+    client_protocol: &str,
     source: &RequestSource,
     is_test: bool,
 ) {
     // 进行中行写入与调用方创建断线守卫之间不能留下可取消的等待窗口。
     blocking::in_place(|| {
-        stats.record_started(id, ts, model, client_model, reasoning, source, is_test);
+        stats.record_started(id, ts, model, client_model, reasoning, client_protocol, source, is_test);
     });
 }

@@ -48,9 +48,14 @@ const TOKEN_BRIDGE: [(&str, fn(&Record) -> Option<u64>); 2] = [
 
 /// 各家声明「本模型认识哪些档位」用的键名（按优先级：出口键名在前）。
 ///
-/// 前一个是出口键本身（ZCode 直接用它），后两个是两家的内部键名 —— 归一了
-/// 出口就统一了，但**不删原键**：那两家转发时仍按自己的键读（理由见模块头）。
-const LEVEL_KEYS: [&str; 3] = ["reasoningLevels", "reasoningEfforts", "efforts"];
+/// 前一个是出口键本身（ZCode 直接用它），后面兼容各 WASM / 内置插件惯用的内部键名 ——
+/// 归一了出口就统一了，但**不删原键**：各家转发时仍按自己的键读（理由见模块头）。
+const LEVEL_KEYS: [&str; 4] = [
+    "reasoningLevels",
+    "reasoningEffortLevels",
+    "reasoningEfforts",
+    "efforts",
+];
 
 /// 把 models.dev 的值补进这条清单项（原地；上游已声明的键不动）。
 ///
@@ -120,8 +125,13 @@ fn normalize_levels(item: &mut Value, record: Option<&Record>) {
             item.pointer("/reasoning/effort").and_then(level_text)
         })
     };
-    let explicit = declared.is_some() || fixed.is_some() || binding_supported == Some(false);
-    let levels = if binding_supported == Some(false) { Vec::new() }
+    let has_declared = declared.is_some();
+    let supports_reasoning = item.get("supportsReasoning").and_then(Value::as_bool);
+    let no_reasoning = supports_reasoning == Some(false)
+        && declared.as_ref().is_none_or(Vec::is_empty)
+        && fixed.is_none();
+    let explicit = has_declared || fixed.is_some() || binding_supported == Some(false) || no_reasoning;
+    let levels = if binding_supported == Some(false) || no_reasoning { Vec::new() }
     else if let Some(fixed) = &fixed {
         vec![fixed.clone()]
     } else if explicit {
@@ -133,15 +143,26 @@ fn normalize_levels(item: &mut Value, record: Option<&Record>) {
         .or_else(|| item.pointer("/reasoning/defaultEffort").and_then(level_text))
         .or_else(|| item.pointer("/reasoning/effort").and_then(level_text))
         .and_then(|value| {
-            if levels.is_empty() && item.get("supportsReasoning").and_then(Value::as_bool) != Some(false) { Some(value) }
+            if levels.is_empty() && supports_reasoning != Some(false) { Some(value) }
             else { levels.iter().find(|level| level.eq_ignore_ascii_case(&value)).cloned() }
         }).or_else(|| fixed.clone());
+    let reasoning_cap_source = item
+        .pointer("/capSources/supportsReasoning")
+        .and_then(Value::as_str);
     let source = item.get("reasoningSource").and_then(Value::as_str)
         .filter(|source| matches!(*source, "upstream" | "modelsdev" | "undeclared"))
         .map(str::to_string)
         .unwrap_or_else(|| {
-            (if explicit { "upstream" } else if !levels.is_empty() { "modelsdev" } else { "undeclared" })
-                .to_string()
+            if has_declared || fixed.is_some() || binding_supported == Some(false) {
+                "upstream"
+            } else if no_reasoning {
+                if reasoning_cap_source == Some("modelsdev") { "modelsdev" } else { "upstream" }
+            } else if !levels.is_empty() {
+                "modelsdev"
+            } else {
+                "undeclared"
+            }
+            .to_string()
         });
     let Some(object) = item.as_object_mut() else { return };
     if explicit || !levels.is_empty() {
@@ -193,4 +214,50 @@ pub fn mark_user(item: &mut Value, keys: &[String]) {
         sources.insert(key.clone(), json!("user"));
     }
     object.insert("capSources".to_string(), Value::Object(sources));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_reasoning_effort_levels_and_respects_no_reasoning() {
+        let mut mimo = json!({
+            "id": "mimo-v2.6-flash",
+            "supportsReasoning": false
+        });
+        apply(&mut mimo);
+        assert_eq!(mimo["supportsReasoning"], json!(false));
+        assert_eq!(mimo["reasoningLevels"], json!([]));
+        assert_eq!(mimo["reasoningSource"], json!("upstream"));
+
+        let mut mimo_max = json!({
+            "id": "mimo-v2.6-flash-max",
+            "supportsReasoning": false,
+            "reasoningEffortLevels": []
+        });
+        apply(&mut mimo_max);
+        assert_eq!(mimo_max["reasoningLevels"], json!([]));
+        assert_eq!(mimo_max["reasoningSource"], json!("upstream"));
+
+        let mut custom_levels = json!({
+            "id": "mimo-v2.6-flash",
+            "supportsReasoning": true,
+            "reasoningEffortLevels": ["low", "high"]
+        });
+        apply(&mut custom_levels);
+        assert_eq!(custom_levels["reasoningLevels"], json!(["low", "high"]));
+        assert_eq!(custom_levels["reasoningSource"], json!("upstream"));
+
+        let mut undeclared = json!({
+            "id": "mimo-v2.6-flash"
+        });
+        apply(&mut undeclared);
+        assert_eq!(undeclared["supportsReasoning"], json!(true));
+        assert_eq!(
+            undeclared["reasoningLevels"],
+            json!(["none", "low", "medium", "high", "xhigh"])
+        );
+        assert_eq!(undeclared["reasoningSource"], json!("modelsdev"));
+    }
 }

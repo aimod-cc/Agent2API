@@ -4,14 +4,14 @@
    颜色取自 tokens.css / aliases.css 语义变量，浅色与深色共用同一套声明。
    ───────────────────────────────────────────── */
 
-/* 默认 9 列：时间 / 状态 / 来源 / 提供商·账号 / 模型 / 用时 / 速度 / 用量·缓存 / 花费。
+/* 默认 10 列：时间 / 状态 / 来源 / 提供商·账号 / 模型 / 协议 / 用时 / 速度 / 用量·缓存 / 花费。
    列宽变量 --req-cols 由 table-columns.js 写在 #req-list 上，靠继承作用到表头与数据行。
    改默认列宽时需同步 table-columns.js 与 requests-page.tsx 的 track 定义。 */
 .req-row,
 .req-head {
   display: grid;
   grid-template-columns: var(--req-cols,
-    74px 96px minmax(116px, 0.95fr) minmax(144px, 1.15fr) minmax(156px, 1.4fr) 88px 88px 148px 82px);
+    74px 96px minmax(116px, 0.95fr) minmax(144px, 1.15fr) minmax(156px, 1.4fr) 108px 88px 88px 148px 82px);
   gap: 14px;
   align-items: center;
   padding: 9px 16px;
@@ -388,8 +388,9 @@
 .req-provider.is-empty,
 .req-acct.is-empty { color: var(--text-3); }
 
-/* ─── ⑤ 模型列（上游实际模型 + ↳ 下游映射来源）─── */
-.req-row .req-model-stack {
+/* ─── ⑤ 模型列与协议列（上游实际值 + ↳ 下游来源）─── */
+.req-row .req-model-stack,
+.req-row .req-protocol-stack {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -416,6 +417,9 @@
 .req-row .req-model-line.sub {
   color: var(--text-3);
   font-size: 11px;
+}
+.req-row .req-model-line.is-empty {
+  color: var(--text-3);
 }
 
 /* ─── ⑥ 用时列（右对齐等宽两行：总耗时 + 首字响应）─── */
@@ -584,6 +588,7 @@
   .req-head .req-status { grid-row: 1; grid-column: 4 / 5; }
   .req-head .req-source,
   .req-head .req-target,
+  .req-head .req-protocol,
   .req-head .req-speed,
   .req-head .req-usage,
   .req-head .req-billing,
@@ -599,6 +604,7 @@
   .req-row .req-usage { grid-row: 3; grid-column: 1 / 3; align-items: flex-start; text-align: left; }
   .req-row .req-speed { grid-row: 3; grid-column: 3 / 4; align-items: center; text-align: center; }
   .req-row .req-billing { grid-row: 3; grid-column: 4 / 5; }
+  .req-row .req-protocol { grid-row: 4; grid-column: 1 / 4; }
   .req-row .req-detail { grid-row: 4; grid-column: 4 / 5; justify-self: end; }
   .req-row .req-error-cell { display: none; }
 }

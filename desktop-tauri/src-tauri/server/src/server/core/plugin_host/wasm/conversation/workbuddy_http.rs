@@ -37,6 +37,7 @@ pub(in crate::server::core::plugin_host) const MAX_BODY: usize = 14 * 1024 * 102
 const MAX_ENCODED: usize = ((MAX_BODY + 2) / 3) * 4;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_NODES: usize = 65_536;
+const MAX_DEPTH: usize = 128;
 
 struct Binding {
     signal: Arc<Signal>,
@@ -355,7 +356,7 @@ fn validate_headers(raw: &Value) -> Result<(HeaderMap, serde_json::Map<String, V
 }
 
 fn validate_chat_body(bytes: &[u8]) -> Result<(), proto::WireError> {
-    let value: Value = declaration::parse_object_detailed(bytes, MAX_BODY)
+    let value: Value = declaration::parse_object_detailed(bytes, MAX_BODY, MAX_DEPTH)
         .map_err(|error| match error {
             ParseObjectError::TooLarge => payload_too_large(),
             ParseObjectError::DepthExceeded => depth_exceeded(),
@@ -415,7 +416,7 @@ fn body_bytes(context: &Context, params: &Value) -> Result<Bytes, proto::WireErr
 
 fn shape(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), proto::WireError> {
     *nodes = nodes.checked_add(1).filter(|nodes| *nodes <= MAX_NODES).ok_or_else(too_many_nodes)?;
-    if depth > 32 { return Err(depth_exceeded()); }
+    if depth > MAX_DEPTH { return Err(depth_exceeded()); }
     match value {
         Value::Array(items) => for item in items { shape(item, depth + 1, nodes)?; },
         Value::Object(fields) => {
@@ -454,7 +455,7 @@ fn too_many_nodes() -> proto::WireError {
 }
 
 fn depth_exceeded() -> proto::WireError {
-    bad_params("WorkBuddy 国内版请求内容嵌套过深（超过 32 层上限），请简化请求或新开会话重试")
+    bad_params(format!("WorkBuddy 国内版请求内容嵌套过深（超过 {} 层上限），请简化请求或新开会话重试", MAX_DEPTH))
 }
 
 fn duplicate_field() -> proto::WireError {
@@ -609,10 +610,28 @@ mod tests {
         let dup = br#"{"stream":true,"stream":true,"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
         assert_eq!(validate_chat_body(dup).unwrap_err().message, duplicate_field().message);
 
+        let mut nested_35 = String::from(r#"{"stream":true,"model":"m","messages":[{"role":"user","content":"hi"}],"extra":"#);
+        for _ in 0..34 { nested_35.push('['); }
+        nested_35.push('1');
+        for _ in 0..34 { nested_35.push(']'); }
+        nested_35.push('}');
+        assert!(validate_chat_body(nested_35.as_bytes()).is_ok());
+        // 默认受控声明解析仍保持 32 层上限，不随对话体放宽。
+        assert!(declaration::parse_object::<Value>(nested_35.as_bytes(), MAX_BODY).is_err());
+
+        // 根对象 1 层 + 126 层数组 = 127 层容器（含最内层标量共 128 层，对齐 serde_json 默认上限），应通过。
+        let mut at_limit = String::from(r#"{"stream":true,"model":"m","messages":[{"role":"user","content":"hi"}],"extra":"#);
+        for _ in 0..126 { at_limit.push('['); }
+        at_limit.push('1');
+        for _ in 0..126 { at_limit.push(']'); }
+        at_limit.push('}');
+        assert!(validate_chat_body(at_limit.as_bytes()).is_ok());
+
+        // 根对象 1 层 + 127 层数组 = 128 层容器（触达 serde_json 128 层递归上限），应精准报 depth_exceeded 而非 invalid_body。
         let mut deep = String::from(r#"{"stream":true,"model":"m","messages":[{"role":"user","content":"hi"}],"extra":"#);
-        for _ in 0..33 { deep.push('['); }
+        for _ in 0..127 { deep.push('['); }
         deep.push('1');
-        for _ in 0..33 { deep.push(']'); }
+        for _ in 0..127 { deep.push(']'); }
         deep.push('}');
         assert_eq!(validate_chat_body(deep.as_bytes()).unwrap_err().message, depth_exceeded().message);
 

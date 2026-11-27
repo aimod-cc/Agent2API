@@ -85,6 +85,8 @@ fn persist(context: &RecordContext, fallback_error: Option<String>) {
     entry.upstream_model = snapshot.upstream_model;
     entry.client_reasoning = context.client_reasoning.clone();
     entry.upstream_reasoning = snapshot.upstream_reasoning;
+    entry.client_protocol = context.client_protocol.clone();
+    entry.upstream_protocol = snapshot.upstream_protocol;
     entry.attempt_details = stored_attempt_details(&snapshot.attempts_detail);
     entry.sensitive_hits = stored_sensitive_hits(&snapshot.sensitive_hits);
     entry.privacy_hits = stored_privacy_hits(&snapshot.privacy_hits);

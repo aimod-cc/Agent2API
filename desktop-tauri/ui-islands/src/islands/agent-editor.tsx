@@ -70,7 +70,24 @@ export function ProfileEditor({
           : profile.status === 'disabled' ? t('已停用') : ''
         const name = profile.name || profile.id
         const duplicateName = profiles.some(other => other !== profile && (other.name || other.id) === name)
-        const models = profile.models.length ? profile.models.map(model => model.id) : profile.model ? [profile.model] : []
+        const claudeTierSummary = client.id === 'claude-code'
+          ? (['opus', 'sonnet', 'haiku', 'subagent'] as const)
+            .map(tier => {
+              const value = profile.claudeModels?.[tier]
+              if (!value) return ''
+              const label = tier === 'subagent' ? t('子 Agent') : tier[0].toUpperCase() + tier.slice(1)
+              return `${label} → ${value}`
+            })
+            .filter(Boolean)
+          : []
+        const uniqueClaudeTargets = new Set(Object.values(profile.claudeModels || {}).filter(Boolean))
+        const models = client.id === 'claude-code' && uniqueClaudeTargets.size > 1
+          ? claudeTierSummary
+          : profile.models.length
+            ? profile.models.map(model => model.id)
+            : profile.model
+              ? [profile.model]
+              : claudeTierSummary
         const actionLabel = profile.status === 'disabled' ? t('启用') : client.supportsDefault ? t('使用此配置') : t('添加到客户端')
         return <div key={`${profile.liveId || 'saved'}:${profile.id}`} className={cn('agent-configuration-row', active && 'is-current')}>
           <span className='agent-configuration-mark' aria-hidden='true'>{profile.kind === 'gateway' ? 'A2' : name.slice(0, 2).toUpperCase()}</span>

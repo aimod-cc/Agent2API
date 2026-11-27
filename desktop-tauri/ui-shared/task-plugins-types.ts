@@ -79,6 +79,7 @@ export type TaskPluginStoreItem = {
   description: string
   version: string | null
   icon: string | null
+  downloads?: number | null
   homepage: string | null
   page: string | null
   notes: string | null

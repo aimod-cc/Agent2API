@@ -239,6 +239,21 @@ async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: Mc
             json!({ "jsonrpc": "2.0", "id": Value::Null, "error": { "code": -32600, "message": "Unauthorized" } }),
         );
     };
+    if matches!(kind, McpServerKind::Vision | McpServerKind::ImageGeneration)
+        && crate::server::config::current().privacy_settings().settings.enabled
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "jsonrpc": "2.0",
+                "id": Value::Null,
+                "error": {
+                    "code": -32600,
+                    "message": "隐私脱敏已开启，此 MCP 端点不支持本地脱敏，未转发"
+                }
+            }),
+        );
+    }
     let protocol = "mcp";
     let service = match kind {
         McpServerKind::WebSearch => tool_services::WEB_SEARCH_SERVICE_ID,
@@ -297,6 +312,13 @@ pub async fn mcp_image_generation(
     }
     if model_access::authenticate(&headers, "image-generation").is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if crate::server::config::current().privacy_settings().settings.enabled {
+        return crate::server::errors::GatewayError::bad_request(
+            "隐私脱敏已开启，图片生成 MCP 端点不支持本地脱敏，未转发",
+        )
+        .with_code("privacy_unsupported_endpoint")
+        .payload_response();
     }
     let body = match axum::body::to_bytes(request.into_body(), super::image_input::MAX_REQUEST_BYTES).await {
         Ok(body) => body,

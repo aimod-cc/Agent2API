@@ -55,7 +55,7 @@ pub(crate) const SNAPSHOT_FORMAT: &str = "agent2api-cloud-sync-snapshot";
 pub(crate) const SNAPSHOT_VERSION: u32 = 1;
 
 /// 进快照的表（顺序即插入顺序：账号先于其它，便于失败时一眼看出走到哪一步）
-pub(crate) const SYNCED_TABLES: &[&str] = &["accounts", "account_usage_records", "checkin_records", "account_limiter_events"];
+pub(crate) const SYNCED_TABLES: &[&str] = &["accounts", "account_usage_records", "checkin_records", "account_limiter_events", "api_key_usage_events"];
 
 /// 非保留配置键里**不进快照**的项（理由见模块头三类排除）。
 const EXCLUDED_CONFIG_KEYS: &[&str] = &[
@@ -73,6 +73,8 @@ const EXCLUDED_CONFIG_KEYS: &[&str] = &[
     // 代理内核的下载出网线路：绑本机网络环境
     "kernelProxy",
     crate::server::config::KEY_INSTALLED_UPDATE_VERSION,
+    // 隐私脱敏配置包含保密词、白名单与自定义规则，仅留在当前网关，不随云同步上传。
+    crate::server::config::KEY_PRIVACY_REDACTION,
 ];
 
 /// 保留键里**进快照**的项（其余保留键一律不进）。
@@ -541,6 +543,8 @@ mod tests {
         assert!(!is_synced_kv_key("kernelDir"));
         // 另一把密钥加密：不同步
         assert!(!is_synced_kv_key("githubToken"));
+        // 隐私脱敏配置（保密词/白名单）：不同步
+        assert!(!is_synced_kv_key(crate::server::config::KEY_PRIVACY_REDACTION));
         // 保留键：白名单里的同步，其余不同步
         assert!(is_synced_kv_key("agentProfiles"));
         assert!(is_synced_kv_key("proxyPool"));

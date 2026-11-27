@@ -15,6 +15,7 @@ import {
   TonalIconButton,
 } from '../ui/components'
 import { GlyphIcon } from '../ui/icons'
+import { PERIOD_KEYS, formatMetricShort, periodShort } from './KeyUsageLimitCard'
 
 export function KeysView() {
   const { server, revision, navTabs } = useStore()
@@ -184,6 +185,25 @@ export function KeysView() {
                   )}
                   {(item.allowedModels?.length || 0) > 0 ? (
                     <TonalChip>{t('限 {n} 模型', { n: item.allowedModels?.length || 0 })}</TonalChip>
+                  ) : null}
+                  {item.usage?.exceeded ? (
+                    <TonalChip tone='danger'>{t('已达上限')}</TonalChip>
+                  ) : null}
+                  {item.usageLimit ? (
+                    PERIOD_KEYS.filter(period => Boolean(item.usageLimit?.[period])).map(period => {
+                      const cap = item.usageLimit?.[period] as number
+                      const used = item.usage
+                        ? item.usageLimit?.metric === 'tokens'
+                          ? item.usage[period].tokens
+                          : item.usage[period].requests
+                        : 0
+                      const hit = used >= cap
+                      return (
+                        <TonalChip key={period} tone={hit ? 'danger' : 'neutral'}>
+                          {`${periodShort(period)} ${formatMetricShort(item.usageLimit!.metric, used)} / ${formatMetricShort(item.usageLimit!.metric, cap)}`}
+                        </TonalChip>
+                      )
+                    })
                   ) : null}
                 </div>
 

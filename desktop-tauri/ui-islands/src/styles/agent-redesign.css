@@ -1,0 +1,437 @@
+/* ─────────────────────────────────────────────
+   Agent 配置页优化样式（本机直连采集左栏入口 + 新版配置弹窗）
+   ───────────────────────────────────────────── */
+
+/* ─── 左栏底部固定入口：本机直连采集 ─── */
+.agent-rail-dock {
+  flex: 0 0 auto;
+  padding: 8px;
+  border-top: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+}
+
+.agent-direct-dock-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--primary-soft);
+  color: var(--ui-primary-fg);
+  flex: none;
+}
+
+.agent-client[data-active] .agent-direct-dock-icon {
+  background: rgb(255 255 255 / 20%);
+  color: var(--ui-nav-selected-fg);
+}
+
+/* ─── 右侧详情区：本机直连采集管理面板 ─── */
+.agent-direct-view {
+  min-width: 0;
+}
+
+.agent-direct-hero-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--primary-soft);
+  color: var(--ui-primary-fg);
+  border: 1px solid var(--primary-bd);
+  flex: none;
+}
+
+.agent-direct-syncbar {
+  margin-top: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-inset);
+}
+
+.agent-direct-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-inset);
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.agent-direct-row.is-on {
+  border-color: color-mix(in srgb, var(--primary-bd) 70%, var(--border));
+  background: color-mix(in srgb, var(--primary-soft) 22%, var(--surface-inset));
+}
+
+.agent-direct-row.is-muted {
+  opacity: 0.62;
+}
+
+/* ─── 新版「新增 / 编辑配置」弹窗 ─── */
+.agent-config-dialog.agent-redesign-dialog[data-slot='dialog-content'] {
+  width: min(980px, calc(100vw - 40px));
+  height: min(650px, calc(100dvh - 52px));
+  border-radius: var(--r-lg);
+}
+
+.agent-redesign-head {
+  flex: none;
+  padding: 13px 48px 13px 20px;
+  gap: 10px;
+}
+
+.agent-redesign-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 16px 20px;
+  gap: 14px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-redesign-body.is-confirming {
+  overflow-y: auto;
+}
+
+.agent-redesign-dialog > [data-slot='dialog-body'] > * {
+  flex-shrink: 1;
+}
+
+.agent-redesign-dialog > [data-slot='dialog-body'] > .agent-conn-bar {
+  flex-shrink: 0;
+}
+
+/* 顶部紧凑连接区 */
+.agent-conn-bar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-2) 65%, var(--surface));
+}
+
+.agent-conn-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.agent-conn-kind {
+  flex: none;
+}
+
+.agent-conn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.agent-conn-meta code {
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+/* 下半核心区：固定高度模型工作台 */
+.agent-ws-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-ws-head {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+/* ─── Claude Code 四档坑位映射 ─── */
+.agent-claude-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-claude-slots {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.agent-slot-row {
+  display: grid;
+  grid-template-columns: 248px 28px minmax(0, 1fr) 74px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-inset);
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.agent-slot-row.is-default {
+  border-color: color-mix(in srgb, var(--primary-bd) 85%, var(--border));
+  background: color-mix(in srgb, var(--primary-soft) 28%, var(--surface-inset));
+}
+
+.agent-slot-source {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.agent-slot-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 28px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 650;
+  flex: none;
+  border: 1px solid transparent;
+}
+
+.agent-slot-pill.is-opus {
+  background: oklch(0.65 0.16 290 / 16%);
+  color: oklch(0.76 0.14 290);
+  border-color: oklch(0.65 0.16 290 / 32%);
+}
+
+.agent-slot-pill.is-sonnet {
+  background: var(--primary-soft);
+  color: var(--ui-primary-fg);
+  border-color: var(--primary-bd);
+}
+
+.agent-slot-pill.is-haiku {
+  background: oklch(0.68 0.15 160 / 15%);
+  color: oklch(0.74 0.14 160);
+  border-color: oklch(0.68 0.15 160 / 32%);
+}
+
+.agent-slot-pill.is-sub {
+  background: oklch(0.72 0.14 70 / 15%);
+  color: oklch(0.78 0.13 70);
+  border-color: oklch(0.72 0.14 70 / 32%);
+}
+
+:root[data-theme='light'] .agent-slot-pill.is-opus { color: oklch(0.48 0.16 290); }
+:root[data-theme='light'] .agent-slot-pill.is-haiku { color: oklch(0.45 0.14 160); }
+:root[data-theme='light'] .agent-slot-pill.is-sub { color: oklch(0.48 0.14 65); }
+
+.agent-slot-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+}
+
+.agent-slot-target { min-width: 0; }
+.agent-slot-action { display: flex; justify-content: flex-end; }
+
+/* ─── 下拉两档选择器 Popover ─── */
+.agent-combo-popover {
+  width: min(440px, calc(100vw - 48px));
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-combo-list {
+  max-height: 270px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-combo-item {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background-color 110ms ease, border-color 110ms ease;
+}
+
+.agent-combo-item:hover {
+  background: var(--nav-hover);
+}
+
+.agent-combo-item.is-selected {
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--ui-primary) 34%, transparent);
+}
+
+/* ─── 多模型等高左右双栏 & 单模型工作台 ─── */
+.agent-split-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-split-board {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.agent-split-col,
+.agent-single-board {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.agent-single-board {
+  flex: 1 1 auto;
+}
+
+.agent-split-col-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
+}
+
+.agent-split-search {
+  flex: none;
+  padding: 8px 10px 6px;
+}
+
+.agent-split-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px 8px;
+}
+
+.agent-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 6px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color 110ms ease, border-color 110ms ease;
+}
+
+.agent-picker-row:hover {
+  background: var(--nav-hover);
+}
+
+.agent-picker-row[data-checked] {
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--ui-primary) 30%, transparent);
+}
+
+.agent-selected-card {
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+  flex: none;
+  transition: border-color 120ms ease;
+}
+
+.agent-selected-card.is-default {
+  border-color: color-mix(in srgb, var(--primary-bd) 85%, var(--border));
+}
+
+.agent-selected-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 9px 12px;
+}
+
+.agent-selected-card-toggle {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (max-width: 860px) {
+  .agent-config-dialog.agent-redesign-dialog[data-slot='dialog-content'] {
+    width: calc(100vw - 24px);
+    height: min(720px, calc(100dvh - 32px));
+  }
+  .agent-split-board {
+    grid-template-columns: 1fr;
+  }
+  .agent-slot-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .agent-slot-arrow {
+    display: none;
+  }
+  .agent-direct-row {
+    flex-wrap: wrap;
+  }
+}

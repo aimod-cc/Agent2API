@@ -675,6 +675,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/model-access/keys", get(api::model_access::list_keys))
         .route("/api/keys", get(api::keys_api::list_keys).post(api::keys_api::create_key))
         .route("/api/keys/{id}", patch(api::keys_api::update_key).delete(api::keys_api::delete_key))
+        .route("/api/keys/{id}/reset-usage", post(api::keys_api::reset_key_usage))
         // ── 提供商插件包（一级菜单「提供商插件」）──
         // 各家 provider 的转发与账号实现都在用户安装的插件里。这些管理接口
         // **全部挂 protected**：装插件等于允许本机跑任意代码，与备份导入同级敏感。
@@ -1298,12 +1299,18 @@ fn attach_cors(headers: &mut axum::http::HeaderMap) {
 async fn require_api_key(mut request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
     if path.starts_with("/v1/") {
-        let access = match api::model_access::authenticate(request.headers(), "") {
+        let access = if path == "/v1/messages/count_tokens" {
+            api::model_access::authenticate(request.headers(), "")
+        } else {
+            api::model_access::authenticate_call(request.headers(), "")
+        };
+        let access = match access {
             Ok(access) => access,
             Err(error) => return error.payload_response(),
         };
         request.extensions_mut().insert(access.source.api_key);
         if let Some(source) = access.key_source { request.extensions_mut().insert(source); }
+        if let Some(lease) = access.usage_lease { request.extensions_mut().insert(lease); }
         if let Some(scope) = access.scope {
             crate::server::core::key_scope::attach(&mut request, scope);
         }
@@ -1313,7 +1320,7 @@ async fn require_api_key(mut request: Request, next: Next) -> Response {
     let panel_session = crate::server::access::session_valid(request.headers());
     if !panel_session {
         if let Some(access) = &model_access {
-            let restricted = access.scope.as_ref().is_some_and(|scope| scope.restricts_models() || scope.restricts_providers());
+            let restricted = access.scope.as_ref().is_some_and(crate::server::core::key_scope::KeyScope::is_restricted);
             if restricted && !api::model_access::is_model_endpoint(&path) {
                 return errors::GatewayError::with_status(403, "受限 API Key 不能访问管理接口，请使用管理员会话登录")
                     .with_code("management_access_denied").payload_response();

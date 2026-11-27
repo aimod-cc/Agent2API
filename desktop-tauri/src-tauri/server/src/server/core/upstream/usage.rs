@@ -267,6 +267,8 @@ pub struct TelemetrySnapshot {
     /// `outbound_reasoning` 返回 None）、「关闭思考」档被注入闸拦下。
     /// 请求日志的模型列用它给上游模型名带 `(等级)` 后缀。
     pub upstream_reasoning: String,
+    /// 实际发给上游的协议（空串 = 尚未选定上游或转发前已失败）。
+    pub upstream_protocol: String,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
@@ -385,6 +387,24 @@ pub struct PrivacyHit {
     pub restored: i64,
 }
 
+/// 把下游 / 上游协议标识归一到统一字面量，便于判定是否发生协议转换。
+pub fn normalize_protocol(raw: &str) -> String {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "" => String::new(),
+        "chat" | "chat_completions" | "openai_chat" | "openai" => "chat_completions".to_string(),
+        "responses" | "openai_responses" => "responses".to_string(),
+        "anthropic" | "messages" | "anthropic_messages" => "anthropic".to_string(),
+        "gemini" | "antigravity_gemini" => "gemini".to_string(),
+        "images" | "openai_images" => "images".to_string(),
+        "claude_cli" => "claude_cli".to_string(),
+        "ai_sdk_ndjson" => "ai_sdk_ndjson".to_string(),
+        "chatglm_snapshot" => "chatglm_snapshot".to_string(),
+        "proprietary" => "proprietary".to_string(),
+        _ => trimmed,
+    }
+}
+
 /// 按字符截断（超出部分用 `…` 收尾）。
 ///
 /// 不引 `request_stats::truncate_chars`：同名的实现住在 `api::pipeline` 与
@@ -442,6 +462,7 @@ struct LiveStamp {
     account_name: String,
     upstream_model: String,
     upstream_reasoning: String,
+    upstream_protocol: String,
     attempts: i64,
     /// 首响的**绝对时刻**（与快照同形，转换在 api 层做）
     first_response_at: Option<i64>,
@@ -470,6 +491,7 @@ impl LiveStamp {
             account_name: snapshot.account_name.clone(),
             upstream_model: snapshot.upstream_model.clone(),
             upstream_reasoning: snapshot.upstream_reasoning.clone(),
+            upstream_protocol: snapshot.upstream_protocol.clone(),
             attempts: snapshot.attempts,
             first_response_at: snapshot.first_response_at,
             phase: snapshot.phase,
@@ -757,6 +779,7 @@ impl RequestTelemetry {
         guard.attempts += 1;
         guard.account_id = account_id.unwrap_or("").to_string();
         guard.account_name = account_name.to_string();
+        guard.upstream_protocol.clear();
         if !provider.is_empty() {
             guard.provider = Some(provider.to_string());
         }
@@ -950,6 +973,27 @@ impl RequestTelemetry {
         if let Some(last) = guard.current_attempt_mut().filter(|last| last.finished_at.is_none()) { last.reasoning = level; }
         // 在途回写：与模型名同一时刻定稿，进行中行的模型列一并显示等级
         self.flush_live(&guard);
+    }
+
+    /// 记录「这一次尝试实际发给上游的协议」（覆盖式，最后一次为准）。
+    pub fn note_upstream_protocol(&self, protocol: &str) {
+        let normalized = normalize_protocol(protocol);
+        if normalized.is_empty() {
+            return;
+        }
+        let mut guard = self.lock();
+        if guard.upstream_protocol != normalized {
+            guard.upstream_protocol = normalized;
+            self.flush_live(&guard);
+        }
+    }
+
+    pub fn clear_upstream_protocol(&self) {
+        let mut guard = self.lock();
+        if !guard.upstream_protocol.is_empty() {
+            guard.upstream_protocol.clear();
+            self.flush_live(&guard);
+        }
     }
 
     /// 上报一次 usage（覆盖式，最后一次为准；字段名兼容见 `extract_usage`）。

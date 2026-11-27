@@ -33,6 +33,7 @@ pub(super) async fn forward(
     stream: bool,
     telemetry: &Arc<RequestTelemetry>,
 ) -> Result<ForwardOutcome, GatewayError> {
+    telemetry.note_upstream_protocol("claude_cli");
     let link = accounts::load(store, account)?;
     link.check_profile()?;
     let mut request = Request::parse(body)?;

@@ -3,8 +3,20 @@ import { t } from '../i18n'
 import type { AgentClient, AgentModel } from './agent-types'
 import { modelLevels } from './agent-model-config'
 
-export type CatalogModel = AgentModel & { label: string }
-type CatalogWindow = { workbuddyDesktop?: { getAgentModels?: (gatewayKeyId?: string) => Promise<{ models: AgentModel[] }> } }
+export type CatalogModel = AgentModel & {
+  label: string
+  routingGroup?: boolean
+  memberCount?: number
+  groupSummary?: string
+}
+
+type RawCatalogModel = AgentModel & {
+  routingGroup?: boolean
+  memberCount?: number
+  groupSummary?: string
+}
+
+type CatalogWindow = { workbuddyDesktop?: { getAgentModels?: (gatewayKeyId?: string) => Promise<{ models: RawCatalogModel[] }> } }
 const EMPTY_CATALOG: CatalogModel[] = []
 
 export async function loadCatalog(gatewayKeyId?: string): Promise<CatalogModel[]> {
@@ -17,12 +29,16 @@ export async function loadCatalog(gatewayKeyId?: string): Promise<CatalogModel[]
     if (!model.id?.trim() || seen.has(model.id.toLowerCase())) return false
     seen.add(model.id.toLowerCase())
     return true
-  }).map(model => ({ ...model, name: model.name || model.id,
-    label: model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id }))
+  }).map(model => ({
+    ...model,
+    name: model.name || model.id,
+    routingGroup: Boolean(model.routingGroup),
+    label: model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id,
+  }))
 }
 
 export function catalogModel(client: AgentClient, model: CatalogModel): AgentModel {
-  const { label: _, ...configured } = model
+  const { label: _l, routingGroup: _rg, memberCount: _mc, groupSummary: _gs, ...configured } = model
   return { ...configured, effort: '', reasoningLevels: client.supportsEffort || client.id === 'zcode' ? modelLevels(client, configured.reasoningLevels) : [] }
 }
 

@@ -1,13 +1,34 @@
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::{validate, Model, Profile};
-use crate::server::core::{
-    account_store::AccountStore, capability, custom_providers, key_scope::KeyScope, model_meta,
-    models::model_id, providers,
+use crate::server::{
+    config,
+    core::{
+        account_store::AccountStore, capability, custom_providers, key_scope::KeyScope, model_meta,
+        models::model_id, providers,
+    },
 };
 
-pub fn models(store: &AccountStore, gateway_key_id: Option<&str>) -> Result<Vec<Model>, String> {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogModel {
+    #[serde(flatten)]
+    pub model: Model,
+    #[serde(skip_serializing_if = "is_false")]
+    pub routing_group: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_summary: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+pub fn models(store: &AccountStore, gateway_key_id: Option<&str>) -> Result<Vec<CatalogModel>, String> {
     let scope = gateway_key_id
         .map(validate::gateway_credential)
         .transpose()?
@@ -15,7 +36,36 @@ pub fn models(store: &AccountStore, gateway_key_id: Option<&str>) -> Result<Vec<
     Ok(scoped_models(store, scope.as_ref()))
 }
 
-fn scoped_models(store: &AccountStore, scope: Option<&KeyScope>) -> Vec<Model> {
+fn group_meta(id: &str) -> (Option<usize>, Option<String>) {
+    let profiles = config::routing_profiles();
+    let Some(group) = profiles
+        .groups
+        .values()
+        .find(|group| group.model.eq_ignore_ascii_case(id))
+    else {
+        return (None, None);
+    };
+    let mut member_models = Vec::new();
+    let mut seen = HashSet::new();
+    let mut active_count = 0usize;
+    for member in group.members.iter().filter(|member| member.included) {
+        active_count += 1;
+        let label = member.model.trim();
+        if !label.is_empty() && seen.insert(label.to_ascii_lowercase()) {
+            member_models.push(label.to_string());
+        }
+    }
+    let summary = if member_models.is_empty() {
+        None
+    } else if member_models.len() <= 3 {
+        Some(member_models.join(" / "))
+    } else {
+        Some(format!("{} / +{}", member_models[..3].join(" / "), member_models.len() - 3))
+    };
+    (Some(active_count), summary)
+}
+
+fn scoped_models(store: &AccountStore, scope: Option<&KeyScope>) -> Vec<CatalogModel> {
     let public = providers::catalog::models_response(store, scope);
     let mut manifests = HashMap::<String, Vec<Value>>::new();
     let mut result = Vec::new();
@@ -60,20 +110,26 @@ fn scoped_models(store: &AccountStore, scope: Option<&KeyScope>) -> Vec<Model> {
             .map(str::to_string).collect::<Vec<_>>();
         let mut seen = HashSet::new();
         levels.retain(|level| seen.insert(level.clone()));
-        result.push(Model {
-            name: item.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or(&id).to_string(),
-            id,
-            context_window: field("maxInputTokens", "max_input_tokens").and_then(Value::as_u64),
-            max_output_tokens: field("maxOutputTokens", "max_output_tokens").and_then(Value::as_u64),
-            supports_tools: field("supportsToolCall", "supports_tool_call").and_then(Value::as_bool),
-            supports_images: field("supportsImages", "supports_images").and_then(Value::as_bool),
-            supports_video: field("supportsVideo", "supports_video").and_then(Value::as_bool),
-            supports_reasoning: field("supportsReasoning", "supports_reasoning").and_then(Value::as_bool),
-            reasoning_levels: levels,
-            effort: String::new(),
+        let (member_count, group_summary) = if grouped { group_meta(&id) } else { (None, None) };
+        result.push(CatalogModel {
+            model: Model {
+                name: item.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or(&id).to_string(),
+                id,
+                context_window: field("maxInputTokens", "max_input_tokens").and_then(Value::as_u64),
+                max_output_tokens: field("maxOutputTokens", "max_output_tokens").and_then(Value::as_u64),
+                supports_tools: field("supportsToolCall", "supports_tool_call").and_then(Value::as_bool),
+                supports_images: field("supportsImages", "supports_images").and_then(Value::as_bool),
+                supports_video: field("supportsVideo", "supports_video").and_then(Value::as_bool),
+                supports_reasoning: field("supportsReasoning", "supports_reasoning").and_then(Value::as_bool),
+                reasoning_levels: levels,
+                effort: String::new(),
+            },
+            routing_group: grouped,
+            member_count,
+            group_summary,
         });
     }
-    result.sort_by_cached_key(|model| model.id.to_lowercase());
+    result.sort_by_cached_key(|entry| (!entry.routing_group, entry.model.id.to_lowercase()));
     result
 }
 

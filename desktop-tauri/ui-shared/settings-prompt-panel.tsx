@@ -183,6 +183,7 @@ export function PromptSettingsPanel({ api, t, active = true }: { api: PromptApi;
         </div>
       </div>
       <datalist id='sp-model-choices'>{view.models.map(model => <option key={model} value={model} />)}</datalist>
+      <datalist id='sp-upstream-model-choices'>{(view.upstreamModels ?? []).map(model => <option key={model} value={model} />)}</datalist>
       <PromptRuleTester api={api} config={draft} view={view} t={t} onLocate={locate} />
       <PromptGatewaySection api={api} view={view} busy={busy || dirty} t={t} onRefresh={load} />
       {view.degradeActive ? <div className='sp-degrade'>

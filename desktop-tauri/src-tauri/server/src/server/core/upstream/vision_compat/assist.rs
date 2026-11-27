@@ -136,7 +136,8 @@ pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, or
         if ctx.telemetry.is_cancelled() { return Err(super::super::cancellation::cancelled_error()); }
         let key = cache::key(&[&request_fingerprint, &vision.revision, &target.provider, &target.model,
             &target.reasoning, &image.reference, image.detail.as_deref().unwrap_or("")]);
-        if rule.reuse_results {
+        let privacy_active = ctx.privacy.settings.enabled;
+        if rule.reuse_results && !privacy_active {
             if let Some(text) = cache::get(&key) {
                 detail["cachedImages"] = (detail["cachedImages"].as_u64().unwrap_or(0) + 1).into();
                 descriptions.push(text);
@@ -162,7 +163,7 @@ pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, or
             GatewayError::with_status(error.status_code,
                 format!("辅助识图失败：{}；未删除图片或切换处理方式", error.message)).with_code("vision_assist_failed")
         })?;
-        if rule.reuse_results { cache::put(key, text.clone()); }
+        if rule.reuse_results && !privacy_active { cache::put(key, text.clone()); }
         descriptions.push(text);
     }
     let mut body = content::replace(ctx.body, &images, &descriptions)?;

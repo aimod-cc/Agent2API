@@ -271,7 +271,7 @@ export function PrivacyTermsSection({
         </div>
         <Textarea id='privacy-words' rows={4} spellCheck={false} disabled={disabled}
           value={wordsText}
-          placeholder={t('例如：内部项目代号、姓名或私密域名')}
+          placeholder={t('例如：内部项目代号、姓名、私密域名或日期（1990-05-20 会自动匹配同日多种写法）')}
           onChange={event => {
             const raw = event.currentTarget.value
             setWordsText(raw)
@@ -344,7 +344,7 @@ export function PrivacyTestSection({
         <h3 className='text-[12.5px] font-semibold'>{t('试一试（实时预览）')}</h3>
         <span className='hint'>{t('使用临时映射测试当前草稿效果，不会污染运行中映射或写入日志')}</span>
         <Button type='button' variant='ghost' size='xs' className='ml-auto' disabled={disabled || testing}
-          onClick={() => setSample(t('请帮我查看 sk-proj-demo1234567890abcd，联系人 a@example.com / 13800138000，订单 order_id=13800138000'))}>
+          onClick={() => setSample(t('请帮我查看 sk-proj-demo1234567890abcd，password=mysecret，联系人 alice@company.com / 13800138000，订单 order_id=13800138000'))}>
           {t('填入示例')}
         </Button>
       </div>

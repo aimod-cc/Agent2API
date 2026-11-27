@@ -18,7 +18,7 @@ export function invalidateAccountDetails(ids: readonly string[]): void {
   if (changed) detailsRevision++
 }
 
-const signatureOf = (account: AccountRecord): string => JSON.stringify([account.updatedAt, account.priority, account.enabled, account.name, account.nickname, account.displayName, account.email, account.available, account.rateLimits, account.needsRelogin, account.upstreamCooldownUntil, account.upstreamBlockedReason])
+const signatureOf = (account: AccountRecord): string => JSON.stringify([account.updatedAt, account.priority, account.enabled, account.name, account.nickname, account.displayName, account.email, account.available, account.rateLimits, account.routingCooldowns, account.needsRelogin, account.upstreamCooldownUntil, account.upstreamBlockedReason])
 
 export function accountDetailsCurrent(index: AccountRecord): boolean {
   return index.detailsLoaded !== false || details.get(index.id)?.signature === signatureOf(index)
@@ -38,7 +38,7 @@ export function cachedAccount(index: AccountRecord): AccountRecord {
     return cached
   }
   const updated: AccountRecord = { ...cached, ...index, balanceQuery: cached.balanceQuery, detailsLoaded: true }
-  for (const key of ['rateLimits', 'upstreamCooldownUntil', 'upstreamBlockedReason']) {
+  for (const key of ['rateLimits', 'routingCooldowns', 'upstreamCooldownUntil', 'upstreamBlockedReason']) {
     if (!Object.prototype.hasOwnProperty.call(index, key)) delete updated[key]
   }
   return updated

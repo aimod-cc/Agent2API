@@ -22,7 +22,7 @@ pub async fn fork(State(_state): State<ServerState>, Path(id): Path<String>, bod
 }
 
 pub async fn title(State(state): State<ServerState>, Path(id): Path<String>, headers: HeaderMap) -> Response {
-    let access = match model_access::authenticate(&headers, model_access::ASSISTANT_TITLE) {
+    let access = match model_access::authenticate_call(&headers, model_access::ASSISTANT_TITLE) {
         Ok(access) => access,
         Err(error) => return error.into_response(),
     };
@@ -61,13 +61,13 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
     let requested = match super::request_prepare::resolve_model(state, &mut body, access.scope.as_ref()).await {
         Ok(requested) => requested,
         Err(error) => {
-            pipeline::record_early_failure(state, started, &model, "", &access.source, &error);
+            pipeline::record_early_failure(state, started, &model, "", "chat_completions", &access.source, &error);
             return Err(error);
         }
     };
     let telemetry = Arc::new(RequestTelemetry::with_model_key(access.key_source));
     let request_id = telemetry.id();
-    super::request_prepare::record_started(state.request_stats(), &request_id, started, &requested, &model, "", &access.source, true).await;
+    super::request_prepare::record_started(state.request_stats(), &request_id, started, &requested, &model, "", "chat_completions", &access.source, true).await;
     if let Some(token) = crate::server::core::upstream::cancellation::register(&request_id) {
         telemetry.set_cancel_token(token);
     }
@@ -77,7 +77,8 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
         allowed_providers: access.scope, pinned_account: None, ignore_model_gate: false, proxy_override: None,
     }).await;
     let mut context = RecordContext { stats: state.request_stats(), telemetry, started_at: started, model: requested,
-        client_model: model, client_reasoning: String::new(), status: 200, raw_request: None, raw_response: None, is_test: true, source: access.source };
+        client_model: model, client_reasoning: String::new(), client_protocol: "chat_completions".to_string(),
+        status: 200, raw_request: None, raw_response: None, is_test: true, source: access.source };
     guard.complete();
     let body = match outcome {
         Ok(ForwardOutcome::Completion { body }) => { pipeline::record_entry(&context, None); body }

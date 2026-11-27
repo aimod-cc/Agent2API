@@ -24,6 +24,8 @@ pub struct Client {
     pub locations: Vec<Location>,
     pub identity: Identity,
     #[serde(default)]
+    pub switch_only: bool,
+    #[serde(default)]
     pub hot_switch: Option<HotSwitch>,
     #[serde(default)]
     pub proxy_launch: Option<ProxyLaunch>,
@@ -75,6 +77,7 @@ pub enum Root {
 pub enum Identity {
     JsonProduct { path: String, field: String, values: Vec<String> },
     PeProduct { values: Vec<String>, minimum_version: [u16; 3], absent: Vec<String> },
+    Authenticode { signers: Vec<String> },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -191,7 +194,11 @@ impl Declaration {
             match &client.identity {
                 Identity::JsonProduct { path, field, values } if relative(path) && identifier(field) && names(values, 8) => {},
                 Identity::PeProduct { values, absent, .. } if names(values, 8) && !absent.is_empty() && absent.len() <= 8 && absent.iter().all(|path| relative(path)) => {},
+                Identity::Authenticode { signers } if names(signers, 8) => {},
                 _ => return Err("本机客户端身份校验声明无效".into()),
+            }
+            if client.switch_only && (client.hot_switch.is_some() || client.proxy_launch.is_some()) {
+                return Err("仅切换凭证的客户端不支持在线重载或代理启动".into());
             }
             if let Some(hot_switch) = &client.hot_switch {
                 if !names(&hot_switch.service_executables, 8)
@@ -231,5 +238,64 @@ impl Declaration {
         json!({ "version": self.version, "clients": self.clients.iter().map(|client| json!({
             "id": client.id, "label": client.label, "platform": client.platform,
         })).collect::<Vec<_>>() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_switch_only_authenticode_client_and_rejects_conflicts() {
+        let valid: Declaration = serde_json::from_value(json!({
+            "version": 1,
+            "clients": [{
+                "id": "cli",
+                "label": "Antigravity CLI (agy)",
+                "platform": "windows",
+                "switch_only": true,
+                "executables": ["agy.exe"],
+                "locations": [{"root": "local_app_data", "path": "agy/bin/agy.exe"}],
+                "identity": {"kind": "authenticode", "signers": ["Google LLC"]},
+                "resources": [{"id": "oauth", "label": "Antigravity 登录凭证", "storage": {"kind": "keyring", "target": "gemini:antigravity", "username": "antigravity"}}]
+            }]
+        })).expect("valid cli declaration");
+        valid.validate().expect("cli declaration should validate");
+        assert_eq!(valid.summary(), json!({
+            "version": 1,
+            "clients": [{"id": "cli", "label": "Antigravity CLI (agy)", "platform": "windows"}]
+        }));
+
+        #[cfg(windows)]
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let agy = std::path::PathBuf::from(local).join("agy").join("bin").join("agy.exe");
+            if agy.is_file() {
+                let detected = super::super::paths::detect(&valid.clients[0], "")
+                    .expect("detect local agy.exe");
+                let detected_path = detected.as_deref().expect("local agy.exe should be detected");
+                assert!(
+                    super::super::paths::same(detected_path, &agy),
+                    "expected {}, got {}",
+                    agy.display(),
+                    detected_path.display()
+                );
+            }
+        }
+
+        let conflict: Declaration = serde_json::from_value(json!({
+            "version": 1,
+            "clients": [{
+                "id": "cli",
+                "label": "Antigravity CLI (agy)",
+                "platform": "windows",
+                "switch_only": true,
+                "executables": ["agy.exe"],
+                "locations": [{"root": "local_app_data", "path": "agy/bin/agy.exe"}],
+                "identity": {"kind": "authenticode", "signers": ["Google LLC"]},
+                "proxy_launch": {"kind": "chromium_env"},
+                "resources": [{"id": "oauth", "label": "Antigravity 登录凭证", "storage": {"kind": "keyring", "target": "gemini:antigravity", "username": "antigravity"}}]
+            }]
+        })).expect("conflict cli declaration");
+        assert!(conflict.validate().unwrap_err().contains("仅切换凭证"));
     }
 }

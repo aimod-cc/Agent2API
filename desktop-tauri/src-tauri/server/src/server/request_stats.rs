@@ -98,7 +98,7 @@ mod sql;
 mod local_direct;
 pub use local_direct::{
     LocalDirectAgentStats, LocalDirectFileState, LocalDirectIngestItem, LocalDirectIngestReport,
-    LocalDirectRef,
+    LocalDirectReasoningCandidate, LocalDirectRef,
 };
 #[cfg(test)]
 mod tests;

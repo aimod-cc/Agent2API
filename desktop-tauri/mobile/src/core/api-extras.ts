@@ -218,6 +218,8 @@ export type RequestRow = {
   model?: string
   clientModel?: string
   upstreamModel?: string
+  clientProtocol?: string
+  upstreamProtocol?: string
   accountId?: string
   accountName?: string
   provider?: string
@@ -330,6 +332,8 @@ export type ForwardingBundle = {
   }
   sanitize: boolean
   privacyEnabled: boolean
+  privacyEphemeral: boolean
+  privacyRevision: string
   keepaliveStrip: boolean
   developerRoleCompat: boolean
   reasoningCollapse: boolean
@@ -355,7 +359,7 @@ export async function fetchForwardingBundle(signal?: AbortSignal): Promise<Forwa
     apiCall<{ sanitizeBlacklistFingerprints?: boolean }>('/api/sanitize', { signal }).catch(
       () => ({}),
     ),
-    apiCall<{ enabled?: boolean }>('/api/privacy', { signal }).catch(
+    apiCall<{ enabled?: boolean; ephemeralPlaceholders?: boolean; revision?: string }>('/api/privacy', { signal }).catch(
       () => ({}),
     ),
     apiCall<{ stripNewlineKeepalive?: boolean }>('/api/keepalive-strip', { signal }).catch(
@@ -375,6 +379,10 @@ export async function fetchForwardingBundle(signal?: AbortSignal): Promise<Forwa
     timeouts,
     sanitize: Boolean((san as { sanitizeBlacklistFingerprints?: boolean }).sanitizeBlacklistFingerprints),
     privacyEnabled: Boolean((priv as { enabled?: boolean }).enabled),
+    privacyEphemeral: Boolean((priv as { ephemeralPlaceholders?: boolean }).ephemeralPlaceholders),
+    privacyRevision: typeof (priv as { revision?: unknown }).revision === 'string'
+      ? String((priv as { revision?: string }).revision)
+      : '',
     keepaliveStrip: Boolean((ka as { stripNewlineKeepalive?: boolean }).stripNewlineKeepalive),
     developerRoleCompat: Boolean((dev as { developerRoleCompat?: boolean }).developerRoleCompat),
     reasoningCollapse: Boolean(
@@ -428,6 +436,14 @@ export function saveCompatSwitch(
   }
   const target = map[kind]
   return apiCall(target.path, { method: 'PUT', body: target.body })
+}
+
+export function savePrivacyQuickSettings(patch: {
+  enabled?: boolean
+  ephemeralPlaceholders?: boolean
+  revision?: string
+}): Promise<{ enabled?: boolean; ephemeralPlaceholders?: boolean; revision?: string }> {
+  return apiCall('/api/privacy', { method: 'PUT', body: patch })
 }
 
 export function fetchDebugMode(signal?: AbortSignal): Promise<{ debugMode?: boolean }> {

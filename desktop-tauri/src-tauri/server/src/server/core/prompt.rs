@@ -239,7 +239,7 @@ impl GatewayBlocks {
     }
 }
 
-/// 请求开始时借用同一份规则快照；提供商随实际选路匹配，客户端和模型保持入站值。
+/// 请求开始时借用同一份规则快照；提供商与上游模型随实际选路和映射匹配，客户端和请求模型保持入站值。
 #[derive(Clone, Copy, Debug)]
 pub struct PromptPlan<'a> {
     pub default: PromptChoice<'a>,
@@ -264,14 +264,14 @@ impl<'a> PromptPlan<'a> {
         self
     }
 
-    pub fn matched_rule(&self, provider_id: &str) -> Option<&'a rules::CompiledRule> {
+    pub fn matched_rule(&self, provider_id: &str, upstream_model: &str) -> Option<&'a rules::CompiledRule> {
         let client = self.request.map(|request| request.client.as_str()).unwrap_or("");
         let model = self.request.map(|request| request.model.as_str()).unwrap_or("");
-        self.rules.iter().find(|rule| rule.matches(provider_id, client, model))
+        self.rules.iter().find(|rule| rule.matches(provider_id, client, model, upstream_model))
     }
 
-    pub fn for_provider(&self, provider_id: &str) -> PromptChoice<'a> {
-        if let Some(rule) = self.matched_rule(provider_id) {
+    pub fn for_provider(&self, provider_id: &str, upstream_model: &str) -> PromptChoice<'a> {
+        if let Some(rule) = self.matched_rule(provider_id, upstream_model) {
             return PromptChoice { mode: rule.prompt.mode, text: &rule.prompt.text, source: rule.prompt.source };
         }
         if self.rules_configured { return self.default; }
@@ -417,4 +417,60 @@ fn is_system_role(message: &Value) -> bool {
         .and_then(Value::as_str)
         .map(|role| role == "system" || role == "developer")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn prompt_plan_matches_upstream_model_per_provider() {
+        let rule = rules::Rule {
+            id: "r1".into(),
+            name: "DeepSeek 上游".into(),
+            enabled: true,
+            logic: rules::Logic::All,
+            conditions: vec![rules::Condition {
+                id: "c1".into(),
+                field: rules::Field::UpstreamModel,
+                op: rules::Operator::Contains,
+                values: vec!["deepseek".into()],
+            }],
+            mode: PromptMode::Custom,
+            file: String::new(),
+            text: "deepseek-system".into(),
+        };
+        let compiled = vec![rules::CompiledRule {
+            matchers: vec![rules::Matcher::compile(&rule.conditions[0]).unwrap()],
+            prompt: crate::server::config::ProviderPrompt {
+                mode: PromptMode::Custom,
+                file: None,
+                inline: Some("deepseek-system".into()),
+                text: "deepseek-system".into(),
+                source: PromptSource::Inline,
+                file_error: None,
+            },
+            rule,
+        }];
+        let providers = BTreeMap::new();
+        let request = rules::Request {
+            client: "claude-code".into(),
+            model: "claude-haiku-4-5".into(),
+        };
+        let fallback = PromptChoice {
+            mode: PromptMode::Custom,
+            text: BUILT_IN_PROMPT,
+            source: PromptSource::BuiltIn,
+        };
+        let plan = PromptPlan::new(fallback, &providers, &compiled, true).with_request(&request);
+
+        let hit = plan.for_provider("workbuddy", "deepseek-v4.1-flash");
+        assert_eq!(hit.source, PromptSource::Inline);
+        assert_eq!(hit.text, "deepseek-system");
+
+        let miss = plan.for_provider("anthropic", "claude-haiku-4-5");
+        assert_eq!(miss.source, PromptSource::BuiltIn);
+        assert_eq!(miss.text, BUILT_IN_PROMPT);
+    }
 }

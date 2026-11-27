@@ -1,12 +1,14 @@
 import * as React from 'react'
 import {
   Badge, Button, HtmlContent, StatusDot,
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+  Tooltip, TooltipContent, TooltipTrigger, cn,
 } from '@ui'
+import '../../styles/request-detail.css'
 import { t } from '../../i18n'
 import { requestApiKeyLabel, requestClientLabel } from '../../../../ui-shared/model-api-key'
 import { ClientIdentificationDetail } from '../../../../ui-shared/client-identification-detail'
 import { VisionRequestDetail, visionDetail } from '../../../../ui-shared/request-vision-detail'
+import { describeRequestProtocol } from '../../../../ui-shared/request-protocol'
 import type { ClientEvidence } from '../../../../ui-shared/client-identification'
 import { errorPolicyDescription } from '../../../../ui-shared/routing-errors-record'
 import { clientIdentificationApi } from '../settings-client-identification'
@@ -15,7 +17,8 @@ import { RequestEmpty as Empty } from '../request-raw-panes'
 import { RouteReplayFacts } from '../routing-replay'
 import type { ReplayRow, RouteDecision } from '../routing-types'
 import { numberText } from '../accounts-shared'
-import { ClientBrand, ProviderBrand } from './request-brand'
+import { ClientIcon, ProviderIcon } from './request-brand'
+import { formatModelWithReasoning } from './request-cells'
 import { privacyActionLabel, privacyKindLabel } from '../settings-privacy-model'
 
 export type AttemptDetail = {
@@ -59,6 +62,8 @@ export type RequestRow = {
   upstreamModel?: unknown
   clientReasoning?: unknown
   upstreamReasoning?: unknown
+  clientProtocol?: unknown
+  upstreamProtocol?: unknown
   accountId?: unknown
   accountName?: unknown
   attemptDetails?: AttemptDetail[]
@@ -136,6 +141,19 @@ function fmtDuration(ms: unknown): string {
   return millis > 0 ? t('{s}秒{ms}ms', { s: seconds, ms: millis }) : t('{n}秒', { n: seconds })
 }
 
+function fmtDurationCompact(ms: unknown): string {
+  const value = Number(ms)
+  if (!Number.isFinite(value) || value <= 0) return '—'
+  const rounded = Math.round(value)
+  if (rounded < 1000) return `${rounded}ms`
+  if (rounded >= 60_000) {
+    const seconds = Math.floor(rounded / 1000)
+    return t('{m}分{s}秒', { m: Math.floor(seconds / 60), s: seconds % 60 })
+  }
+  const sec = rounded / 1000
+  return t('{n}秒', { n: rounded % 1000 === 0 ? String(Math.floor(sec)) : sec.toFixed(1) })
+}
+
 function fmtFirstResponse(ms: unknown): string {
   const value = Number(ms)
   if (!Number.isFinite(value) || value <= 0) return '—'
@@ -159,9 +177,41 @@ function fmtTokens(value: unknown): string {
   return shared().wbUnits?.formatTokens?.(value) ?? (Number(value) || 0).toLocaleString('zh-CN')
 }
 
+function fmtExactInt(value: unknown): string {
+  return (Number(value) || 0).toLocaleString('zh-CN')
+}
+
 function fmtElapsed(ts: RequestRow['ts']): string {
   const elapsed = Math.max(0, Date.now() - (Number(ts) || 0))
   return t('{n}秒', { n: Math.max(1, Math.floor(elapsed / 1000)) })
+}
+
+function fmtBodyBytes(raw: unknown): { text: string; title?: string } {
+  const bytes = Number(raw)
+  if (!Number.isFinite(bytes) || bytes <= 0) return { text: '' }
+  const text = bytes >= 1024 * 1024
+    ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    : bytes >= 1024
+      ? `${Math.round(bytes / 1024)} KB`
+      : `${bytes} B`
+  return { text, title: t('实际发给上游 {bytes} 字节', { bytes: bytes.toLocaleString() }) }
+}
+
+function FlowArrowIcon() {
+  return (
+    <svg width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+      <path d='M2.5 6h7M6.5 3l3 3-3 3' />
+    </svg>
+  )
+}
+
+function ChevronDownIcon({ open }: { open: boolean }) {
+  return (
+    <svg width='11' height='11' viewBox='0 0 16 16' fill='none' stroke='currentColor' strokeWidth='1.8' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'
+      className={cn('transition-transform duration-150', open && 'rotate-180')}>
+      <path d='m4 6 4 4 4-4' />
+    </svg>
+  )
 }
 
 export function StatusSummary({ row }: { row: RequestRow }) {
@@ -199,129 +249,144 @@ export function StatusSummary({ row }: { row: RequestRow }) {
   return <span className='req-tag-err' title={title}>{status || t('失败')}</span>
 }
 
-function DetailGroup({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className='req-detail-group'>
-      <div className='req-detail-group-title'>{title}</div>
-      <div className='req-detail-dl'>{children}</div>
-    </div>
-  )
-}
-
-function DetailRow({
-  label,
-  children,
-  mono = false,
-  strong = false,
-  total = false,
-  muted = false,
-  title,
-}: {
-  label: string
-  children: React.ReactNode
-  mono?: boolean
-  strong?: boolean
-  total?: boolean
-  muted?: boolean
-  title?: string
-}) {
-  return (
-    <div className={`req-detail-row${total ? ' is-total' : ''}`}>
-      <span className='req-detail-k'>{label}</span>
-      <span
-        className={`req-detail-v${mono ? ' is-mono' : ''}${strong ? ' is-strong' : ''}${muted ? ' is-muted' : ''}`}
-        title={title}
-      >
-        {children}
-      </span>
-    </div>
-  )
-}
-
-const ATTEMPT_CELL = 'border border-hairline px-2 py-1 align-top'
-const ATTEMPT_HEAD = 'border border-hairline bg-surface-2 px-2 py-1 text-[11px] tracking-normal whitespace-nowrap'
-const NO_HOVER = 'hover:[&>td]:bg-transparent'
-
-function attemptResult(item: AttemptDetail): React.ReactNode {
+function AttemptCard({ item, index, runningReq }: { item: AttemptDetail; index: number; runningReq: boolean }) {
+  const [retriesOpen, setRetriesOpen] = React.useState(false)
   const status = Number(item?.status)
   const hasStatus = item?.status !== null && item?.status !== undefined && Number.isFinite(status)
   const error = item?.error ? String(item.error) : ''
-  if (error) {
-    const text = hasStatus
-      ? t('失败（{status}）：{error}', { status: String(status), error })
-      : t('失败：{error}', { error })
-    return <span className='break-words text-destructive'>{text}</span>
-  }
-  if (hasStatus) return <span className='text-success'>{t('成功（{status}）', { status: String(status) })}</span>
-  return <span className='text-muted-foreground'>{t('无结果记录')}</span>
-}
+  const ok = !error && hasStatus && status >= 200 && status < 300
+  const providerId = String(item?.provider ?? '').trim()
+  const provider = providerName(item) || (providerId || t('未知'))
+  const account = item?.account ? String(item.account) : ''
+  const retries = Array.isArray(item?.retries) ? item.retries : []
+  const notice = [String(item?.notice ?? '').trim(), errorPolicyDescription(item?.errorPolicy, t)].filter(Boolean).join(' · ')
+  const body = fmtBodyBytes(item?.bodyBytes)
+  const hasMeta = Boolean(body.text || retries.length > 0 || notice)
 
-function AttemptsTable({ row, loading }: { row: RequestRow; loading?: boolean }) {
-  const details = Array.isArray(row.attemptDetails) ? row.attemptDetails : []
-  if (loading && !details.length) return <span className='text-xs text-muted-foreground'>{t('正在加载明细…')}</span>
-  if (!details.length) return null
-  const attempts = Number(row.attempts) || 1
   return (
-    <div className='overflow-x-auto rounded-md border border-border bg-surface'>
-      <Table className='text-[11.5px]'>
-        <TableHeader>
-          <TableRow className={NO_HOVER}>
-            {[t('轮次'), t('提供商'), t('账号'), t('结果'), t('体积'), t('内部重试'), t('提示')].map(label => (
-              <TableHead key={label} className={ATTEMPT_HEAD}>{label}</TableHead>
-            ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {details.map((item, index) => {
-            const retries = Array.isArray(item?.retries) ? item.retries : []
-            const retryTitle = retries.map(retry => {
-              const delayMs = Number(retry?.delayMs)
-              const delay = Number.isFinite(delayMs) && delayMs > 0
-                ? (delayMs >= 1000
-                    ? t('，{n}秒后重试', { n: Math.round(delayMs / 1000) })
-                    : t('，{n}毫秒后重试', { n: Math.round(delayMs) }))
-                : ''
-              return `${String(retry?.reason || t('未知原因'))}${delay}`
-            }).join('\n')
-            const notice = [String(item?.notice ?? '').trim(), errorPolicyDescription(item?.errorPolicy, t)].filter(Boolean).join(' · ')
-            const bodyRaw = Number(item?.bodyBytes)
-            const bodyText = Number.isFinite(bodyRaw) && bodyRaw > 0
-              ? bodyRaw >= 1024 * 1024
-                ? `${(bodyRaw / 1024 / 1024).toFixed(1)} MB`
-                : bodyRaw >= 1024
-                  ? `${Math.round(bodyRaw / 1024)} KB`
-                  : `${bodyRaw} B`
-              : '—'
-            const bodyTitle = Number.isFinite(bodyRaw) && bodyRaw > 0
-              ? t('实际发给上游 {bytes} 字节', { bytes: bodyRaw.toLocaleString() })
-              : undefined
+    <div className={cn('req-detail-attempt', error && 'is-failed', ok && 'is-ok')}>
+      <div className='req-detail-attempt-top'>
+        <div className='flex min-w-0 flex-1 items-center gap-2'>
+          <span className='req-detail-attempt-num'>{index + 1}</span>
+          <div className='flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5'>
+            <span className='inline-flex min-w-0 items-center gap-1.5 text-[12.5px] font-medium text-foreground'>
+              <ProviderIcon providerId={providerId} size={15} />
+              <span className='truncate'>{provider}</span>
+            </span>
+            {account ? (
+              <span className='truncate font-mono text-[11.5px] text-muted-foreground' title={account}>
+                {account}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div className='shrink-0'>
+          {error ? (
+            <Badge variant='destructive' shape='tag'>
+              {hasStatus ? t('失败 {status}', { status: String(status) }) : t('失败')}
+            </Badge>
+          ) : hasStatus ? (
+            <Badge variant='success' shape='tag'>
+              {t('成功 {status}', { status: String(status) })}
+            </Badge>
+          ) : (
+            <Badge variant='outline' shape='tag'>
+              {runningReq ? t('响应中 · 尚无结果') : t('无结果记录')}
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {hasMeta ? (
+        <div className='req-detail-attempt-meta'>
+          {body.text ? (
+            <span className='font-mono tabular-nums' title={body.title}>
+              {t('请求体积 {size}', { size: body.text })}
+            </span>
+          ) : null}
+          {retries.length > 0 ? (
+            <button
+              type='button'
+              className='req-detail-retry-toggle'
+              aria-expanded={retriesOpen}
+              onClick={() => setRetriesOpen(prev => !prev)}
+            >
+              <span>{t('↻ 内部重试 {n} 次', { n: retries.length })}</span>
+              <ChevronDownIcon open={retriesOpen} />
+            </button>
+          ) : null}
+          {notice ? <span className='text-subtle'>{notice}</span> : null}
+        </div>
+      ) : null}
+
+      {retriesOpen && retries.length > 0 ? (
+        <div className='req-detail-retry-box'>
+          {retries.map((retry, idx) => {
+            const delayMs = Number(retry?.delayMs)
+            const delay = Number.isFinite(delayMs) && delayMs > 0
+              ? (delayMs >= 1000
+                  ? t('{n}秒后重试', { n: delayMs % 1000 === 0 ? Math.round(delayMs / 1000) : Number((delayMs / 1000).toFixed(1)) })
+                  : t('{n}毫秒后重试', { n: Math.round(delayMs) }))
+              : ''
             return (
-              <TableRow key={index} className={NO_HOVER}>
-                <TableCell className={ATTEMPT_CELL}>{index + 1}</TableCell>
-                <TableCell className={ATTEMPT_CELL}>
-                  {providerName(item) || (item?.provider ? String(item.provider) : t('未知'))}
-                </TableCell>
-                <TableCell className={ATTEMPT_CELL}>{item?.account ? String(item.account) : '—'}</TableCell>
-                <TableCell className={ATTEMPT_CELL}>{attemptResult(item)}</TableCell>
-                <TableCell className={`${ATTEMPT_CELL} whitespace-nowrap`} title={bodyTitle}>{bodyText}</TableCell>
-                <TableCell className={`${ATTEMPT_CELL} whitespace-nowrap`} title={retryTitle || undefined}>
-                  {retries.length ? t('↻ {n} 次', { n: retries.length }) : '-'}
-                </TableCell>
-                <TableCell className={ATTEMPT_CELL}>{notice || '—'}</TableCell>
-              </TableRow>
+              <div key={idx} className='flex items-baseline justify-between gap-2'>
+                <span className='min-w-0 break-words'>
+                  {t('第 {n} 次：{reason}', { n: idx + 1, reason: String(retry?.reason || t('未知原因')) })}
+                </span>
+                {delay ? (
+                  <span className='shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums'>{delay}</span>
+                ) : null}
+              </div>
             )
           })}
-          {details.length < attempts ? (
-            <TableRow className={NO_HOVER}>
-              <TableCell colSpan={7} className={`${ATTEMPT_CELL} text-muted-foreground`}>
-                {t('另有 {missing} 次尝试未记录明细（只保留最早的 {kept} 条）', {
-                  missing: attempts - details.length, kept: details.length,
-                })}
-              </TableCell>
-            </TableRow>
-          ) : null}
-        </TableBody>
-      </Table>
+        </div>
+      ) : null}
+
+      {error ? <div className='req-detail-attempt-err'>{error}</div> : null}
+    </div>
+  )
+}
+
+function AttemptsSection({ row, loading }: { row: RequestRow; loading?: boolean }) {
+  const details = Array.isArray(row.attemptDetails) ? row.attemptDetails : []
+  if (loading && !details.length) {
+    return (
+      <div className='req-detail-group'>
+        <div className='req-detail-group-head'>
+          <span className='req-detail-group-title'>{t('尝试明细')}</span>
+        </div>
+        <span className='px-0.5 text-xs text-muted-foreground'>{t('正在加载明细…')}</span>
+      </div>
+    )
+  }
+  if (!details.length) return null
+  const attempts = Number(row.attempts) || details.length
+  const failedCount = details.filter(item => Boolean(item?.error)).length
+  const runningReq = isRunning(row)
+
+  return (
+    <div className='req-detail-group'>
+      <div className='req-detail-group-head'>
+        <span className='req-detail-group-title'>{t('尝试明细')}</span>
+        <span className='font-mono text-[11px] text-muted-foreground tabular-nums'>
+          {failedCount > 0
+            ? t('共 {n} 轮 · 失败 {failed} 次', { n: attempts, failed: failedCount })
+            : t('共 {n} 轮', { n: attempts })}
+        </span>
+      </div>
+      <div className='req-detail-attempts'>
+        {details.map((item, index) => (
+          <AttemptCard key={index} item={item} index={index} runningReq={runningReq} />
+        ))}
+        {details.length < attempts ? (
+          <div className='px-1 text-[11.5px] text-muted-foreground'>
+            {t('另有 {missing} 次尝试未记录明细（只保留最早的 {kept} 条）', {
+              missing: attempts - details.length, kept: details.length,
+            })}
+          </div>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -360,13 +425,14 @@ export function RequestDetailPane({ row, loadingDetail = false }: { row: Request
   const provider = providerName(row)
   const account = String(row.accountName ?? '').trim()
   const clientLabel = requestClientLabel(row, t)
+  const apiKeyLabel = requestApiKeyLabel(row, t)
 
   const clientModel = String(row.clientModel ?? '').trim()
   const upstreamModel = String(row.upstreamModel ?? '').trim()
   const shownModel = String(row.model ?? '').trim()
   const clientLevel = String(row.clientReasoning ?? '').trim()
   const upstreamLevel = String(row.upstreamReasoning ?? '').trim()
-  const withLevel = (name: string, level: string) => (level ? `${name}(${level})` : name)
+  const withLevel = (name: string, level: string) => formatModelWithReasoning(name, level, row.origin)
   const isMapped = Boolean(clientModel && upstreamModel && upstreamModel.toLowerCase() !== clientModel.toLowerCase())
   const actualModelText = isMapped ? withLevel(upstreamModel, upstreamLevel) : withLevel(shownModel, upstreamLevel || clientLevel)
   const requestedModelText = isMapped ? withLevel(clientModel, clientLevel) : ''
@@ -378,20 +444,52 @@ export function RequestDetailPane({ row, loadingDetail = false }: { row: Request
   const cacheWrite = Number(row.cacheCreationTokens) || 0
   const cachePct = prompt > 0 && cacheRead > 0 ? (cacheRead / prompt) * 100 : null
   const cacheRate = cachePct !== null ? `${cachePct.toFixed(1)}%` : ''
-  const cacheToneCls = cachePct === null || cachePct >= 70
-    ? 'is-tone-good'
-    : cachePct >= 30
-      ? 'is-tone-info'
-      : 'is-tone-warn'
+  const cacheToneCls = cachePct === null
+    ? 'is-muted'
+    : cachePct >= 70
+      ? 'is-good'
+      : cachePct >= 30
+        ? 'is-info'
+        : 'is-warn'
 
   const hasCost = row.costUsd !== null && row.costUsd !== undefined && Number.isFinite(Number(row.costUsd))
   const hasCredit = row.credit !== null && row.credit !== undefined && Number.isFinite(Number(row.credit))
+  const formattedCost = hasCost ? formatCost(Number(row.costUsd), pricing.currency, pricing.exchangeRate) : ''
+  const costMain = hasCost
+    ? formattedCost
+    : hasCredit
+      ? t('{credit} 积分', { credit: numberText(row.credit) })
+      : '—'
+  const costSub = hasCost
+    ? [
+        pricing.currency === 'cny' ? `$${Number(row.costUsd).toFixed(5)}` : '',
+        hasCredit
+          ? t('{credit} 积分', { credit: numberText(row.credit) })
+          : (row.priceSource ? pricingSourceLabel(row.priceSource) : ''),
+      ].filter(Boolean).join(' · ')
+    : ''
+
+  const firstResp = fmtFirstResponse(row.firstResponseMs)
   const speed = fmtTokensPerSecond(row)
-  const attempts = Number(row.attempts) || 1
+  const durMain = running ? fmtElapsed(row.ts) : fmtDurationCompact(row.durationMs)
+  const durSub = running
+    ? t('进行中')
+    : [
+        firstResp !== '—' ? t('首响 {time}', { time: firstResp }) : '',
+        speed,
+      ].filter(Boolean).join(' · ')
+
   const details = Array.isArray(row.attemptDetails) ? row.attemptDetails : []
   const hits = Array.isArray(row.sensitiveHits) ? row.sensitiveHits : []
   const privacyHits = Array.isArray(row.privacyHits) ? row.privacyHits : []
   const hasVision = Boolean(visionDetail(row.route))
+  const hasProcessing = hits.length > 0 || privacyHits.length > 0
+  const proto = describeRequestProtocol(row.clientProtocol, row.upstreamProtocol, t)
+  const protoTitle = proto.converted
+    ? t('协议转换：{from} → {to}', { from: proto.subFullLabel, to: proto.mainFullLabel })
+    : proto.mainFullLabel
+      ? t('请求协议：{protocol}', { protocol: proto.mainFullLabel })
+      : ''
 
   return (
     <div className='req-detail-sections'>
@@ -402,131 +500,224 @@ export function RequestDetailPane({ row, loadingDetail = false }: { row: Request
         </div>
       ) : null}
 
-      <DetailGroup title={t('基本信息')}>
-        <DetailRow label={t('时间')} mono>{fmtTime(row.ts)}</DetailRow>
-        <DetailRow label={t('状态')}><StatusSummary row={row} /></DetailRow>
-        <DetailRow label={t('来源软件')}>
-          <span className='inline-flex justify-end'><ClientBrand entry={row} label={clientLabel} /></span>
-        </DetailRow>
-        <DetailRow label='API Key'>{requestApiKeyLabel(row, t)}</DetailRow>
-        <DetailRow label={t('提供商')}>
-          {provider ? (
-            <span className='inline-flex justify-end'><ProviderBrand providerId={providerId} label={provider} /></span>
-          ) : '—'}
-        </DetailRow>
-        {account ? <DetailRow label={t('命中账号')}>{account}</DetailRow> : null}
-        <DetailRow label={isMapped ? t('实际转发模型') : t('模型')} mono>{actualModelText || '—'}</DetailRow>
-        {requestedModelText ? <DetailRow label={t('原请求模型')} mono muted>{requestedModelText}</DetailRow> : null}
-        {attempts > 1 ? <DetailRow label={t('尝试次数')} mono>{String(attempts)}</DetailRow> : null}
-        {row.origin === 'local_direct' ? (
-          <DetailRow label={t('采集方式')}>
-            <Badge variant='info' shape='tag'>{t('本机直连（未经过网关）')}</Badge>
-          </DetailRow>
-        ) : null}
-        {row.isTest ? (
-          <DetailRow label={t('请求性质')}>
-            <Badge variant='brand' shape='tag'
-              title={t('面板内发起的模型调用，消耗额度并记录 Key，不计入生产报表')}>
-              {clientLabel}
-            </Badge>
-          </DetailRow>
-        ) : null}
-      </DetailGroup>
-
-      <DetailGroup title={t('Token 用量')}>
-        <DetailRow label={t('输入')} mono>{fmtTokens(prompt)}</DetailRow>
-        <DetailRow label={t('输出')} mono>{fmtTokens(completion)}</DetailRow>
-        <DetailRow label={t('缓存读取')} mono muted={cacheRead === 0}>
-          {cacheRead > 0 ? (
-            <span className={`req-usage-line ${cacheToneCls}`}>
-              {fmtTokens(cacheRead)}{cacheRate ? ` (${cacheRate})` : ''}
-            </span>
-          ) : fmtTokens(cacheRead)}
-        </DetailRow>
-        {cacheWrite > 0 ? <DetailRow label={t('缓存写入')} mono>{fmtTokens(cacheWrite)}</DetailRow> : null}
-        <DetailRow label={t('合计')} mono strong total>{fmtTokens(total)}</DetailRow>
-      </DetailGroup>
-
-      <DetailGroup title={t('费用与性能')}>
-        <DetailRow label={t('预估费用')} mono>
-          {hasCost ? (
-            <span>
-              {formatCost(Number(row.costUsd), pricing.currency, pricing.exchangeRate)}
-              {pricing.currency === 'cny' ? (
-                <span className='ml-1.5 text-[11px] text-muted-foreground'>(${Number(row.costUsd).toFixed(5)})</span>
+      {/* 顶部路由摘要卡 */}
+      <div className='req-detail-hero'>
+        <div className='req-detail-hero-top'>
+          <div className='min-w-0 flex-1'>
+            <div className='flex flex-wrap items-center gap-1.5'>
+              <span className='req-detail-hero-model'>{actualModelText || '—'}</span>
+              {proto.inlineText ? (
+                <Badge variant='outline' shape='tag' className='font-mono' title={protoTitle}>
+                  {proto.inlineText}
+                </Badge>
               ) : null}
-              {row.priceSource ? (
-                <span className='ml-1.5 text-[11px] text-muted-foreground'>· {pricingSourceLabel(row.priceSource)}</span>
+              {row.origin === 'local_direct' ? (
+                <Badge variant='info' shape='tag'>{t('本机直连')}</Badge>
               ) : null}
-            </span>
-          ) : '—'}
-        </DetailRow>
-        {hasCredit ? <DetailRow label={t('积分消耗')} mono>{numberText(row.credit)}</DetailRow> : null}
-        <DetailRow label={t('首字响应')} mono>{running ? '—' : fmtFirstResponse(row.firstResponseMs)}</DetailRow>
-        <DetailRow label={t('生成速度')} mono title={SPEED_TIP}>{running ? '—' : speed || '—'}</DetailRow>
-        <DetailRow label={t('总耗时')} mono strong total>
-          {running ? (
-            <>
-              {fmtElapsed(row.ts)}
-              <span className='ml-1 text-[11.5px] font-normal text-muted-foreground'>{t('（进行中）')}</span>
-            </>
-          ) : fmtDuration(row.durationMs)}
-        </DetailRow>
-      </DetailGroup>
+              {row.isTest ? (
+                <Badge variant='brand' shape='tag'
+                  title={t('面板内发起的模型调用，消耗额度并记录 Key，不计入生产报表')}>
+                  {clientLabel}
+                </Badge>
+              ) : null}
+            </div>
+            {requestedModelText ? (
+              <div className='mt-0.5 font-mono text-[11px] text-muted-foreground'>
+                {t('原请求 {model} → 实际转发', { model: requestedModelText })}
+              </div>
+            ) : null}
+          </div>
+          <span className='shrink-0 pt-0.5 font-mono text-[11.5px] text-muted-foreground tabular-nums'>
+            {fmtTime(row.ts)}
+          </span>
+        </div>
+
+        <div className='req-detail-flow'>
+          <div className='req-detail-flow-node'>
+            <ClientIcon client={row.client} label={clientLabel} size={20} />
+            <div className='min-w-0 flex-1'>
+              <div className='truncate text-[12.5px] font-medium text-foreground' title={clientLabel}>{clientLabel}</div>
+              <div className='truncate text-[11px] text-muted-foreground' title={row.origin === 'local_direct' ? t('未经过网关') : apiKeyLabel}>
+                {row.origin === 'local_direct' ? t('未经过网关') : apiKeyLabel}
+              </div>
+            </div>
+          </div>
+
+          <span className='req-detail-flow-arrow' aria-hidden='true'>
+            <FlowArrowIcon />
+          </span>
+
+          <div className='req-detail-flow-node'>
+            <ProviderIcon providerId={row.origin === 'local_direct' ? 'local_direct' : providerId} size={20} />
+            <div className='min-w-0 flex-1'>
+              <div className='truncate text-[12.5px] font-medium text-foreground' title={provider || '—'}>
+                {provider || '—'}
+              </div>
+              <div className='truncate font-mono text-[11px] text-muted-foreground' title={account || '—'}>
+                {account || '—'}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 四宫格核心指标 */}
+      <div className='req-detail-kpi-grid'>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <div className='req-detail-kpi-card'>
+                <span className='req-detail-kpi-label'>{t('总 Token')}</span>
+                <span className={cn('req-detail-kpi-value', total === 0 && 'is-muted')}>
+                  {fmtTokens(total)}
+                </span>
+                <span className='req-detail-kpi-sub'>
+                  {t('入 {in} · 出 {out}', { in: fmtTokens(prompt), out: fmtTokens(completion) })}
+                </span>
+              </div>
+            }
+          />
+          <TooltipContent variant='plain' side='bottom'>
+            <div className='space-y-0.5 font-mono text-[11px] tabular-nums'>
+              <div>{t('输入')}：{fmtExactInt(prompt)}</div>
+              <div>{t('输出')}：{fmtExactInt(completion)}</div>
+              <div>{t('合计')}：{fmtExactInt(total)}</div>
+            </div>
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <div className='req-detail-kpi-card'>
+                <span className='req-detail-kpi-label'>{t('缓存命中')}</span>
+                <span className={cn('req-detail-kpi-value', cacheToneCls)}>
+                  {cacheRate || fmtTokens(cacheRead)}
+                </span>
+                <span className='req-detail-kpi-sub'>
+                  {cacheWrite > 0
+                    ? t('读 {read} · 写 {write}', { read: fmtTokens(cacheRead), write: fmtTokens(cacheWrite) })
+                    : t('读 {read}', { read: fmtTokens(cacheRead) })}
+                </span>
+              </div>
+            }
+          />
+          <TooltipContent variant='plain' side='bottom'>
+            <div className='space-y-0.5 font-mono text-[11px] tabular-nums'>
+              <div>{t('缓存读取')}：{fmtExactInt(cacheRead)}{cacheRate ? ` (${cacheRate})` : ''}</div>
+              {cacheWrite > 0 ? <div>{t('缓存写入')}：{fmtExactInt(cacheWrite)}</div> : null}
+            </div>
+          </TooltipContent>
+        </Tooltip>
+
+        {hasCost || hasCredit ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <div className='req-detail-kpi-card'>
+                  <span className='req-detail-kpi-label'>{t('预估费用')}</span>
+                  <span className='req-detail-kpi-value'>{costMain}</span>
+                  {costSub ? <span className='req-detail-kpi-sub' title={costSub}>{costSub}</span> : null}
+                </div>
+              }
+            />
+            <TooltipContent variant='plain' side='bottom'>
+              <div className='space-y-0.5 font-mono text-[11px] tabular-nums'>
+                {hasCost ? (
+                  <div>
+                    {t('预估费用')}：{formattedCost}
+                    {pricing.currency === 'cny' ? ` ($${Number(row.costUsd).toFixed(5)})` : ''}
+                  </div>
+                ) : null}
+                {row.priceSource ? <div>{pricingSourceLabel(row.priceSource)}</div> : null}
+                {hasCredit ? <div>{t('积分消耗')}：{numberText(row.credit)}</div> : null}
+              </div>
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <div className='req-detail-kpi-card'>
+            <span className='req-detail-kpi-label'>{t('预估费用')}</span>
+            <span className='req-detail-kpi-value is-muted'>—</span>
+          </div>
+        )}
+
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <div className='req-detail-kpi-card'>
+                <span className='req-detail-kpi-label'>{t('总耗时')}</span>
+                <span className={cn('req-detail-kpi-value', durMain === '—' && 'is-muted')}>{durMain}</span>
+                {durSub ? <span className='req-detail-kpi-sub' title={durSub}>{durSub}</span> : null}
+              </div>
+            }
+          />
+          <TooltipContent variant='plain' side='bottom'>
+            <div className='space-y-0.5 font-mono text-[11px] tabular-nums'>
+              <div>
+                {t('总耗时')}：{running ? `${fmtElapsed(row.ts)}${t('（进行中）')}` : fmtDuration(row.durationMs)}
+              </div>
+              <div>{t('首字响应')}：{running ? '—' : firstResp}</div>
+              <div>{t('生成速度')}：{running ? '—' : speed || '—'}</div>
+              <div className='pt-1 font-sans text-[10.5px] text-muted-foreground'>{SPEED_TIP}</div>
+            </div>
+          </TooltipContent>
+        </Tooltip>
+      </div>
 
       {hasVision ? (
         <div className='req-detail-group'>
-          <div className='req-detail-group-title'>{t('图片兼容')}</div>
+          <div className='req-detail-group-head'>
+            <span className='req-detail-group-title'>{t('图片兼容')}</span>
+          </div>
           <div className='req-detail-dl py-2.5'>
             <VisionRequestDetail route={row.route} t={t} />
           </div>
         </div>
       ) : null}
 
-      {loadingDetail || details.length > 0 ? (
-        <div className='req-detail-group'>
-          <div className='req-detail-group-title'>{t('尝试明细')}</div>
-          <AttemptsTable row={row} loading={loadingDetail} />
-        </div>
-      ) : null}
+      {loadingDetail || details.length > 0 ? <AttemptsSection row={row} loading={loadingDetail} /> : null}
 
-      {hits.length > 0 ? (
+      {hasProcessing ? (
         <div className='req-detail-group'>
-          <div className='req-detail-group-title'>{t('关键词替换')}</div>
-          <div className='req-detail-dl py-2.5'>
-            <span className='inline-flex flex-wrap gap-1.5'>
-              {hits.map((hit, index) => (
-                <Badge key={index} variant='sensitive' shape='tag'>
-                  {String(hit?.word ?? '')} × {String(Number(hit?.count) || 0)}
-                </Badge>
-              ))}
-            </span>
+          <div className='req-detail-group-head'>
+            <span className='req-detail-group-title'>{t('内容处理')}</span>
           </div>
-        </div>
-      ) : null}
-
-      {privacyHits.length > 0 ? (
-        <div className='req-detail-group'>
-          <div className='req-detail-group-title'>{t('隐私脱敏')}</div>
-          <div className='req-detail-dl py-2.5'>
-            <span className='inline-flex flex-wrap gap-1.5'>
-              {privacyHits.map((hit, index) => {
-                const action = String(hit?.action ?? 'mask')
-                const count = Number(hit?.count) || 0
-                const restored = Number(hit?.restored) || 0
-                const variant = action === 'block'
-                  ? 'destructive'
-                  : action === 'warn'
-                    ? 'warning'
-                    : 'info'
-                return (
-                  <Badge key={index} variant={variant} shape='tag'>
-                    {privacyKindLabel(hit?.kind)} · {privacyActionLabel(action)} × {String(count)}
-                    {restored > 0 ? t('（已还原 {n}）', { n: restored }) : ''}
-                  </Badge>
-                )
-              })}
-            </span>
+          <div className='req-detail-process-card'>
+            {hits.length > 0 ? (
+              <div className='req-detail-process-row'>
+                <span className='req-detail-process-label'>{t('关键词替换')}</span>
+                <div className='flex min-w-0 flex-1 flex-wrap gap-1.5'>
+                  {hits.map((hit, index) => (
+                    <Badge key={index} variant='sensitive' shape='tag'>
+                      {String(hit?.word ?? '')} × {String(Number(hit?.count) || 0)}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {privacyHits.length > 0 ? (
+              <div className='req-detail-process-row'>
+                <span className='req-detail-process-label'>{t('隐私脱敏')}</span>
+                <div className='flex min-w-0 flex-1 flex-wrap gap-1.5'>
+                  {privacyHits.map((hit, index) => {
+                    const action = String(hit?.action ?? 'mask')
+                    const count = Number(hit?.count) || 0
+                    const restored = Number(hit?.restored) || 0
+                    const variant = action === 'block'
+                      ? 'destructive'
+                      : action === 'warn'
+                        ? 'warning'
+                        : 'info'
+                    return (
+                      <Badge key={index} variant={variant} shape='tag'>
+                        {privacyKindLabel(hit?.kind)} · {privacyActionLabel(action)} × {String(count)}
+                        {restored > 0 ? t('（已还原 {n}）', { n: restored }) : ''}
+                      </Badge>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -534,29 +725,40 @@ export function RequestDetailPane({ row, loadingDetail = false }: { row: Request
       {row.origin === 'local_direct' ? (
         row.localDirect ? (
           <div className='req-detail-group'>
-            <div className='req-detail-group-title'>{t('本机直连信息')}</div>
-            <div className='req-detail-dl'>
-              {row.localDirect.conversationTitle ? (
-                <DetailRow label={t('对话标题')}>{row.localDirect.conversationTitle}</DetailRow>
-              ) : null}
-              {row.localDirect.workspaceUri ? (
-                <DetailRow label={t('工作区')} mono>{row.localDirect.workspaceUri}</DetailRow>
-              ) : null}
-              <DetailRow label={t('来源目录')}>{localRootKindLabel(row.localDirect.rootKind)}</DetailRow>
-              {row.localDirect.transcriptPath || row.localDirect.dbPath ? (
-                <DetailRow label={t('本地记录文件')} mono>
-                  {row.localDirect.transcriptPath || row.localDirect.dbPath}
-                </DetailRow>
-              ) : null}
+            <div className='req-detail-group-head'>
+              <span className='req-detail-group-title'>{t('本机直连信息')}</span>
+              <Badge variant='info' shape='tag'>{localRootKindLabel(row.localDirect.rootKind)}</Badge>
+            </div>
+            <div className='req-detail-id-card'>
+              <div className='req-detail-id-body'>
+                {row.localDirect.conversationTitle ? (
+                  <div className='req-detail-id-kv'>
+                    <span className='req-detail-id-k'>{t('对话标题')}</span>
+                    <span className='font-sans text-[12px] text-foreground break-words'>{row.localDirect.conversationTitle}</span>
+                  </div>
+                ) : null}
+                {row.localDirect.workspaceUri ? (
+                  <div className='req-detail-id-kv'>
+                    <span className='req-detail-id-k'>{t('工作区')}</span>
+                    <span className='req-detail-id-v'>{row.localDirect.workspaceUri}</span>
+                  </div>
+                ) : null}
+                {row.localDirect.transcriptPath || row.localDirect.dbPath ? (
+                  <div className='req-detail-id-kv'>
+                    <span className='req-detail-id-k'>{t('本地记录文件')}</span>
+                    <span className='req-detail-id-v'>{row.localDirect.transcriptPath || row.localDirect.dbPath}</span>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         ) : null
       ) : (!row.isTest || row.clientEvidence) ? (
         <div className='req-detail-group'>
-          <div className='req-detail-group-title'>{t('来源识别')}</div>
-          <div className='req-detail-dl py-2.5'>
-            <ClientIdentificationDetail entry={row} api={clientIdentificationApi} t={t} />
+          <div className='req-detail-group-head'>
+            <span className='req-detail-group-title'>{t('来源识别')}</span>
           </div>
+          <ClientIdentificationDetail entry={row} api={clientIdentificationApi} t={t} />
         </div>
       ) : null}
     </div>

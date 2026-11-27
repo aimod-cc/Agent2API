@@ -265,6 +265,10 @@ pub struct RequestEntry {
     pub cost_usd: Option<f64>,
     #[serde(default = "default_origin")]
     pub origin: String,
+    #[serde(rename = "clientProtocol", default)]
+    pub client_protocol: String,
+    #[serde(rename = "upstreamProtocol", default)]
+    pub upstream_protocol: String,
 }
 
 pub(crate) const ORIGIN_GATEWAY: &str = "gateway";
@@ -502,6 +506,10 @@ pub struct NewRequestEntry {
     pub source: RequestSource,
     /// 来源通道：`"gateway"`（经本网关转发）或 `"local_direct"`（本地采集直连请求）。
     pub origin: String,
+    /// 下游请求的协议（空串 = 未记录 / 非网关请求）。
+    pub client_protocol: String,
+    /// 实际发给上游的协议（空串 = 未发到上游 / 未记录）。
+    pub upstream_protocol: String,
 }
 
 impl NewRequestEntry {
@@ -546,6 +554,8 @@ impl NewRequestEntry {
             // 拿不到 UA 的路径保持空串，前端显示占位符
             source: RequestSource::default(),
             origin: ORIGIN_GATEWAY.to_string(),
+            client_protocol: String::new(),
+            upstream_protocol: String::new(),
         }
     }
 
@@ -719,6 +729,8 @@ impl NewRequestEntry {
             cache_creation_1h_tokens: cw1h,
             cost_usd,
             origin: normalize_origin_value(&self.origin),
+            client_protocol: crate::server::core::upstream::usage::normalize_protocol(&self.client_protocol),
+            upstream_protocol: crate::server::core::upstream::usage::normalize_protocol(&self.upstream_protocol),
         }
     }
 }
@@ -760,6 +772,8 @@ pub struct RunningProgress {
     /// 实际随上游请求发出的思考等级（与 `upstream_model` 同点同时采集，
     /// 空串 = 还没有等级随行；口径见 `RequestEntry::upstream_reasoning`）
     pub upstream_reasoning: String,
+    /// 实际发给上游的协议（空串 = 尚未确定）
+    pub upstream_protocol: String,
     /// 到此刻为止**已经发出去**的账号数（口径同 `TelemetrySnapshot::attempts`，
     /// 恒 ≥1；前端「重试」列的标签与悬停面板的「共 N 次尝试」读它）
     pub attempts: i64,
@@ -1014,4 +1028,6 @@ pub(super) struct RequestListRow {
     pub recorded_client_name: String,
     pub client_user_agent: String,
     pub origin: String,
+    pub client_protocol: String,
+    pub upstream_protocol: String,
 }

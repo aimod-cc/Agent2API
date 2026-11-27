@@ -94,6 +94,8 @@ pub(super) struct ProviderContext<'a> {
     pub sanitize: &'a crate::server::config::SanitizeSettings,
     /// 本次请求的隐私脱敏配置快照（按请求锁定，与 `sanitize` 同口径）。
     pub privacy: Arc<crate::server::core::privacy::CompiledPrivacySettings>,
+    /// 本次请求的隐私脱敏内存映射库（稳定模式借用全局实例，单次随机模式持有请求级独立实例）。
+    pub privacy_vault: crate::server::core::privacy::RequestVault,
     /// 本次请求的**开发者角色兼容**开关快照（请求开始时取一次，与
     /// `sanitize` 同一取舍：同一次请求内各家的判定必须一致）。
     ///
@@ -215,6 +217,41 @@ pub(super) async fn send_body<'a>(
         ctx.telemetry.note_upstream_reasoning(None);
         return Ok(SendBody { body, wire_model: wire.model, wire_reasoning: None });
     }
+    // 提前解析该家要收的上游目标（同源，供系统提示词层的「上游模型」条件与后文模型改写共用）。
+    let requested = ctx
+        .body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let direct = ctx
+        .direct_model
+        .as_deref()
+        .or_else(|| account.and_then(crate::server::core::routing_groups::candidate_model));
+    let wire = (!requested.is_empty()).then(|| {
+        direct
+            .map(|model| crate::server::core::providers::catalog::WireTarget {
+                model: model.to_string(),
+                reasoning: None,
+            })
+            .unwrap_or_else(|| {
+                crate::server::core::providers::catalog::wire_target_for_provider(
+                    &requested,
+                    provider_id,
+                    account,
+                )
+            })
+    });
+    let prompt_upstream_model = if let Some(model) = direct {
+        model.to_string()
+    } else if requested.is_empty() {
+        String::new()
+    } else if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
+        crate::server::core::providers::custom::forward::cooldown_model(provider_id, &requested)
+    } else {
+        wire.as_ref().map(|target| target.model.clone()).unwrap_or_default()
+    };
     // ── ⓪ 角色归一层（开发者角色兼容开关）───────────────────────────
     // 在所有改写**之前**：先把 developer 角色归一成 system，后面各层（提示词、
     // 脱敏、各适配器）看到的就是统一形态 —— 适配器自己的 developer→system 映射
@@ -239,20 +276,19 @@ pub(super) async fn send_body<'a>(
     // 就没人过一遍了。
     //
     // 取**哪一份**是按家的（逐家覆盖见 `config::KEY_PROMPT_PROVIDERS`）：本函数
-    // 正是「某一家即将发送之前」那一刻，`provider_id` 就在手上，所以分派不需要
-    // 新的时机，只是把「哪一份」从全局换成这家自己的那一份。
+    // 正是「某一家即将发送之前」那一刻，`provider_id` 与映射后的上游模型名都已在手上。
     //
     // `degraded` = 本请求是否已进入降级（请求开始时状态机已生效，或本次撞了
     // 内容拦截后由转发层置位）：降级期用最小中性提示词（`custom` 模式除外，
     // 见 `PromptChoice::text_for`）。
-    let prompt = ctx.prompt.for_provider(provider_id);
+    let prompt = ctx.prompt.for_provider(provider_id, &prompt_upstream_model);
     let processed = if ctx.preserve_system_prompt { None } else { prompt.apply(role_base.as_ref(), degraded) };
     let after_prompt = match processed {
         Some(next) => {
             logging::verbose(
                 "[Upstream]",
                 &format!(
-                    "系统提示词层：{}（{}）provider={} messages {} → {}",
+                    "系统提示词层：{}（{}）provider={} upstream={} messages {} → {}",
                     prompt.mode.label(),
                     if degraded && prompt.mode.degradable() {
                         "降级期：中性提示词"
@@ -260,6 +296,7 @@ pub(super) async fn send_body<'a>(
                         prompt.source.label()
                     },
                     provider_id,
+                    if prompt_upstream_model.is_empty() { "-" } else { &prompt_upstream_model },
                     message_count(ctx.body),
                     message_count(&next),
                 ),
@@ -287,7 +324,7 @@ pub(super) async fn send_body<'a>(
         match crate::server::core::privacy::mask_chat_body(
             body.as_ref(),
             &ctx.privacy,
-            crate::server::core::privacy::PrivacyVault::global(),
+            &ctx.privacy_vault,
         ) {
             crate::server::core::privacy::PrivacyBodyOutcome::Unchanged => body,
             crate::server::core::privacy::PrivacyBodyOutcome::Warned { hits } => {
@@ -376,22 +413,12 @@ pub(super) async fn send_body<'a>(
             None => body,
         }
     };
-    let requested = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if requested.is_empty() {
+    let Some(wire) = wire else {
         // 没有 model 字段：不改写，也没有可用的冷却键（空串，与改造前一致）
         ctx.telemetry.note_upstream_reasoning(None);
         return Ok(SendBody { body, wire_model: requested, wire_reasoning: None });
-    }
-    // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
-    // （同源，见模块头「思考等级绑定为什么也在这一步」）
-    let direct = ctx.direct_model.as_deref().or_else(|| account.and_then(crate::server::core::routing_groups::candidate_model));
-    let wire = direct.map(|model| crate::server::core::providers::catalog::WireTarget { model: model.to_string(), reasoning: None })
-        .unwrap_or_else(|| crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, account));
+    };
+    // 复用前文一次解析出的该家真名与思考等级（同源，见模块头）
     ctx.telemetry.note_upstream_model(&wire.model);
     rewrite_model(&mut body, &requested, &wire.model, provider_id);
     if ctx.compact_routed {

@@ -66,6 +66,9 @@ fn try_update_raw_fields_inner<T, E>(
     if next.raw.get(super::vision_compat::KEY_VISION_COMPAT) != previous.raw.get(super::vision_compat::KEY_VISION_COMPAT) {
         next.vision_compat = super::vision_compat::from_raw(&next.raw);
     }
+    if next.raw.get(super::KEY_PRIVACY_REDACTION) != previous.raw.get(super::KEY_PRIVACY_REDACTION) {
+        next.privacy = super::privacy_config::from_raw(&next.raw);
+    }
     if [super::prompt_rules::KEY_PROMPT_RULES, super::KEY_PROMPT_MODE, super::KEY_PROMPT_FILE,
         super::KEY_PROMPT_TEXT, super::KEY_PROMPT_PROVIDERS, super::KEY_PROMPT_GATEWAY,
         super::KEY_PROMPT_GATEWAY_TEXT].iter().any(|key| next.raw.get(*key) != previous.raw.get(*key)) {

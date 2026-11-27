@@ -18,7 +18,7 @@ import { store } from '../core/store'
 import { BottomSheet, CommonCard, CommonSwitch, ListGroup, ListItem } from '../ui/components'
 import { PickerSheet, PickerTrigger, type PickerOption } from '../ui/pickers'
 import { GlyphIcon, ProviderAvatar } from '../ui/icons'
-import { accountTitle, isAccountRateLimited } from './AccountsView'
+import { accountTitle, isAccountBalancePaused, isAccountRateLimited } from './AccountsView'
 
 export function AccountDetailSheet({
   account: initialAccount,
@@ -85,6 +85,7 @@ export function AccountDetailSheet({
   }
 
   const limited = isAccountRateLimited(account)
+  const balancePaused = isAccountBalancePaused(account)
   const enabled = account.enabled !== false
   const currentProxyId =
     account.proxy && typeof account.proxy === 'object' && account.proxy.source !== 'direct'
@@ -145,7 +146,7 @@ export function AccountDetailSheet({
             }}
           >
             <span style={{ fontSize: 12.5, color: 'var(--fc-warning)', fontWeight: 600 }}>
-              当前账号存在限流或路由冷却记录
+              {balancePaused ? '上游已报余额不足，已暂停派单（余额回升后自动恢复）' : '当前账号存在限流或路由冷却记录'}
             </span>
             <button
               type='button'

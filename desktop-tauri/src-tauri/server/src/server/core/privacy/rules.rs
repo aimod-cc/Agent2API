@@ -1,8 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+//! 规则与配置模型：含 14 类个人信息开关、双模式占位符配置、自定义规则与日期多格式展开。
+//! 日期变体展开参考 yetone/magpie（MIT，见 licenses/magpie-MIT）。
 
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::LazyLock;
+
+use chrono::NaiveDate;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use super::detectors::{month, month_name};
 
 pub const MAX_WORDS: usize = 200;
 pub const MAX_WORD_CHARS: usize = 256;
@@ -18,13 +25,23 @@ pub const MAX_TEST_TEXT_BYTES: usize = 32 * 1024;
 
 const PREFIX_TAIL_PATTERN: &str = r"[A-Za-z0-9_\-]{8,}";
 
+/// 个人信息子类目录：(id, 展示名, 默认开关)。
+/// 保留原有 6 个 id 不变以兼容历史配置；新增 8 类按风险高低分层设定默认值。
 pub const PERSONAL_CATEGORIES: &[(&str, &str, bool)] = &[
     ("email", "邮箱地址", true),
     ("phone_cn", "中国大陆手机号", true),
     ("id_card_cn", "中国身份证号", true),
     ("bank_card", "银行卡号", true),
-    ("public_ip", "公网 IP 地址", false),
+    ("ssn", "美国社保号 (SSN)", true),
+    ("passport", "护照号", true),
+    ("iban", "国际银行账号 (IBAN)", true),
+    ("birthday", "出生日期", true),
+    ("mac", "MAC 地址", true),
+    ("serial", "设备序列号", true),
+    ("public_ip", "公网 IP 地址 (v4/v6)", false),
     ("home_path", "本机主目录用户名", false),
+    ("userhost", "登录名与主机名", false),
+    ("bucket", "云存储桶名称", false),
 ];
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -83,6 +100,10 @@ pub struct PrivacyCustomRule {
 pub struct PrivacySettings {
     pub enabled: bool,
     pub reversible: bool,
+    /// 开启后每次请求独立生成隐藏类型的随机占位符（`{{A2A_<32hex>}}`），请求结束即销毁映射；
+    /// 关闭时使用确定性占位符（`{{KIND_xxxxxxxx}}`）以保护上游提示词缓存与多轮还原。
+    #[serde(default)]
+    pub ephemeral_placeholders: bool,
     pub action: PrivacyAction,
     pub secrets: bool,
     pub personal: bool,
@@ -103,6 +124,7 @@ impl Default for PrivacySettings {
         Self {
             enabled: false,
             reversible: true,
+            ephemeral_placeholders: false,
             action: PrivacyAction::Mask,
             secrets: true,
             personal: false,
@@ -142,11 +164,51 @@ pub(super) struct CompiledCustomRule {
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct CompiledTerm {
+    pattern: Regex,
+    date: bool,
+}
+
+impl CompiledTerm {
+    fn compile(word: &str, ignore_case: bool) -> Result<Self, String> {
+        let date = date_variants(word);
+        let expression = date.clone().unwrap_or_else(|| regex::escape(word));
+        let pattern = RegexBuilder::new(&expression)
+            .case_insensitive(ignore_case)
+            .size_limit(512 * 1024)
+            .build()
+            .map_err(|err| format!("保密词规则编译失败：{err}"))?;
+        Ok(Self {
+            pattern,
+            date: date.is_some(),
+        })
+    }
+
+    pub(super) fn spans<'a>(
+        &'a self,
+        text: &'a str,
+        whole_word: bool,
+    ) -> impl Iterator<Item = (usize, usize)> + 'a {
+        self.pattern
+            .find_iter(text)
+            .filter(move |m| {
+                if self.date {
+                    date_boundary(text, m.start(), m.end())
+                        && (!whole_word || term_whole_word(text, m.start(), m.end()))
+                } else {
+                    !whole_word || term_whole_word(text, m.start(), m.end())
+                }
+            })
+            .map(|m| (m.start(), m.end()))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct CompiledPrivacySettings {
     pub settings: PrivacySettings,
     pub(super) custom_rules: Vec<CompiledCustomRule>,
     pub(super) allowlist_lower: HashSet<String>,
-    pub(super) sorted_words: Vec<String>,
+    pub(super) compiled_terms: Vec<CompiledTerm>,
 }
 
 impl Default for CompiledPrivacySettings {
@@ -260,16 +322,22 @@ impl CompiledPrivacySettings {
         let allowlist_lower = settings
             .allowlist
             .iter()
-            .map(|item| item.to_ascii_lowercase())
+            .map(|item| item.to_lowercase())
             .collect();
         let mut sorted_words = settings.words.clone();
         sorted_words.sort_by(|left, right| right.chars().count().cmp(&left.chars().count()));
+        let mut compiled_terms = Vec::with_capacity(sorted_words.len());
+        for word in &sorted_words {
+            if !word.is_empty() {
+                compiled_terms.push(CompiledTerm::compile(word, settings.words_ignore_case)?);
+            }
+        }
 
         Ok(Self {
             settings,
             custom_rules,
             allowlist_lower,
-            sorted_words,
+            compiled_terms,
         })
     }
 
@@ -305,7 +373,7 @@ impl CompiledPrivacySettings {
     }
 
     pub fn is_allowed(&self, value: &str) -> bool {
-        self.allowlist_lower.contains(&value.to_ascii_lowercase())
+        self.allowlist_lower.contains(&value.to_lowercase())
     }
 }
 
@@ -325,7 +393,7 @@ fn normalize_term_list(
         if trimmed.chars().count() > max_chars {
             return Err(format!("{label}单条最多 {max_chars} 个字符"));
         }
-        let key = trimmed.to_ascii_lowercase();
+        let key = trimmed.to_lowercase();
         if seen.insert(key) {
             out.push(trimmed);
         }
@@ -390,14 +458,130 @@ pub fn kind_label_zh(kind: &str) -> &str {
         "PASSWORD" => "密码凭证",
         "SECRET" => "机密凭据",
         "WALLET_KEY" => "钱包私钥",
+        "SEED_PHRASE" => "钱包助记词",
         "EMAIL" => "邮箱地址",
         "PHONE_CN" => "中国大陆手机号",
         "ID_CARD_CN" => "中国身份证号",
         "BANK_CARD" => "银行卡号",
+        "SSN" => "美国社保号",
+        "PASSPORT" => "护照号",
+        "IBAN" => "国际银行账号",
+        "BIRTHDAY" => "出生日期",
+        "MAC" => "MAC 地址",
+        "SERIAL" => "设备序列号",
         "PUBLIC_IP" => "公网 IP 地址",
         "HOME_PATH" => "主目录用户名",
+        "USERHOST" => "登录名/主机名",
+        "BUCKET" => "云存储桶",
         "TERM" => "自定义保密词",
         "CUSTOM" => "自定义规则",
         other => other,
     }
+}
+
+// ─── 日期词变体展开（Magpie MIT）────────────────────────────────
+
+const DATE_SEP: &str = r"(?:[ \t]*[-/.、／－][ \t]*|[ \t])";
+const DATE_ORD: &str = r"(?:st|nd|rd|th)?";
+
+static DATE_FORMATS: LazyLock<[Regex; 5]> = LazyLock::new(|| {
+    [
+        format!(r"^([0-9]{{4}}){DATE_SEP}([0-9]{{1,2}}){DATE_SEP}([0-9]{{1,2}})\.?$"),
+        r"^([0-9]{4})[ \t]*[年년][ \t]*([0-9]{1,2})[ \t]*[月월][ \t]*([0-9]{1,2})[ \t]*[日号號일]?$"
+            .to_owned(),
+        format!(r"^([0-9]{{1,2}}){DATE_SEP}([0-9]{{1,2}}){DATE_SEP}([0-9]{{4}})$"),
+        format!(r"^([A-Za-z]+)\.?[ \t]+([0-9]{{1,2}}){DATE_ORD},?[ \t]+([0-9]{{4}})$"),
+        format!(
+            r"^([0-9]{{1,2}}){DATE_ORD}(?:[ \t]+|-)([A-Za-z]+)\.?,?(?:[ \t]+|-)([0-9]{{4}})$"
+        ),
+    ]
+    .map(|pattern| Regex::new(&pattern).expect("日期识别正则必须有效"))
+});
+
+fn parse_date_word(s: &str) -> Option<(i32, u32, u32)> {
+    for (i, re) in DATE_FORMATS.iter().enumerate() {
+        let Some(m) = re.captures(s) else { continue };
+        let (a, b, c) = (&m[1], &m[2], &m[3]);
+        let number = |part: &str| part.parse::<u32>().unwrap_or(0);
+        let (y, m, d) = match i {
+            0 | 1 => (number(a), number(b), number(c)),
+            2 => {
+                let (p, q, y) = (number(a), number(b), number(c));
+                if p == q || (q > 12 && p <= 12) {
+                    (y, p, q)
+                } else if p > 12 && q <= 12 {
+                    (y, q, p)
+                } else {
+                    return None;
+                }
+            }
+            3 => (number(c), month(a)?, number(b)),
+            _ => (number(c), month(b)?, number(a)),
+        };
+        if !(1000..=2999).contains(&y) {
+            return None;
+        }
+        return NaiveDate::from_ymd_opt(y as i32, m, d).map(|_| (y as i32, m, d));
+    }
+    None
+}
+
+fn date_variants(word: &str) -> Option<String> {
+    let (y, m, d) = parse_date_word(word)?;
+    let name = month_name(m);
+    let short = if m == 9 { "Sept|Sep" } else { &name[..3] };
+    let named = format!(r"(?i:{name}|(?:{short})\.?)");
+    let month_str = if m < 10 {
+        format!("0?{m}")
+    } else {
+        m.to_string()
+    };
+    let day_str = if d < 10 {
+        format!("0?{d}")
+    } else {
+        d.to_string()
+    };
+    let mut forms = vec![
+        format!("{y}{DATE_SEP}{month_str}{DATE_SEP}{day_str}"),
+        format!(r"{y}[ \t]*年[ \t]*{month_str}[ \t]*月[ \t]*{day_str}(?:[ \t]*[日号號])?"),
+        format!(r"{y}[ \t]*년[ \t]*{month_str}[ \t]*월[ \t]*{day_str}(?:[ \t]*일)?"),
+        format!("{y}{m:02}{d:02}"),
+        format!(r"{named}[ \t]+{day_str}{DATE_ORD},?[ \t]+{y}"),
+        format!(r"{day_str}{DATE_ORD}(?:[ \t]+|-){named},?(?:[ \t]+|-){y}"),
+    ];
+    if d > 12 || d == m {
+        forms.push(format!("{day_str}{DATE_SEP}{month_str}{DATE_SEP}{y}"));
+        if d != m {
+            forms.push(format!("{month_str}{DATE_SEP}{day_str}{DATE_SEP}{y}"));
+        }
+    }
+    forms.push(regex::escape(word));
+    Some(forms.join("|"))
+}
+
+fn date_boundary(s: &str, a: usize, b: usize) -> bool {
+    let t = s.as_bytes();
+    let digit = |i: usize| t.get(i).is_some_and(u8::is_ascii_digit);
+    !(a > 0 && (digit(a - 1) || a > 1 && t[a - 1] == b'.' && digit(a - 2)))
+        && !s[..a]
+            .chars()
+            .next_back()
+            .is_some_and(|p| p.is_ascii_alphabetic() && t.get(a).is_some_and(u8::is_ascii_alphabetic))
+        && !(digit(b) || t.get(b) == Some(&b'.') && digit(b + 1))
+}
+
+fn term_whole_word(s: &str, a: usize, b: usize) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let v = &s[a..b];
+    let first = v.chars().next().unwrap_or(' ');
+    let last = v.chars().next_back().unwrap_or(' ');
+    !(is_word(first) && s[..a].chars().next_back().is_some_and(is_word))
+        && !(is_word(last) && s[b..].chars().next().is_some_and(is_word))
+        && !(first.is_ascii_digit()
+            && a >= 2
+            && s.as_bytes()[a - 1] == b'.'
+            && s.as_bytes()[a - 2].is_ascii_digit())
+        && !(last.is_ascii_digit()
+            && s.as_bytes().get(b) == Some(&b'.')
+            && s.as_bytes().get(b + 1).is_some_and(u8::is_ascii_digit))
 }

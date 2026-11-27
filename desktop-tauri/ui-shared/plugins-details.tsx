@@ -2,16 +2,17 @@ import * as React from 'react'
 import {
   Button, SegmentedControl, Sheet, SheetBody, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle, useMediaQuery,
 } from '@ui'
-import { PluginArtwork, type PluginArtworkKind, type PluginTranslate } from './plugins-store'
+import { PluginArtwork, PluginDownloadCount, type PluginArtworkKind, type PluginTranslate } from './plugins-store'
 
 export type PluginDetailsPane = 'about' | 'settings'
 
-export function PluginDetailsDialog({ name, description, version, sourceLabel, icon, artwork, initialPane = 'about',
+export function PluginDetailsDialog({ name, description, version, sourceLabel, downloads, icon, artwork, initialPane = 'about',
   settings, metadata, more, aboutActions, settingsActions, primaryAction, closeDisabled = false, onClose, t }: {
   name: string
   description: string
   version?: string | null
   sourceLabel?: string
+  downloads?: number | null
   icon?: string | null
   artwork?: PluginArtworkKind
   initialPane?: PluginDetailsPane
@@ -47,6 +48,10 @@ export function PluginDetailsDialog({ name, description, version, sourceLabel, i
             {version ? <span>v{version}</span> : null}
             {version && sourceLabel ? <span aria-hidden='true'>·</span> : null}
             {sourceLabel ? <span>{sourceLabel}</span> : null}
+            {downloads && downloads > 0 ? <>
+              {version || sourceLabel ? <span aria-hidden='true'>·</span> : null}
+              <PluginDownloadCount downloads={downloads} t={t} />
+            </> : null}
           </div>
         </div>
       </SheetHeader>

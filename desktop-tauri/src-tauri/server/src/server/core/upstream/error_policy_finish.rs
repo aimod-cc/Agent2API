@@ -84,8 +84,11 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             if reset > logging::now_ms() { error.retry_after_secs = Some(reset.saturating_sub(logging::now_ms()).max(0) as u64 / 1000 + 1); }
             ctx.telemetry.note_error_policy(json!({ "resetAt": entry["resetAt"], "timeSource": entry["timeSource"] }));
         }
-        if !decision.deprioritizes() && matches!(decision.kind, ErrorKind::RateLimit | ErrorKind::Quota) && settings.sink && ctx.pinned_account.is_none() {
+        if !decision.deprioritizes() && matches!(decision.kind, ErrorKind::RateLimit | ErrorKind::Quota | ErrorKind::Balance) && settings.sink && ctx.pinned_account.is_none() {
             service.route.sink_mark_for(account, logging::now_ms(), settings.sink_seconds);
+        }
+        if decision.kind == ErrorKind::Balance {
+            crate::server::core::usage_query::refresh_after_balance_error(&service.store, account);
         }
         if decision.kind == ErrorKind::Transient && decision.rule.cooldown == crate::server::config::error_policy::CooldownMode::Protection {
             if settings.backoff { service.route.backoff_mark_for(account, logging::now_ms(), settings.backoff_seconds, settings.backoff_cap_seconds); }

@@ -12,7 +12,7 @@ pub(super) async fn run(operation: Arc<Operation>) {
     match result {
         Ok(Ok(())) => {},
         Ok(Err(error)) => {
-            let phase = operation.state.lock().map(|state| if state.started { if operation.hot_switch { "switched" } else { "started" } }
+            let phase = operation.state.lock().map(|state| if state.started { if operation.hot_switch || operation.binding.client.switch_only { "switched" } else { "started" } }
                 else if state.committed { "committed" } else if operation.cancel.is_cancelled() { "canceled" } else { "failed" }).unwrap_or("recovery_required");
             operation.finish(phase, error, true);
         },
@@ -85,7 +85,8 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
     operation.binding.origin()?.check(&accepted)?;
     operation.check_proxy()?;
     if Journal::pending(&operation.executable, &operation.targets)?.is_some() { return Err("上次本机切换未完整结束，请先恢复原凭证".into()); }
-    let running = windows::running(&operation.executable)?;
+    let include_all_args = operation.binding.client.switch_only;
+    let running = windows::running(&operation.executable, include_all_args)?;
     if running && !operation.initial_running { return Err("客户端在准备后已启动，请重新确认".into()); }
     if running && !operation.hot_switch && !operation.restart { return Err("客户端在准备后已启动，请重新确认重启".into()); }
     let edits = storage::edits(&plan, &operation.targets)?;
@@ -110,11 +111,11 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
     let prepared = (|| {
         operation.check()?;
         operation.binding.origin()?.check(&accepted)?;
-        if running { windows::close(&operation.executable)?; }
+        if running { windows::close(&operation.executable, include_all_args)?; }
         operation.state.lock().map_err(|_| "本机启动状态不可用")?.client_running = false;
         operation.check()?;
         operation.binding.origin()?.check(&accepted)?;
-        if windows::running(&operation.executable)? { return Err("客户端尚未完全关闭，未写入凭证".into()); }
+        if windows::running(&operation.executable, include_all_args)? { return Err("客户端尚未完全关闭，未写入凭证".into()); }
         // 客户端退出时可能回写凭证；与准备快照不符时停止，不能覆盖新状态。
         let current = storage::edits(&plan, &operation.targets)?;
         for (before, after) in journal.edits.iter().zip(&current) {
@@ -130,8 +131,8 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
         if matches!(journal.phase.as_str(), "not_applied" | "rolled_back") {
             if let Ok(mut state) = operation.state.lock() { state.backup = None; }
         }
-        if journal.phase == "rolled_back" && running && operation.manager.is_current()
-            && operation.binding.current().is_ok() && windows::running(&operation.executable) == Ok(false) {
+        if !operation.binding.client.switch_only && journal.phase == "rolled_back" && running && operation.manager.is_current()
+            && operation.binding.current().is_ok() && windows::running(&operation.executable, false) == Ok(false) {
             if windows::start(&operation.executable, None, &operation.launch_args).is_ok() {
                 if let Ok(mut state) = operation.state.lock() { state.client_running = true; }
             }
@@ -139,6 +140,20 @@ fn commit(operation: Arc<Operation>, plan: CredentialPlan, accepted: Secret, obs
         return Err(message);
     }
     save_committed(&mut journal)?;
+    if operation.binding.client.switch_only {
+        {
+            let mut state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;
+            state.committed = true;
+            state.started = true;
+            state.client_running = false;
+        }
+        journal.phase = "switched".into();
+        match journal.save() {
+            Ok(()) => operation.finish("switched", "已切换凭证，重新打开客户端即可生效", false),
+            Err(_) => operation.finish("switched", "已切换凭证，但备份状态保存失败，备份已保留", true),
+        }
+        return Ok(());
+    }
     {
         let mut state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;
         state.committed = true; state.phase = "starting";
@@ -192,7 +207,7 @@ fn commit_hot(operation: Arc<Operation>, mut journal: Journal, accepted: Secret)
     {
         let mut state = operation.state.lock().map_err(|_| "本机启动状态不可用")?;
         state.committed = true;
-        state.client_running = windows::running(&operation.executable).unwrap_or(true);
+        state.client_running = windows::running(&operation.executable, false).unwrap_or(true);
     }
     if let Err(error) = reloaded { return Err(error); }
     if let Err(error) = operation.check().and_then(|_| operation.binding.origin()?.check(&accepted)) {
@@ -218,7 +233,7 @@ fn commit_hot(operation: Arc<Operation>, mut journal: Journal, accepted: Secret)
         Ok(HotSwitchRespawn::Canceled) => operation.finish("committed", "凭证已切换，已取消等待后台服务重载", true),
         Ok(HotSwitchRespawn::TimedOut) => operation.finish("committed", "凭证已切换，但后台服务未能自动重载；请保存未完成内容后重启客户端或恢复原凭证", true),
         Err(error) => {
-            if let Ok(running) = windows::running(&operation.executable) {
+            if let Ok(running) = windows::running(&operation.executable, false) {
                 if let Ok(mut state) = operation.state.lock() { state.client_running = running; }
             }
             operation.finish("committed", error, true);

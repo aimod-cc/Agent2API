@@ -53,6 +53,7 @@ fn seed() -> (tempfile::TempDir, RequestStats, i64) {
         "public-model",
         "public-model",
         "",
+        "chat_completions",
         &source("zcode", "key:a"),
         false,
     );
@@ -295,6 +296,7 @@ fn finishing_a_running_request_reuses_the_row_and_is_idempotent() {
         &item.model,
         &item.model,
         "",
+        "chat_completions",
         &item.source,
         false,
     );
@@ -304,6 +306,7 @@ fn finishing_a_running_request_reuses_the_row_and_is_idempotent() {
         &item.model,
         &item.model,
         "",
+        "chat_completions",
         &item.source,
         false,
     );

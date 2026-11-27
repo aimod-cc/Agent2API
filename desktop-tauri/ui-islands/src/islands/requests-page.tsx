@@ -132,6 +132,7 @@ const COLUMNS: Column[] = [
   { key: 'source', label: t('来源'), desc: t('客户端软件与 API Key'), sel: '.req-source', track: 'minmax(116px, 0.95fr)' },
   { key: 'target', label: t('提供商 / 账号'), desc: t('命中提供商与账号'), sel: '.req-target', track: 'minmax(144px, 1.15fr)' },
   { key: 'model', label: t('模型'), desc: t('实际转发模型与原请求映射'), sel: '.req-model', track: 'minmax(156px, 1.4fr)' },
+  { key: 'protocol', label: t('协议'), desc: t('请求协议与协议转换'), sel: '.req-protocol', track: '108px' },
   { key: 'dur', label: t('用时'), desc: t('总耗时与首字响应'), sel: '.req-dur', track: '88px', align: 'right' },
   { key: 'speed', label: t('速度'), desc: t('输出生成速度'), sel: '.req-speed', track: '88px', align: 'center' },
   { key: 'usage', label: t('用量 / 缓存'), desc: t('输入输出与缓存命中率'), sel: '.req-usage', track: '148px', align: 'right' },

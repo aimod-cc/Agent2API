@@ -13,8 +13,12 @@ use super::antigravity_account::{
     detect_root_email, read_email_from_oauth_token_file, read_email_from_vscdb,
     resolve_account_identity, RECENT_ACCOUNT_WINDOW_MS,
 };
+use super::antigravity_backfill::backfill_antigravity_reasoning;
 use super::preview::build_live_preview;
-use super::protobuf::{encode_field_bytes, encode_field_varint, strip_gemini_deployment_suffix};
+use super::protobuf::{
+    encode_field_bytes, encode_field_varint, extract_reasoning_from_display_label,
+    parse_gen_metadata, split_model_effort_suffix, strip_gemini_deployment_suffix,
+};
 
 fn mock_root(path: &std::path::Path) -> Vec<DiscoveredRoot> {
     vec![DiscoveredRoot {
@@ -36,13 +40,26 @@ fn encode_timestamp_msg(secs: i64, nanos: i64) -> Vec<u8> {
 }
 
 fn encode_gen_metadata_msg(model: &str, last_step_idx: i64) -> Vec<u8> {
+    encode_gen_metadata_with_label(Some(model), None, last_step_idx)
+}
+
+fn encode_gen_metadata_with_label(
+    model: Option<&str>,
+    display_label: Option<&str>,
+    last_step_idx: i64,
+) -> Vec<u8> {
     let mut kv = Vec::new();
     encode_field_bytes(1, b"last_step_index", &mut kv);
     encode_field_bytes(2, last_step_idx.to_string().as_bytes(), &mut kv);
 
     let mut inner = Vec::new();
-    encode_field_bytes(19, model.as_bytes(), &mut inner);
+    if let Some(m) = model {
+        encode_field_bytes(19, m.as_bytes(), &mut inner);
+    }
     encode_field_bytes(20, &kv, &mut inner);
+    if let Some(label) = display_label {
+        encode_field_bytes(21, label.as_bytes(), &mut inner);
+    }
 
     let mut outer = Vec::new();
     encode_field_bytes(1, &inner, &mut outer);
@@ -479,4 +496,144 @@ fn detect_local_antigravity_accounts_smoke() {
             assert!(email.contains('@'), "root {} email should look valid", root.kind);
         }
     }
+}
+
+#[test]
+fn extracts_reasoning_from_gen_metadata_labels_and_model_suffixes() {
+    assert_eq!(
+        extract_reasoning_from_display_label("Gemini 4 Neon (XHigh)"),
+        ("Gemini 4 Neon".to_string(), Some("xhigh".to_string()))
+    );
+    assert_eq!(
+        extract_reasoning_from_display_label("Gemini 2.5 Pro (Preview)"),
+        ("Gemini 2.5 Pro (Preview)".to_string(), None)
+    );
+    assert_eq!(
+        split_model_effort_suffix("gemini-4-neon-xhigh", false),
+        ("gemini-4-neon".to_string(), Some("xhigh".to_string()))
+    );
+    assert_eq!(
+        split_model_effort_suffix("qwen3-max", false),
+        ("qwen3-max".to_string(), None)
+    );
+    assert_eq!(
+        split_model_effort_suffix("claude-opus-5-5-max", true),
+        ("claude-opus-5-5".to_string(), Some("max".to_string()))
+    );
+
+    // f19 + f21 (normal Gemini 4 case)
+    let gm_neon = encode_gen_metadata_with_label(Some("gemini-4-neon"), Some("Gemini 4 Neon (XHigh)"), 0);
+    let parsed_neon = parse_gen_metadata(0, &gm_neon);
+    assert_eq!(parsed_neon.model.as_deref(), Some("gemini-4-neon"));
+    assert_eq!(parsed_neon.reasoning.as_deref(), Some("xhigh"));
+
+    // f19 carries -high AND f21 carries (High): strip redundant suffix from model
+    let gm_claude = encode_gen_metadata_with_label(
+        Some("claude-opus-5-5-high"),
+        Some("Claude Opus 5.5 (High)"),
+        1,
+    );
+    let parsed_claude = parse_gen_metadata(1, &gm_claude);
+    assert_eq!(parsed_claude.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(parsed_claude.reasoning.as_deref(), Some("high"));
+
+    // f19 missing, f21 present: strip (XHigh) from display fallback
+    let gm_label_only = encode_gen_metadata_with_label(None, Some("Gemini 4 Hydrogen (XHigh)"), 2);
+    let parsed_label_only = parse_gen_metadata(2, &gm_label_only);
+    assert_eq!(parsed_label_only.model.as_deref(), Some("Gemini 4 Hydrogen"));
+    assert_eq!(parsed_label_only.reasoning.as_deref(), Some("xhigh"));
+
+    // f21 missing: keep reasoning None
+    let gm_flash = encode_gen_metadata_with_label(Some("gemini-3.7-flash"), None, 3);
+    let parsed_flash = parse_gen_metadata(3, &gm_flash);
+    assert_eq!(parsed_flash.model.as_deref(), Some("gemini-3.7-flash"));
+    assert_eq!(parsed_flash.reasoning, None);
+}
+
+#[test]
+fn scans_and_backfills_antigravity_reasoning_from_db_and_transcript() {
+    let (_stats_dir, stats) = temp_stats();
+    let ag_dir = tempfile::tempdir().unwrap();
+    let root = ag_dir.path();
+    std::fs::create_dir_all(root.join("conversations")).unwrap();
+    let cli_logs = root.join("brain").join("cli-effort").join(".system_generated").join("logs");
+    std::fs::create_dir_all(&cli_logs).unwrap();
+
+    // 1. Desktop DB with two models: gemini-4-neon (XHigh) and gemini-3.7-flash (no level)
+    let db_path = root.join("conversations").join("conv-effort.db");
+    let conv_conn = Connection::open(&db_path).unwrap();
+    conv_conn
+        .execute_batch(
+            "CREATE TABLE gen_metadata (idx INTEGER, data BLOB);
+             CREATE TABLE steps (idx INTEGER, metadata BLOB);",
+        )
+        .unwrap();
+    let gm0 = encode_gen_metadata_with_label(Some("gemini-4-neon"), Some("Gemini 4 Neon (XHigh)"), 0);
+    let gm1 = encode_gen_metadata_with_label(Some("gemini-3.7-flash"), None, 1);
+    conv_conn
+        .execute("INSERT INTO gen_metadata(idx, data) VALUES (0, ?1), (1, ?2)", rusqlite::params![gm0, gm1])
+        .unwrap();
+    let t0 = 1_760_100_000i64;
+    let s1 = encode_step_metadata_msg(t0, t0 + 1, t0 + 4, 200, 80, 0, 100, "resp-xhigh", 0);
+    let s2 = encode_step_metadata_msg(t0 + 20, t0 + 21, t0 + 25, 150, 40, 0, 0, "resp-flash", 1);
+    conv_conn
+        .execute("INSERT INTO steps(idx, metadata) VALUES (1, ?1), (2, ?2)", rusqlite::params![s1, s2])
+        .unwrap();
+    drop(conv_conn);
+
+    // 2. Transcript-only conversation with effort suffix in model
+    let t_line = json!({
+        "step_index": 1,
+        "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+        "created_at": "2026-11-27T12:00:00Z",
+        "model": "gemini-4-hydrogen-high",
+        "input_tokens": 300,
+        "output_tokens": 90
+    });
+    std::fs::write(cli_logs.join("transcript_full.jsonl"), format!("{t_line}\n")).unwrap();
+
+    // Ingest fresh items and verify reasoning is extracted immediately
+    let batch = scan_discovered_roots(mock_root(root), &Default::default(), false);
+    assert_eq!(batch.items.len(), 3);
+    let mut items_for_legacy = batch.items.clone();
+    // Simulate legacy rows stored with empty reasoning before this feature
+    for item in &mut items_for_legacy {
+        item.entry.client_reasoning.clear();
+        item.entry.upstream_reasoning.clear();
+    }
+    let report = stats.ingest_local_direct(items_for_legacy, &batch.file_updates).unwrap();
+    assert_eq!(report.inserted, 3);
+
+    // Run one-time historical backfill
+    let backfilled = backfill_antigravity_reasoning(&stats);
+    assert_eq!(backfilled, 2); // gemini-4-neon(xhigh) + gemini-4-hydrogen(high); gemini-3.7-flash stays empty
+
+    let page = stats.query_requests(&RequestQuery {
+        origin: Some("local_direct".into()),
+        ..Default::default()
+    });
+    let entries = page["entries"].as_array().unwrap();
+    let by_model: HashMap<String, (String, String)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["model"].as_str().unwrap().to_string(),
+                (
+                    e["clientReasoning"].as_str().unwrap().to_string(),
+                    e["upstreamReasoning"].as_str().unwrap().to_string(),
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(by_model.get("gemini-4-neon"), Some(&("xhigh".into(), "xhigh".into())));
+    assert_eq!(by_model.get("gemini-4-hydrogen"), Some(&("high".into(), "high".into())));
+    assert_eq!(by_model.get("gemini-3.7-flash"), Some(&("".into(), "".into())));
+
+    // Second backfill run is a no-op
+    assert_eq!(backfill_antigravity_reasoning(&stats), 0);
+
+    // Re-ingesting already indexed records does not duplicate
+    let report2 = stats.ingest_local_direct(batch.items, &batch.file_updates).unwrap();
+    assert_eq!(report2.inserted, 0);
+    assert_eq!(report2.deduped_existing, 3);
 }

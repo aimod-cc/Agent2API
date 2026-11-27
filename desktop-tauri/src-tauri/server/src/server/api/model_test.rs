@@ -466,7 +466,7 @@ struct TestOutcome {
 
 /// POST /api/models/test
 pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
-    let access = match super::model_access::authenticate(&headers, super::model_access::MODEL_TEST) {
+    let access = match super::model_access::authenticate_call(&headers, super::model_access::MODEL_TEST) {
         Ok(access) => access,
         Err(error) => return error.payload_response(),
     };
@@ -482,16 +482,19 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
     if model.is_empty() {
         return errors::management_error(400, "缺少 model");
     }
+    let early_protocol = TestProtocol::parse(&text_field(&payload, "protocol", 32))
+        .map(TestProtocol::as_str)
+        .unwrap_or("chat_completions");
     let key_scope = access.scope.clone().unwrap_or_default();
     if !key_scope.allows_model(&model) {
         let error = errors::GatewayError::with_status(404, format!("模型 '{model}' 不在这把网关 Key 的可用模型列表里"))
             .with_code("model_not_found");
-        pipeline::record_early_failure(&state, logging::now_ms(), &model, "", &access.source, &error);
+        pipeline::record_early_failure(&state, logging::now_ms(), &model, "", early_protocol, &access.source, &error);
         return error.payload_response();
     }
     let Some(test_scope) = key_scope.for_test_provider(&provider) else {
         let error = errors::GatewayError::with_status(403, format!("提供商 '{provider}' 不在这把网关 Key 的可用提供商列表里"));
-        pipeline::record_early_failure(&state, logging::now_ms(), &model, "", &access.source, &error);
+        pipeline::record_early_failure(&state, logging::now_ms(), &model, "", early_protocol, &access.source, &error);
         return error.payload_response();
     };
     // 模型必须**这一家认识**：清单里没有它时，转发层的收窄会以「不在这把网关
@@ -613,7 +616,7 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
     // 「进行中」行：与真实请求同一处时点（解析成功、转发开始前）。
     // `is_test = true` 一路带下去 —— 报表排除它、请求日志标记它。
     // 测试来源与实际通过鉴权的 Key 身份一起记录。
-    super::request_prepare::record_started(state.request_stats(), &test_id, started_at, &model, &model, &reasoning, &access.source, true).await;
+    super::request_prepare::record_started(state.request_stats(), &test_id, started_at, &model, &model, &reasoning, protocol.as_str(), &access.source, true).await;
     if let Some(token) = cancellation::register(&test_id) {
         telemetry.set_cancel_token(token);
     }
@@ -652,6 +655,7 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
         model: model.clone(),
         client_model: model.clone(),
         client_reasoning: reasoning.clone(),
+        client_protocol: protocol.as_str().to_string(),
         status: outcome.status,
         raw_request,
         raw_response: outcome.raw_response.clone(),

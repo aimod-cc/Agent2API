@@ -105,6 +105,7 @@ export const StorePluginCard = React.memo(function StorePluginCard({
   const handleDetails = React.useCallback(() => onDetails(item), [onDetails, item])
   return <PluginStoreItem viewMode={viewMode} t={t} name={pluginName(item.id, item.name)} description={pluginDescription(item.id, item.description)}
     version={item.version} icon={item.icon} artwork={item.id === 'agent2api-web-providers' ? 'web' : 'providers'}
+    downloads={item.downloads}
     status='missing' selection={resolvedSelection} onDetails={handleDetails}
     badges={<>{item.prerelease ? <BetaBadge /> : null}
       {!item.version ? <Badge variant='outline' shape='tag'>{t('暂未发布')}</Badge> : null}</>}
@@ -160,6 +161,7 @@ export const InstalledPluginCard = React.memo(function InstalledPluginCard({
   const handleDetails = React.useCallback(() => onDetails(pack.id), [onDetails, pack.id])
   return <PluginStoreItem viewMode={viewMode} t={t} name={name} description={pluginDescription(pack.id, store?.description || pack.description)}
     version={pack.version} icon={pack.icon || store?.icon} artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'}
+    downloads={store?.downloads}
     status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'} startup={startup} selection={resolvedSelection}
     onDetails={handleDetails}
     footerAction={pack.enabled && (pluginFailed(startup) || startup?.phase === 'blocked' || (!startup && packHost?.lastError))

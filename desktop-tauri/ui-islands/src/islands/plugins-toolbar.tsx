@@ -7,12 +7,13 @@ import { PluginPageTools } from './plugins-page-tools'
 import { t } from '../i18n'
 import type { PluginViewMode } from '../../../ui-shared/plugins-store'
 
-export type PluginSortKey = 'default' | 'installed-first' | 'stars' | 'name'
+export type PluginSortKey = 'default' | 'installed-first' | 'downloads' | 'stars' | 'name'
 
 function sortLabel(sort: PluginSortKey): string {
   switch (sort) {
     case 'default': return t('默认排序')
     case 'installed-first': return t('已安装优先')
+    case 'downloads': return t('按下载量')
     case 'stars': return t('按热门度')
     case 'name': return t('按名称')
   }
@@ -112,6 +113,7 @@ export const PluginPageToolbar = React.memo(function PluginPageToolbar({
             <SelectContent>
               <SelectItem value='default'>{t('默认排序')}</SelectItem>
               <SelectItem value='installed-first'>{t('已安装优先')}</SelectItem>
+              <SelectItem value='downloads'>{t('按下载量')}</SelectItem>
               <SelectItem value='stars'>{t('按热门度')}</SelectItem>
               <SelectItem value='name'>{t('按名称')}</SelectItem>
             </SelectContent>

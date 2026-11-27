@@ -1984,6 +1984,7 @@ pub fn shim_js() -> &'static str {
     createKey: function (payload) { return call('POST', '/api/keys', payload || {}); },
     updateKey: function (id, patch) { return call('PATCH', '/api/keys/' + encodeURIComponent(id), patch); },
     deleteKey: function (id) { return call('DELETE', '/api/keys/' + encodeURIComponent(id)); },
+    resetKeyUsage: function (id) { return call('POST', '/api/keys/' + encodeURIComponent(id) + '/reset-usage', {}); },
 
     // ── 多账号 ──
     getAccounts: function (query) { return call('GET', '/api/accounts' + toQuery(query)); },

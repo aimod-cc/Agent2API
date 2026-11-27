@@ -114,6 +114,7 @@ const ScriptInstalledRow = React.memo(function ScriptInstalledRow({
     name={name}
     description={scriptPluginDescription(pack, matchedList, t)}
     version={pack.version}
+    downloads={pack.downloads ?? matchedRecommendation?.downloads}
     icon={icon}
     highlightedSource={scriptOfficialBadge(pack)}
     sourceLabel={scriptSourceLabel(pack, t)}
@@ -190,6 +191,7 @@ const ScriptRecommendedRow = React.memo(function ScriptRecommendedRow({
     name={item.label}
     description={recommendedDescription(item, t)}
     version={item.version}
+    downloads={item.downloads}
     onDetails={handleDetails}
     highlightedSource={scriptOfficialBadge(item)}
     sourceLabel={scriptSourceLabel(item, t)}
@@ -427,6 +429,7 @@ export function useScriptPluginsController({
 
   const dialogs = <>
     {detailsItem ? <PluginDetailsDialog name={detailsItem.label} version={detailsItem.version} sourceLabel={scriptSourceLabel(detailsItem, t)}
+      downloads={detailsItem.downloads}
       description={recommendedDescription(detailsItem, t)} icon={iconUrl(detailsItem.icon)} t={t} onClose={() => setDetailsRecommendation(null)}
       metadata={<>
         <ScriptRepository item={detailsItem} onOpenExternal={onOpenExternal} t={t} />

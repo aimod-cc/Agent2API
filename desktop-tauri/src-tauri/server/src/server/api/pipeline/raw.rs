@@ -11,6 +11,11 @@ pub fn capture_raw_body(bytes: &[u8]) -> Option<String> {
     if !crate::server::core::debug_traffic::enabled() {
         return None;
     }
+    let privacy = crate::server::config::current().privacy_settings();
+    if privacy.settings.enabled {
+        let safe = crate::server::core::privacy::redact_debug_body(bytes, "", &privacy);
+        return raw_body_text(&safe);
+    }
     raw_body_text(bytes)
 }
 

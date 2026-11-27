@@ -402,6 +402,7 @@ impl ServerState {
         // 聚合读同一个库（schema v9 的聚合索引），装句柄即可 —— 事实表的刷新
         // 由 usage_query 的心跳循环驱动（见 limiter 模块头）。
         core::limiter::install(db.clone());
+        core::key_usage::install(db.clone());
         // 出网代理池（「网络代理」页维护的命名代理；账号按 id 引用它们）：
         // 与任务状态同为「kv 固定键 + 整份读写」的形态，把同一个 `Db` 传进去。
         // 它不参与启动预热，位置只要求早于任何一次 `/api/proxies/pool*` 请求。

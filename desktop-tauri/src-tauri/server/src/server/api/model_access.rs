@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::server::config;
 use crate::server::core::api_keys;
 use crate::server::core::key_scope::KeyScope;
+use crate::server::core::key_usage::{self, KeyUsageLease};
 use crate::server::errors::GatewayError;
 use crate::server::request_stats::{ApiKeyIdentity, RequestSource};
 
@@ -27,6 +28,7 @@ pub struct ModelAccess {
     pub scope: Option<KeyScope>,
     pub key_source: Option<std::sync::Arc<config::model_key_source::Source>>,
     pub source: RequestSource,
+    pub usage_lease: Option<std::sync::Arc<KeyUsageLease>>,
 }
 
 pub fn authenticate(headers: &HeaderMap, client: &str) -> Result<ModelAccess, GatewayError> {
@@ -54,9 +56,30 @@ pub fn authenticate(headers: &HeaderMap, client: &str) -> Result<ModelAccess, Ga
         (Some(scope), Some(std::sync::Arc::new(source)), identity)
     };
     Ok(ModelAccess {
-        scope, key_source,
+        scope,
+        key_source,
         source: RequestSource { client: client.to_string(), api_key: identity, ..Default::default() },
+        usage_lease: None,
     })
+}
+
+/// 真实模型调用入口的鉴权：除校验 Key 有效外，同时核对并预占该 Key 的用量限额。
+/// 只读查询（`/v1/models`、`count_tokens`、管理面探测）应继续使用 [`authenticate`]。
+pub fn authenticate_call(headers: &HeaderMap, client: &str) -> Result<ModelAccess, GatewayError> {
+    let mut access = authenticate(headers, client)?;
+    access.usage_lease = check_usage_limit(access.scope.as_ref())?;
+    Ok(access)
+}
+
+pub fn check_usage_limit(scope: Option<&KeyScope>) -> Result<Option<std::sync::Arc<KeyUsageLease>>, GatewayError> {
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    let (Some(key_id), Some(limit)) = (scope.key_id(), scope.usage_limit()) else {
+        return Ok(None);
+    };
+    let lease = key_usage::check_and_reserve(key_id, scope.key_name().unwrap_or(""), limit)?;
+    Ok(Some(std::sync::Arc::new(lease)))
 }
 
 pub async fn models(
@@ -95,6 +118,7 @@ pub fn key_choices() -> Vec<Value> {
             "enabled": true,
             "allowedProviders": [],
             "allowedModels": [],
+            "usageLimit": null,
         }));
     }
     choices

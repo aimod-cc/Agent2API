@@ -175,6 +175,7 @@ pub fn store_snapshot(installed: &[TaskPlugin]) -> (Vec<Value>, Vec<Value>) {
             "description": item["description"],
             "version": item["version"],
             "icon": item["icon"],
+            "downloads": item["downloads"].as_u64().unwrap_or(0),
             "homepage": item["homepage"],
             "page": item["page"],
             "notes": item["notes"],

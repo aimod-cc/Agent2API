@@ -1,6 +1,8 @@
 mod credentials;
+mod signature;
 mod version;
 pub use credentials::{read_credential, write_credential, Credential};
+pub use signature::verify_authenticode;
 pub use version::product;
 
 use std::collections::{HashMap, HashSet};
@@ -117,13 +119,13 @@ fn observed_exe(process: &sysinfo::Process) -> Option<&Path> {
     process.exe().filter(|path| !path.as_os_str().is_empty())
 }
 
-pub fn running_executables(names: &[String]) -> Result<Vec<PathBuf>, String> {
+pub fn running_executables(names: &[String], include_all_args: bool) -> Result<Vec<PathBuf>, String> {
     let mut system = system();
     let candidates: Vec<_> = system.processes().iter().filter(|(_, process)| {
         names.iter().any(|name| process.name().to_string_lossy().eq_ignore_ascii_case(name))
-            && !is_non_main_cmd(process.cmd())
+            && (include_all_args || !is_non_main_cmd(process.cmd()))
     }).map(|(pid, _)| *pid).collect();
-    let node_pids = run_as_node_pids(&mut system, &candidates);
+    let node_pids = if include_all_args { HashSet::new() } else { run_as_node_pids(&mut system, &candidates) };
     let mut unique: Vec<PathBuf> = Vec::new();
     for pid in candidates {
         if node_pids.contains(&pid.as_u32()) { continue; }
@@ -143,13 +145,17 @@ fn has_explicit_profile(cmd: &[OsString]) -> bool {
     })
 }
 
-fn main_root_pids(system: &mut sysinfo::System, executable: &Path) -> HashSet<u32> {
+fn main_root_pids(system: &mut sysinfo::System, executable: &Path, include_all_args: bool) -> HashSet<u32> {
     let candidates: Vec<_> = system.processes().iter().filter(|(_, process)| {
-        observed_exe(process).is_some_and(|path| paths::same(path, executable)) && !is_non_main_cmd(process.cmd())
+        observed_exe(process).is_some_and(|path| paths::same(path, executable))
+            && (include_all_args || !is_non_main_cmd(process.cmd()))
     }).map(|(pid, _)| *pid).collect();
-    let node_pids = run_as_node_pids(system, &candidates);
+    let node_pids = if include_all_args { HashSet::new() } else { run_as_node_pids(system, &candidates) };
     let raw_roots: HashSet<u32> = candidates.into_iter().map(|pid| pid.as_u32())
         .filter(|pid| !node_pids.contains(pid)).collect();
+    if include_all_args {
+        return raw_roots;
+    }
     raw_roots.iter().copied().filter(|pid| {
         let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) else { return false; };
         if has_explicit_profile(process.cmd()) { return true; }
@@ -224,12 +230,12 @@ fn verified_processes(system: &sysinfo::System, pids: &HashSet<u32>, root_dir: &
     Ok(result)
 }
 
-fn targets(executable: &Path) -> Result<Vec<(u32, PathBuf, u64)>, String> {
+fn targets(executable: &Path, include_all_args: bool) -> Result<Vec<(u32, PathBuf, u64)>, String> {
     let executable = paths::checked(executable, false)?;
     let mut system = system();
     let root = executable.parent().ok_or("客户端安装目录不可用")?;
     let current = std::process::id();
-    let roots = main_root_pids(&mut system, &executable);
+    let roots = main_root_pids(&mut system, &executable, include_all_args);
     let selected = expand_descendants(&system, &roots, root);
     if selected.contains(&current) { return Err("不能关闭主程序自己的进程".into()); }
     verified_processes(&system, &selected, root)
@@ -245,7 +251,7 @@ fn collect_hot_targets(system: &mut sysinfo::System, executable: &Path, hot_swit
     let executable = paths::checked(executable, false)?;
     let root_dir = executable.parent().ok_or("客户端安装目录不可用")?;
     let current = std::process::id();
-    let root_pids = main_root_pids(system, &executable);
+    let root_pids = main_root_pids(system, &executable, false);
     if root_pids.is_empty() { return Ok(None); }
     if root_pids.contains(&current) { return Err("不能关闭主程序自己的进程".into()); }
     let all_pids = expand_descendants(system, &root_pids, root_dir);
@@ -351,13 +357,13 @@ pub fn wait_hot_services_respawn(executable: &Path, hot_switch: &HotSwitch, prev
     Ok(HotSwitchRespawn::TimedOut)
 }
 
-pub fn running(executable: &Path) -> Result<bool, String> { Ok(!targets(executable)?.is_empty()) }
+pub fn running(executable: &Path, include_all_args: bool) -> Result<bool, String> { Ok(!targets(executable, include_all_args)?.is_empty()) }
 
 pub fn running_has_args(executable: &Path, required_args: &[String]) -> Result<bool, String> {
     if required_args.is_empty() { return Ok(true); }
     let executable = paths::checked(executable, false)?;
     let mut system = system();
-    let roots = main_root_pids(&mut system, &executable);
+    let roots = main_root_pids(&mut system, &executable, false);
     if roots.is_empty() { return Ok(false); }
     Ok(roots.into_iter().all(|pid| {
         system.process(sysinfo::Pid::from_u32(pid)).is_some_and(|process| {
@@ -368,11 +374,18 @@ pub fn running_has_args(executable: &Path, required_args: &[String]) -> Result<b
     }))
 }
 
+struct CloseWindowState<'a> {
+    selected: &'a HashSet<u32>,
+    sent: bool,
+}
+
 unsafe extern "system" fn close_window(window: windows::Win32::Foundation::HWND, value: LPARAM) -> windows::core::BOOL {
-    let selected = &*(value.0 as *const HashSet<u32>);
+    let state = &mut *(value.0 as *mut CloseWindowState<'_>);
     let mut pid = 0;
     GetWindowThreadProcessId(window, Some(&mut pid));
-    if selected.contains(&pid) { let _ = PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+    if state.selected.contains(&pid) && PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)).is_ok() {
+        state.sent = true;
+    }
     windows::core::BOOL(1)
 }
 
@@ -480,8 +493,8 @@ fn terminate(pid: u32, expected: &Path, started: u64) -> Result<(), String> {
     }
 }
 
-fn remaining(executable: &Path, original: &[(u32, PathBuf, u64)]) -> Result<Vec<(u32, PathBuf, u64)>, String> {
-    let mut current = targets(executable)?;
+fn remaining(executable: &Path, original: &[(u32, PathBuf, u64)], include_all_args: bool) -> Result<Vec<(u32, PathBuf, u64)>, String> {
+    let mut current = targets(executable, include_all_args)?;
     let system = system();
     for (id, path, started) in original {
         if current.iter().any(|(current_id, _, _)| current_id == id) { continue; }
@@ -522,20 +535,23 @@ fn spawned_from_known(system: &sysinfo::System, pid: u32, known: &HashMap<u32, (
     false
 }
 
-pub fn close(executable: &Path) -> Result<(), String> {
-    let original = targets(executable)?;
+pub fn close(executable: &Path, include_all_args: bool) -> Result<(), String> {
+    let original = targets(executable, include_all_args)?;
     if original.is_empty() { return Ok(()); }
     let selected: HashSet<_> = original.iter().map(|(id, _, _)| *id).collect();
-    unsafe { EnumWindows(Some(close_window), LPARAM(&selected as *const _ as isize)) }
+    let mut window_state = CloseWindowState { selected: &selected, sent: false };
+    unsafe { EnumWindows(Some(close_window), LPARAM(&mut window_state as *mut _ as isize)) }
         .map_err(|_| "无法请求客户端关闭")?;
-    let grace = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < grace {
-        if remaining(executable, &original)?.is_empty() { return Ok(()); }
-        std::thread::sleep(Duration::from_millis(200));
+    if window_state.sent {
+        let grace = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < grace {
+            if remaining(executable, &original, include_all_args)?.is_empty() { return Ok(()); }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
     let root_dir = executable.parent().ok_or("客户端安装目录不可用")?;
     let known: HashMap<_, _> = original.iter().map(|(id, path, started)| (*id, (path.clone(), *started))).collect();
-    let mut active = remaining(executable, &original)?;
+    let mut active = remaining(executable, &original, include_all_args)?;
     let snapshot = system();
     for (id, path, started) in &active {
         let matches_known = known.get(id).is_some_and(|(before, at)| paths::same(before, path) && *at == *started);
@@ -556,7 +572,7 @@ pub fn close(executable: &Path) -> Result<(), String> {
     drop(known);
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        if remaining(executable, &original)?.is_empty() { return Ok(()); }
+        if remaining(executable, &original, include_all_args)?.is_empty() { return Ok(()); }
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("客户端进程尚未全部退出，未写入凭证".into())
@@ -564,7 +580,7 @@ pub fn close(executable: &Path) -> Result<(), String> {
 
 pub fn start(executable: &Path, proxy: Option<&super::super::proxy::LaunchProxy>, extra_args: &[String]) -> Result<(), String> {
     paths::checked(executable, false)?;
-    if running(executable)? { return Err("客户端已经运行，未再次启动".into()); }
+    if running(executable, false)? { return Err("客户端已经运行，未再次启动".into()); }
     let mut command = std::process::Command::new(executable);
     command
         .current_dir(executable.parent().ok_or("客户端安装目录不可用")?)
@@ -584,7 +600,7 @@ pub fn start(executable: &Path, proxy: Option<&super::super::proxy::LaunchProxy>
     let mut child = command.spawn().map_err(|_| "凭证已切换，但客户端未能启动")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if running(executable)? { return Ok(()); }
+        if running(executable, false)? { return Ok(()); }
         if child.try_wait().map_err(|_| "客户端启动结果未确认")?.is_some() { break; }
         std::thread::sleep(Duration::from_millis(100));
     }

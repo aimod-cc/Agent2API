@@ -7,7 +7,7 @@ export function protocolLabel(value: string): string {
   return { anthropic: 'Anthropic Messages', responses: 'OpenAI Responses', openai_chat: 'OpenAI Chat Completions', gemini: 'Gemini API', native: t('客户端原生配置') }[value] || value
 }
 export function kindLabel(value: string): string {
-  return { gateway: t('本网关'), official: t('官方直连'), relay: t('第三方中转'), local: t('本机服务') }[value] || value
+  return { gateway: t('本网关'), official: t('自定义服务'), relay: t('自定义服务'), local: t('自定义服务') }[value] || value
 }
 export function detectionLabel(client: AgentClient): string {
   return {
@@ -54,7 +54,21 @@ export function validateDraft(client: AgentClient, profile: AgentProfile): strin
   }
   if (profile.authMode === 'key' && !profile.apiKey && !profile.hasApiKey) return t('请填写 API Key')
   if (profile.authMode === 'env' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(profile.envKey)) return t('请填写有效的环境变量名')
-  if (client.supportsModels && !(['codex', 'claude-code'].includes(client.id) && inherited && !profile.models.length)) {
+
+  if (client.id === 'claude-code') {
+    const hasTier = Object.values(profile.claudeModels).some(value => value.trim())
+    if (!inherited && !profile.model.trim() && !hasTier) return t('请至少为一个档位选择映射模型或路由组')
+    if (profile.models.length > 200) return t('最多选择 {n} 个模型', { n: 200 })
+    const ids = new Set<string>()
+    for (const model of profile.models) {
+      if (!model.id.trim() || ids.has(model.id.trim())) return t('模型 ID 不能为空或重复')
+      ids.add(model.id.trim())
+      if (model.effort && model.effort !== 'default' && !modelLevels(client, model.reasoningLevels, profile.protocol).includes(model.effort)) return t('模型或客户端不支持所选思考等级')
+    }
+    return ''
+  }
+
+  if (client.supportsModels && !(client.id === 'codex' && inherited && !profile.models.length)) {
     if (!profile.models.length) return t('请至少添加一个模型')
     if (profile.models.length > 200) return t('最多选择 {n} 个模型', { n: 200 })
     const ids = new Set<string>()

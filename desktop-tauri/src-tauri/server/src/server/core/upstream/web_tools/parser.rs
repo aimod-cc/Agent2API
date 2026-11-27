@@ -21,8 +21,9 @@ pub fn parse(text: &str, context: &Context) -> Result<Output, GatewayError> {
     };
     let mut normalized = Vec::new();
     for inner in blocks {
-        let payload =
-            parse_json(inner).map_err(|_| failed("网页模型的工具调用不是完整有效的 JSON，未执行"))?;
+        let json_text = strip_inner_code_fence(inner);
+        let payload = parse_json(json_text)
+            .map_err(|_| failed("网页模型的工具调用不是完整有效的 JSON，未执行"))?;
         let object = payload
             .as_object()
             .ok_or_else(|| failed("网页工具调用必须是对象"))?;
@@ -40,23 +41,12 @@ pub fn parse(text: &str, context: &Context) -> Result<Output, GatewayError> {
             if normalized.len() >= MAX_CALLS {
                 return Err(failed("网页工具调用列表为空或数量过多"));
             }
-            let fields = call
-                .as_object()
-                .filter(|fields| fields.len() == 2)
-                .ok_or_else(|| failed("网页工具调用包含无效字段"))?;
-            let name = fields
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| failed("网页工具调用缺少名称"))?;
-            let arguments = fields
-                .get("arguments")
-                .filter(|arguments| arguments.is_object())
-                .ok_or_else(|| failed("网页工具参数必须是对象"))?;
+            let (name, arguments) = extract_call_fields(call)?;
             if context
                 .quoted
                 .iter()
                 .any(|(quoted_name, quoted_arguments)| {
-                    quoted_name == name && quoted_arguments == arguments
+                    quoted_name == name && quoted_arguments == &arguments
                 })
             {
                 // 随机值只能关联本次请求，不能证明模型没有复制输入中的调用示例。
@@ -67,7 +57,7 @@ pub fn parse(text: &str, context: &Context) -> Result<Output, GatewayError> {
                 .get(name)
                 .ok_or_else(|| failed("网页模型调用了本次未允许的工具，未执行"))?;
             let encoded = arguments.to_string();
-            if encoded.len() > MAX_ARGUMENT_BYTES || !validator.is_valid(arguments) {
+            if encoded.len() > MAX_ARGUMENT_BYTES || !validator.is_valid(&arguments) {
                 return Err(failed(format!(
                     "网页模型给工具 {name} 的参数不符合声明或超过大小上限，未执行"
                 )));
@@ -88,6 +78,84 @@ pub fn parse(text: &str, context: &Context) -> Result<Output, GatewayError> {
         text: lead_text,
         calls: normalized,
     })
+}
+
+fn strip_inner_code_fence(inner: &str) -> &str {
+    let trimmed = inner.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let Some(newline) = after_open.find('\n') else {
+        return trimmed;
+    };
+    let info = after_open[..newline].trim();
+    if !info
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+'))
+    {
+        return trimmed;
+    }
+    let body = &after_open[newline + 1..];
+    let Some(before_close) = body.trim_end().strip_suffix("```") else {
+        return trimmed;
+    };
+    before_close.trim()
+}
+
+/// 解析单个工具调用项：支持标准 `{name, arguments}` 以及常见 OpenAI 包装形态
+/// （允许附带 `id`、`type: "function"`、嵌套 `function: {name, arguments}`，以及字符串编码的 JSON 对象 `arguments`），
+/// 仍严格拒绝任何未知字段，避免静默丢弃被模型写到 `arguments` 之外的真实参数。
+fn extract_call_fields(call: &Value) -> Result<(&str, Value), GatewayError> {
+    let fields = call
+        .as_object()
+        .ok_or_else(|| failed("网页工具调用包含无效字段"))?;
+
+    let target = if let Some(func_val) = fields.get("function") {
+        for (key, val) in fields {
+            match key.as_str() {
+                "function" => {}
+                "id" if val.is_string() => {}
+                "type" if val.as_str() == Some("function") => {}
+                _ => return Err(failed("网页工具调用包含无效字段")),
+            }
+        }
+        let func = func_val
+            .as_object()
+            .filter(|obj| obj.len() == 2)
+            .ok_or_else(|| failed("网页工具调用包含无效字段"))?;
+        func
+    } else {
+        for (key, val) in fields {
+            match key.as_str() {
+                "name" | "arguments" => {}
+                "id" if val.is_string() => {}
+                "type" if val.as_str() == Some("function") => {}
+                _ => return Err(failed("网页工具调用包含无效字段")),
+            }
+        }
+        fields
+    };
+
+    let name = target
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| failed("网页工具调用缺少名称"))?;
+    let raw_args = target
+        .get("arguments")
+        .ok_or_else(|| failed("网页工具参数必须是对象"))?;
+    let arguments = match raw_args {
+        Value::Object(_) => raw_args.clone(),
+        Value::String(text) if text.len() <= MAX_ARGUMENT_BYTES => {
+            let parsed =
+                parse_json(text).map_err(|_| failed("网页工具参数必须是对象"))?;
+            if !parsed.is_object() {
+                return Err(failed("网页工具参数必须是对象"));
+            }
+            parsed
+        }
+        _ => return Err(failed("网页工具参数必须是对象")),
+    };
+    Ok((name, arguments))
 }
 
 fn extract_blocks(text: &str) -> Result<Option<(String, Vec<&str>)>, GatewayError> {

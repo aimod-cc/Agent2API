@@ -4,9 +4,19 @@ export type ReasoningModel = {
   reasoningFixedLevel?: unknown
   reasoningBindingSupported?: unknown
   reasoningSource?: unknown
+  supportsReasoning?: unknown
+  capabilities?: unknown
 }
 
 export const POSITIVE_REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+function supportsReasoningOf(model?: ReasoningModel | null): boolean | null {
+  const caps = model?.capabilities && typeof model.capabilities === 'object'
+    ? model.capabilities as { supportsReasoning?: unknown } : null
+  if (typeof caps?.supportsReasoning === 'boolean') return caps.supportsReasoning
+  if (typeof model?.supportsReasoning === 'boolean') return model.supportsReasoning
+  return null
+}
 
 export function modelReasoning(model?: ReasoningModel | null): {
   levels: string[]
@@ -23,12 +33,25 @@ export function modelReasoning(model?: ReasoningModel | null): {
       .map(value => value.trim()).filter(Boolean))]
     : []
   const fixedLevel = text(model?.reasoningFixedLevel)
+  const bindingSupported = typeof model?.reasoningBindingSupported === 'boolean' ? model.reasoningBindingSupported : null
+  const source = text(model?.reasoningSource)
+  const resolvedLevels = fixedLevel ? [fixedLevel] : levels
+  if (supportsReasoningOf(model) === false && !(source === 'upstream' && resolvedLevels.length > 0)) {
+    return {
+      levels: [],
+      defaultLevel: '',
+      fixedLevel: '',
+      bindingSupported,
+      source,
+      declared: true,
+    }
+  }
   return {
-    levels: fixedLevel ? [fixedLevel] : levels,
+    levels: resolvedLevels,
     defaultLevel: text(model?.reasoningDefaultLevel),
     fixedLevel,
-    bindingSupported: typeof model?.reasoningBindingSupported === 'boolean' ? model.reasoningBindingSupported : null,
-    source: text(model?.reasoningSource),
+    bindingSupported,
+    source,
     declared: Array.isArray(raw) || Boolean(fixedLevel),
   }
 }

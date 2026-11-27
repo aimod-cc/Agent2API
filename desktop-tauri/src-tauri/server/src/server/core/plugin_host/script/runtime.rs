@@ -140,7 +140,7 @@ pub fn snapshot() -> Value {
             "publisher": metadata["publisher"], "magpieOfficial": metadata["magpieOfficial"],
             "magpieRecommended": metadata["magpieRecommended"], "summary": metadata["summary"],
             "repository": metadata["repository"], "repositoryUrl": metadata["repositoryUrl"],
-            "stars": metadata["stars"], "starsAt": metadata["starsAt"],
+            "stars": metadata["stars"], "starsAt": metadata["starsAt"], "downloads": metadata["downloads"],
             "source": package.source, "checkinAllowed": true,
             "settingsSchema": package.settings_schema,
             "enabled": package.enabled, "installedAt": package.installed_at,

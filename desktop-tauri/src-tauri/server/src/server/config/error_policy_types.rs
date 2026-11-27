@@ -138,24 +138,43 @@ pub fn v1_default_rules() -> Vec<ErrorRule> {
     ]
 }
 
+pub fn v2_default_balance_rule() -> ErrorRule {
+    ErrorRule {
+        id: ErrorKind::Balance.id().into(),
+        name: "余额不足".into(),
+        kind: ErrorKind::Balance,
+        statuses: vec![402],
+        code: String::new(),
+        provider: "*".into(),
+        model: String::new(),
+        enabled: true,
+        action: ErrorAction::SwitchAccount,
+        cooldown: CooldownMode::Upstream,
+        fallback_seconds: 600,
+        exponential: false,
+        fallback_cap_seconds: 1800,
+        scope: CooldownScope::Account,
+    }
+}
+
 pub fn default_rules() -> Vec<ErrorRule> {
     use CooldownMode::*;
     use ErrorAction::*;
     use ErrorKind::*;
-    let rule = |kind: ErrorKind, name: &str, statuses: &[u16], action, cooldown, fallback_seconds, exponential, scope| ErrorRule {
+    let rule = |kind: ErrorKind, name: &str, statuses: &[u16], action, cooldown, fallback_seconds, exponential, fallback_cap_seconds, scope| ErrorRule {
         id: kind.id().into(), name: name.into(), kind, statuses: statuses.to_vec(), code: String::new(), provider: "*".into(),
-        model: String::new(), enabled: true, action, cooldown, fallback_seconds, exponential, fallback_cap_seconds: 1800, scope,
+        model: String::new(), enabled: true, action, cooldown, fallback_seconds, exponential, fallback_cap_seconds, scope,
     };
     vec![
-        rule(RateLimit, "请求限流", &[429], SwitchAccount, Upstream, 60, false, CooldownScope::Auto),
-        rule(Quota, "额度耗尽", &[429], SwitchAccount, Upstream, 600, true, CooldownScope::Auto),
-        rule(Auth, "登录失效", &[401], RefreshThenSwitch, Fixed, 300, true, CooldownScope::Account),
-        rule(Balance, "余额不足", &[402], SwitchAccount, Upstream, 600, false, CooldownScope::Account),
-        rule(Transient, "连接或服务异常", &[408, 500, 502, 503, 504], RetryThenSwitch, Protection, 60, false, CooldownScope::Auto),
-        rule(Unsupported, "能力不支持", &[501], SwitchProvider, Deprioritize, 1800, false, CooldownScope::Auto),
-        rule(BadRequest, "请求有误", &[400, 413, 422], SwitchProvider, Deprioritize, 1800, false, CooldownScope::Auto),
-        rule(Content, "内容被拒绝", &[], SwitchProvider, Deprioritize, 1800, false, CooldownScope::Provider),
-        rule(Unknown, "其他错误", &[], SwitchAccount, Deprioritize, 1800, false, CooldownScope::Auto),
+        rule(RateLimit, "请求限流", &[429], SwitchAccount, Upstream, 60, false, 1800, CooldownScope::Auto),
+        rule(Quota, "额度耗尽", &[429], SwitchAccount, Upstream, 600, true, 1800, CooldownScope::Auto),
+        rule(Auth, "登录失效", &[401], RefreshThenSwitch, Fixed, 300, true, 1800, CooldownScope::Account),
+        rule(Balance, "余额不足", &[402], SwitchAccount, Upstream, 600, true, 21_600, CooldownScope::Account),
+        rule(Transient, "连接或服务异常", &[408, 500, 502, 503, 504], RetryThenSwitch, Protection, 60, false, 1800, CooldownScope::Auto),
+        rule(Unsupported, "能力不支持", &[501], SwitchProvider, Deprioritize, 1800, false, 1800, CooldownScope::Auto),
+        rule(BadRequest, "请求有误", &[400, 413, 422], SwitchProvider, Deprioritize, 1800, false, 1800, CooldownScope::Auto),
+        rule(Content, "内容被拒绝", &[], SwitchProvider, Deprioritize, 1800, false, 1800, CooldownScope::Provider),
+        rule(Unknown, "其他错误", &[], SwitchAccount, Deprioritize, 1800, false, 1800, CooldownScope::Auto),
     ]
 }
 

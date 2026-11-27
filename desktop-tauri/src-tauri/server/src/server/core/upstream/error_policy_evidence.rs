@@ -92,6 +92,101 @@ pub(super) fn kind(
     ErrorKind::Unknown
 }
 
+/// 识别「429 外壳嵌套 402」或正文明确指出的余额/积分不足信号。
+/// 先排除否定措辞（「不是余额不足」等）与限流措辞，防止将权限/限流错误误归为余额不足。
+pub(super) fn balance_message_signal(body: &Value, class: &UpstreamErrorClass) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for candidate in [
+        body.get("message").and_then(Value::as_str),
+        body.pointer("/error/message").and_then(Value::as_str),
+        body.pointer("/detail/message").and_then(Value::as_str),
+    ] {
+        if let Some(text) = candidate.map(str::trim).filter(|text| !text.is_empty()) {
+            parts.push(text);
+        }
+    }
+    let class_message = match class {
+        UpstreamErrorClass::QuotaLimited { message, .. }
+        | UpstreamErrorClass::ContentBlocked { message, .. }
+        | UpstreamErrorClass::Fatal { message, .. }
+        | UpstreamErrorClass::TokenExpired { message } => message.trim(),
+    };
+    if !class_message.is_empty() && !parts.contains(&class_message) {
+        parts.push(class_message);
+    }
+    if parts.is_empty() {
+        return false;
+    }
+    let combined: String = parts.join(" ").chars().take(4096).collect();
+    let lower = combined.to_lowercase();
+    if [
+        "不是余额不足",
+        "非余额不足",
+        "并非余额不足",
+        "不是积分不足",
+        "不是积分余额不足",
+        "不是账号额度不足",
+        "不是额度不足",
+        "not insufficient",
+        "not a balance",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+    {
+        return false;
+    }
+    if [
+        "rate limit",
+        "ratelimit",
+        "too many requests",
+        "too many",
+        "限流",
+        "过于频繁",
+        "频率",
+        "rpm",
+        "tpm",
+        "qps",
+        "并发",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+    {
+        return false;
+    }
+    [
+        "上游返回 402",
+        "上游返回 http 402",
+        "http 402",
+        "status 402",
+        "status: 402",
+        "\"status\":402",
+        "payment required",
+        "payment_required",
+        "积分余额不足",
+        "余额不足",
+        "积分不足",
+        "积分已用完",
+        "积分耗尽",
+        "没有可用积分",
+        "可用积分为 0",
+        "欠费",
+        "余额已用完",
+        "余额耗尽",
+        "insufficient balance",
+        "insufficient_balance",
+        "insufficient credit",
+        "insufficient_credit",
+        "credit balance",
+        "credits exhausted",
+        "credit exhausted",
+        "out of credit",
+        "no credit",
+        "billing hard limit",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+}
+
 pub(super) fn scope(body: &Value) -> CooldownScope {
     match body.get("credentialScope").or_else(|| body.get("credential_scope")).or_else(|| body.get("scope")).and_then(Value::as_str) {
         Some("provider") => CooldownScope::Provider,
@@ -182,4 +277,67 @@ pub(super) fn hard_stop(status: u16, code: &str, codes: &[String]) -> bool {
             )
     };
     status == 499 || (!code.is_empty() && matches_stop_code(code)) || codes.iter().any(|item| matches_stop_code(item))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::config::error_policy::{
+        CooldownScope, DeclaredErrorPolicy, ErrorPolicySnapshot, PluginErrorClassification,
+    };
+    use crate::server::core::upstream::error_policy::decide_with_declared;
+    use serde_json::json;
+
+    #[test]
+    fn nested_402_in_429_is_classified_as_account_balance() {
+        let snapshot = ErrorPolicySnapshot::default();
+        let class = UpstreamErrorClass::QuotaLimited {
+            status: 429,
+            message: "上游返回 429: 上游返回 402: 积分余额不足，请获取积分后再试".into(),
+            upstream_code: None,
+            reset_at: None,
+        };
+        let body = json!({
+            "code": "loomy_quota",
+            "message": "上游返回 429: 上游返回 402: 积分余额不足，请获取积分后再试"
+        });
+        let decision = decide_with_declared(&snapshot, &DeclaredErrorPolicy::default(), "loomy", "gpt-5", &class, 429, &body, false, false);
+        assert_eq!(decision.kind, ErrorKind::Balance);
+        assert_eq!(decision.scope, CooldownScope::Account);
+        assert!(decision.rule.exponential);
+        assert_eq!(decision.rule.fallback_cap_seconds, 21_600);
+    }
+
+    #[test]
+    fn negated_and_rate_limit_messages_are_not_misclassified_as_balance() {
+        let snapshot = ErrorPolicySnapshot::default();
+        let declared = DeclaredErrorPolicy {
+            classifications: vec![PluginErrorClassification {
+                kind: ErrorKind::Unsupported,
+                statuses: vec![],
+                codes: vec!["1311".into()],
+                scope: None,
+                hard_stop: false,
+            }],
+            rules: vec![],
+        };
+        let zcode = UpstreamErrorClass::Fatal {
+            status: 403,
+            message: "ZCode 当前订阅未开放所选模型权限（1311），不是余额不足".into(),
+            upstream_code: Some(1311),
+        };
+        let zcode_body = json!({ "code": 1311, "message": "ZCode 当前订阅未开放所选模型权限（1311），不是余额不足" });
+        let zcode_decision = decide_with_declared(&snapshot, &declared, "zcode", "claude", &zcode, 403, &zcode_body, false, false);
+        assert_eq!(zcode_decision.kind, ErrorKind::Unsupported);
+
+        let rate = UpstreamErrorClass::QuotaLimited {
+            status: 429,
+            message: "AStudio 当前积分或额度不足，或请求过于频繁".into(),
+            upstream_code: None,
+            reset_at: None,
+        };
+        let rate_body = json!({ "message": "AStudio 当前积分或额度不足，或请求过于频繁" });
+        let rate_decision = decide_with_declared(&snapshot, &DeclaredErrorPolicy::default(), "astudio", "m", &rate, 429, &rate_body, false, false);
+        assert_eq!(rate_decision.kind, ErrorKind::RateLimit);
+    }
 }

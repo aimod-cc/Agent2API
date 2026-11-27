@@ -27,6 +27,7 @@ export type UnifiedPluginRow = (
   errored: boolean
   name: string
   stars: number
+  downloads: number
   searchText: string
 }
 
@@ -55,6 +56,13 @@ export function sortRows(rows: UnifiedPluginRow[], sortBy: PluginSortKey): Unifi
   const list = [...rows]
   if (sortBy === 'name') {
     return list.sort((a, b) => zhCollator.compare(a.name, b.name))
+  }
+  if (sortBy === 'downloads') {
+    return list.sort((a, b) =>
+      b.downloads - a.downloads
+      || b.stars - a.stars
+      || Number(b.installed) - Number(a.installed)
+      || zhCollator.compare(a.name, b.name))
   }
   if (sortBy === 'stars') {
     return list.sort((a, b) => b.stars - a.stars || Number(b.installed) - Number(a.installed) || zhCollator.compare(a.name, b.name))
@@ -153,6 +161,7 @@ export function buildUnifiedRows({
       errored,
       name,
       stars: 0,
+      downloads: typeof entry?.downloads === 'number' && Number.isFinite(entry.downloads) ? entry.downloads : 0,
       searchText,
     })
   }
@@ -171,6 +180,7 @@ export function buildUnifiedRows({
       errored: false,
       name,
       stars: 0,
+      downloads: typeof item.downloads === 'number' && Number.isFinite(item.downloads) ? item.downloads : 0,
       searchText,
     })
   }
@@ -204,6 +214,9 @@ export function buildUnifiedRows({
       errored,
       name,
       stars: typeof pack.stars === 'number' && Number.isFinite(pack.stars) ? pack.stars : 0,
+      downloads: typeof pack.downloads === 'number' && Number.isFinite(pack.downloads)
+        ? pack.downloads
+        : (typeof matched?.downloads === 'number' && Number.isFinite(matched.downloads) ? matched.downloads : 0),
       searchText,
     })
   }
@@ -231,6 +244,7 @@ export function buildUnifiedRows({
       errored: false,
       name: item.label,
       stars: typeof item.stars === 'number' && Number.isFinite(item.stars) ? item.stars : 0,
+      downloads: typeof item.downloads === 'number' && Number.isFinite(item.downloads) ? item.downloads : 0,
       searchText,
     })
   }

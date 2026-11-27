@@ -41,6 +41,11 @@ const QUICK_FILTERS: ReadonlyArray<{ id: AccountStatusFilter; label: string }> =
   { id: 'relogin', label: '需重登' },
 ]
 
+export function isAccountBalancePaused(acc: Account): boolean {
+  const entry = acc.routingCooldowns?.['@account']
+  return entry?.kind === 'balance' && Boolean(entry.resetAt && entry.resetAt > Date.now())
+}
+
 export function isAccountRateLimited(acc: Account): boolean {
   const now = Date.now()
   if (acc.upstreamCooldownUntil && acc.upstreamCooldownUntil > now) return true
@@ -440,6 +445,8 @@ export function AccountsView() {
                     {isPrimary ? <TonalChip tone='primary'>首选</TonalChip> : null}
                     {acc.needsRelogin ? (
                       <TonalChip tone='danger'>需重新登录</TonalChip>
+                    ) : isAccountBalancePaused(acc) ? (
+                      <TonalChip tone='warning'>{t('余额不足暂停')}</TonalChip>
                     ) : limited ? (
                       <TonalChip tone='warning'>限流冷却中</TonalChip>
                     ) : enabled ? (

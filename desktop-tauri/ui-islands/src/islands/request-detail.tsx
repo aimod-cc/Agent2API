@@ -1,13 +1,13 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  Button, SegmentedControl,
+  Button, SegmentedControl, TooltipProvider,
   Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle,
   type SegmentedControlOption,
 } from '@ui'
 import { t } from '../i18n'
 import {
-  PreviewPane, RawPane, RequestDebugSwitch, hasDebugTraffic,
+  PreviewPane, RawPane, RequestDebugSwitch, hasDebugTraffic, extractFallbackPayloadText,
   type RawState, type DebugState, type DebugTraffic,
 } from './request-raw-panes'
 import type { RouteDecision } from './routing-types'
@@ -20,6 +20,7 @@ import {
   isRunning,
   type RequestRow,
 } from './requests/request-detail-pane'
+import { DetailErrorBoundary } from './requests/request-detail-guard'
 
 export { RequestDetailPane, RequestRoutePane }
 
@@ -66,6 +67,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isNotFoundError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'status' in error && Number((error as { status?: unknown }).status) === 404) {
+    return true
+  }
+  const msg = errorMessage(error)
+  return /未找到该请求的原始报文|该请求没有保存原始报文|\bHTTP\s*404\b|\b404\s*Not\s*Found\b/i.test(msg)
+}
+
 function rowIdentity(row: RequestRow | null | undefined): string {
   return String(row?.id || row?.rowId || row?.ts || '')
 }
@@ -93,9 +102,17 @@ type RequestDetailProps = {
   initialToken: number
   nav?: DetailNavOptions
   onClose: () => void
+  onFallbackSourceChange?: (getter: () => string) => void
 }
 
-function RequestDetail({ initialId, initialRow, initialToken, nav, onClose }: RequestDetailProps) {
+function RequestDetail({
+  initialId,
+  initialRow,
+  initialToken,
+  nav,
+  onClose,
+  onFallbackSourceChange,
+}: RequestDetailProps) {
   const navEntries = Array.isArray(nav?.entries) ? nav.entries : []
   const initialIndex = typeof nav?.index === 'number' && nav.index >= 0 && nav.index < navEntries.length ? nav.index : -1
 
@@ -110,34 +127,63 @@ function RequestDetail({ initialId, initialRow, initialToken, nav, onClose }: Re
     Boolean(initialRow ? initialRow.detailsLoaded === false && (initialRow.rowId || initialId) : initialId),
   )
   const [active, setActive] = React.useState<TabKey>(DEFAULT_TAB)
-  const [raw, setRaw] = React.useState<RawState>(null)
-  const [debug, setDebug] = React.useState<DebugState>(null)
-  const [hint, setHint] = React.useState('—')
+  const [visitedTabs, setVisitedTabs] = React.useState<Set<TabKey>>(() => new Set([DEFAULT_TAB]))
+  const [raw, setRaw] = React.useState<RawState>('idle')
+  const [debug, setDebug] = React.useState<DebugState>('idle')
+  const [rawHint, setRawHint] = React.useState('')
+  const [actionHint, setActionHint] = React.useState('')
   const [terminate, setTerminate] = React.useState<TerminateState>('idle')
 
   const aliveRef = React.useRef(true)
   const bodyRef = React.useRef<HTMLDivElement | null>(null)
   const scrollTops = React.useRef<Record<TabKey, number>>({ detail: 0, route: 0, preview: 0, raw: 0 })
+  const savedScrollTabs = React.useRef<Record<TabKey, boolean>>({ detail: false, route: false, preview: false, raw: false })
+  const latestPayloadsRef = React.useRef<{ raw: RawState; debug: DebugState }>({ raw: 'idle', debug: 'idle' })
+
+  React.useEffect(() => {
+    latestPayloadsRef.current = { raw, debug }
+  }, [raw, debug])
+
+  React.useEffect(() => {
+    onFallbackSourceChange?.(() => extractFallbackPayloadText(latestPayloadsRef.current.raw, latestPayloadsRef.current.debug))
+  }, [onFallbackSourceChange])
+
+  const getFallbackCopyText = React.useCallback(
+    () => extractFallbackPayloadText(latestPayloadsRef.current.raw, latestPayloadsRef.current.debug),
+    [],
+  )
 
   const stepTo = React.useCallback((nextIndex: number) => {
     if (nextIndex < 0 || nextIndex >= navEntries.length) return
     const nextRow = navEntries[nextIndex]
     const nextId = nextRow?.id ? String(nextRow.id) : ''
     const nextToken = ++seq
+    const nextTab: TabKey = active === 'raw' && (!nextId || nextRow?.origin === 'local_direct')
+      ? DEFAULT_TAB
+      : active
     scrollTops.current = { detail: 0, route: 0, preview: 0, raw: 0 }
+    savedScrollTabs.current = { detail: false, route: false, preview: false, raw: false }
     if (bodyRef.current) bodyRef.current.scrollTop = 0
     setTarget({ id: nextId, row: nextRow, index: nextIndex, token: nextToken })
     setDetailRow(nextRow)
     setDetailLoading(Boolean(nextRow ? nextRow.detailsLoaded === false && (nextRow.rowId || nextId) : nextId))
-    setRaw(null)
-    setDebug(null)
-    setHint('—')
+    setActive(nextTab)
+    setVisitedTabs(new Set([nextTab]))
+    setRaw('idle')
+    setDebug('idle')
+    setRawHint('')
+    setActionHint('')
     setTerminate('idle')
     nav?.onSelectKey?.(rowIdentity(nextRow))
-  }, [nav, navEntries])
+  }, [active, nav, navEntries])
 
   React.useEffect(() => {
     aliveRef.current = true
+    return () => { aliveRef.current = false }
+  }, [])
+
+  // 默认只拉取请求基础详情，不预加载预览正文和原始报文
+  React.useEffect(() => {
     const { id, row, token } = target
     const isStale = () => !aliveRef.current || token !== seq
     const needsDetail = Boolean(row ? row.detailsLoaded === false && (row.rowId || id) : id)
@@ -166,68 +212,110 @@ function RequestDetail({ initialId, initialRow, initialToken, nav, onClose }: Re
       }
     }
 
-    async function loadRaw() {
-      try {
-        const rowId = Number(row?.rowId)
-        const response = await api().getStatsRequestRaw(id, Number.isFinite(rowId) && rowId > 0 ? rowId : undefined)
-        if (isStale()) return
-        const body = isPlainObject(response) ? response : null
-        const hasText = String(body?.requestBody ?? '').trim() !== ''
-          || String(body?.responseBody ?? '').trim() !== ''
-        setRaw(body && hasText ? { body, truncated: !!body.truncated } : 'gone')
-      } catch (error) {
-        if (isStale()) return
-        if (row?.origin === 'local_direct') {
-          const msg = errorMessage(error).trim()
-          setRaw({ error: msg || t('未找到本机对话原文文件') })
-        } else {
-          setRaw('gone')
-        }
-        console.warn('读取原始正文失败（预览对话显示空态）:', errorMessage(error))
-      }
-    }
-
-    async function loadDebug() {
-      try {
-        const response = await api().getDebugTraffic(id)
-        if (isStale()) return
-        const data: DebugTraffic = isPlainObject(response) ? response : {}
-        if (!hasDebugTraffic(data)) {
-          setDebug('gone')
-          return
-        }
-        setDebug({ data })
-        setHint(data.truncated
-          ? t('这条报文由旧版本截断保存，缺失内容无法恢复')
-          : t('内容按原样保存，请求头中的凭据字段已替换为 [redacted]'))
-      } catch (error) {
-        if (isStale()) return
-        setDebug('gone')
-        setHint(t('开启调试模式后仅记录新请求，历史对话无法补录；关闭不会删除已有记录。'))
-        console.warn('读取调试报文失败（原始报文标签隐藏）:', errorMessage(error))
-      }
-    }
-
     if (needsDetail) void loadDetail()
     else setDetailLoading(false)
-    if (id) {
-      void loadRaw()
-      void loadDebug()
-    } else {
-      setRaw('gone')
-      setDebug('gone')
-    }
-    return () => { aliveRef.current = false }
   }, [target])
 
-  const showRaw = isPlainObject(debug)
+  const loadRaw = React.useCallback(async () => {
+    const { id, row, token } = target
+    const isStale = () => !aliveRef.current || token !== seq
+    if (!id) {
+      setRaw('gone')
+      return
+    }
+    setRaw('loading')
+    try {
+      const rowId = Number(row?.rowId)
+      const response = await api().getStatsRequestRaw(id, Number.isFinite(rowId) && rowId > 0 ? rowId : undefined)
+      if (isStale()) return
+      if (!isPlainObject(response)) {
+        setRaw({ error: t('预览响应格式异常，请重试'), retryable: true })
+        return
+      }
+      const hasText = String(response.requestBody ?? '').trim() !== ''
+        || String(response.responseBody ?? '').trim() !== ''
+      setRaw(hasText ? { body: response, truncated: !!response.truncated } : 'gone')
+    } catch (error) {
+      if (isStale()) return
+      if (isNotFoundError(error)) {
+        setRaw('gone')
+      } else if (row?.origin === 'local_direct') {
+        const msg = errorMessage(error).trim()
+        setRaw({ error: msg || t('未找到本机对话原文文件'), retryable: true })
+      } else {
+        setRaw({ error: t('预览读取失败：{error}', { error: errorMessage(error) }), retryable: true })
+      }
+      console.warn('读取原始正文失败:', errorMessage(error))
+    }
+  }, [target])
+
+  const loadDebug = React.useCallback(async () => {
+    const { id, token } = target
+    const isStale = () => !aliveRef.current || token !== seq
+    if (!id) {
+      setDebug('gone')
+      setRawHint('')
+      return
+    }
+    setDebug('loading')
+    try {
+      const response = await api().getDebugTraffic(id)
+      if (isStale()) return
+      if (!isPlainObject(response)) {
+        setDebug({ error: t('原始报文响应格式异常，请重试'), retryable: true })
+        setRawHint('')
+        return
+      }
+      const data: DebugTraffic = response
+      if (!hasDebugTraffic(data)) {
+        setDebug('gone')
+        setRawHint('')
+        return
+      }
+      setDebug({ data })
+      setRawHint(data.truncated
+        ? t('这条报文由旧版本截断保存，缺失内容无法恢复')
+        : t('内容按原样保存，请求头中的凭据字段已替换为 [redacted]'))
+    } catch (error) {
+      if (isStale()) return
+      setRawHint('')
+      if (isNotFoundError(error)) {
+        setDebug('gone')
+      } else {
+        setDebug({ error: t('原始报文读取失败：{error}', { error: errorMessage(error) }), retryable: true })
+      }
+      console.warn('读取调试报文失败:', errorMessage(error))
+    }
+  }, [target])
+
+  // 首次切换到「预览对话」才取数
+  React.useEffect(() => {
+    if (visitedTabs.has('preview') && raw === 'idle') {
+      void loadRaw()
+    }
+  }, [visitedTabs, raw, loadRaw])
+
+  // 首次切换到「原始报文」才取数
+  React.useEffect(() => {
+    if (visitedTabs.has('raw') && debug === 'idle') {
+      void loadDebug()
+    }
+  }, [visitedTabs, debug, loadDebug])
+
+  const showRawTab = Boolean(target.id) && detailRow?.origin !== 'local_direct'
   const showRoute = hasRoute(detailRow)
 
   React.useEffect(() => {
-    if ((active === 'raw' && debug === 'gone') || (active === 'route' && !detailLoading && !showRoute)) {
-      setActive('detail')
+    if ((active === 'raw' && !showRawTab) || (active === 'route' && !detailLoading && !showRoute)) {
+      setVisitedTabs(prev => {
+        if (prev.has(DEFAULT_TAB)) return prev
+        const copy = new Set(prev)
+        copy.add(DEFAULT_TAB)
+        return copy
+      })
+      setActive(DEFAULT_TAB)
     }
-  }, [active, debug, detailLoading, showRoute])
+  }, [active, showRawTab, detailLoading, showRoute])
 
   React.useEffect(() => {
     if (navEntries.length <= 1 || target.index < 0) return
@@ -254,15 +342,29 @@ function RequestDetail({ initialId, initialRow, initialToken, nav, onClose }: Re
 
   React.useLayoutEffect(() => {
     const body = bodyRef.current
-    if (body) body.scrollTop = scrollTops.current[active]
+    if (!body) return
+    if (savedScrollTabs.current[active]) {
+      body.scrollTop = scrollTops.current[active]
+    } else if (active !== 'preview') {
+      body.scrollTop = 0
+    }
   }, [active])
 
   function switchTab(next: TabKey) {
-    if (next === 'raw' && !showRaw) return
+    if (next === 'raw' && !showRawTab) return
     if (next === 'route' && !showRoute) return
     if (next === active) return
     const body = bodyRef.current
-    if (body) scrollTops.current[active] = body.scrollTop
+    if (body) {
+      scrollTops.current[active] = body.scrollTop
+      savedScrollTabs.current[active] = true
+    }
+    setVisitedTabs(prev => {
+      if (prev.has(next)) return prev
+      const copy = new Set(prev)
+      copy.add(next)
+      return copy
+    })
     setActive(next)
   }
 
@@ -282,104 +384,146 @@ function RequestDetail({ initialId, initialRow, initialToken, nav, onClose }: Re
       await api().terminateStatsRequest(target.id)
       if (!aliveRef.current) return
       setTerminate('accepted')
-      setHint(t('已受理终止：上游连接已断开，列表稍后刷新为「请求已被手动终止」'))
+      setActionHint(t('已受理终止：上游连接已断开，列表稍后刷新为「请求已被手动终止」'))
     } catch (error) {
       if (!aliveRef.current) return
       setTerminate('idle')
-      setHint(t('终止失败：{error}', { error: errorMessage(error) }))
+      setActionHint(t('终止失败：{error}', { error: errorMessage(error) }))
     }
   }
 
   const tabOptions = React.useMemo(
-    () => TAB_OPTIONS.filter(tab => (tab.value !== 'raw' || showRaw) && (tab.value !== 'route' || showRoute)),
-    [showRaw, showRoute],
+    () => TAB_OPTIONS.filter(tab => (tab.value !== 'raw' || showRawTab) && (tab.value !== 'route' || showRoute)),
+    [showRawTab, showRoute],
   )
 
   const canNav = navEntries.length > 1 && target.index >= 0
+  const footerHint = actionHint || (active === 'raw' ? rawHint : '')
+  const requestKey = `${target.token}:${target.id || rowIdentity(detailRow)}`
 
   return (
-    <Sheet open onOpenChange={next => { if (!next) onClose() }}>
-      <SheetContent
-        side='right'
-        showHandle={false}
-        className='w-[min(620px,92vw)]'
-      >
-        <SheetHeader className='gap-2'>
-          <div className='flex min-w-0 flex-1 items-center gap-2.5'>
-            <SheetTitle className='truncate text-[15px] font-semibold text-foreground'>
-              {t('请求详情')}
-            </SheetTitle>
-            {detailRow ? <StatusSummary row={detailRow} /> : null}
-          </div>
-          {canNav ? (
-            <div className='inline-flex items-center gap-1'>
-              <span className='mr-1 font-mono text-[11px] text-muted-foreground tabular-nums'>
-                {target.index + 1} / {navEntries.length}
-              </span>
-              <Button
-                variant='outline'
-                size='icon-sm'
-                type='button'
-                disabled={target.index <= 0}
-                onClick={() => stepTo(target.index - 1)}
-                title={t('上一条（↑）')}
-                aria-label={t('上一条')}
-              >
-                <ChevronIcon dir='up' />
-              </Button>
-              <Button
-                variant='outline'
-                size='icon-sm'
-                type='button'
-                disabled={target.index >= navEntries.length - 1}
-                onClick={() => stepTo(target.index + 1)}
-                title={t('下一条（↓）')}
-                aria-label={t('下一条')}
-              >
-                <ChevronIcon dir='down' />
-              </Button>
+    <TooltipProvider delay={160}>
+      <Sheet open onOpenChange={next => { if (!next) onClose() }}>
+        <SheetContent
+          side='right'
+          showHandle={false}
+          className='w-[min(620px,92vw)]'
+        >
+          <SheetHeader className='gap-2'>
+            <div className='flex min-w-0 flex-1 items-center gap-2.5'>
+              <SheetTitle className='truncate text-[15px] font-semibold text-foreground'>
+                {t('请求详情')}
+              </SheetTitle>
+              {detailRow ? <StatusSummary row={detailRow} /> : null}
             </div>
-          ) : null}
-        </SheetHeader>
+            {canNav ? (
+              <div className='inline-flex items-center gap-1'>
+                <span className='mr-1 font-mono text-[11px] text-muted-foreground tabular-nums'>
+                  {target.index + 1} / {navEntries.length}
+                </span>
+                <Button
+                  variant='outline'
+                  size='icon-sm'
+                  type='button'
+                  disabled={target.index <= 0}
+                  onClick={() => stepTo(target.index - 1)}
+                  title={t('上一条（↑）')}
+                  aria-label={t('上一条')}
+                >
+                  <ChevronIcon dir='up' />
+                </Button>
+                <Button
+                  variant='outline'
+                  size='icon-sm'
+                  type='button'
+                  disabled={target.index >= navEntries.length - 1}
+                  onClick={() => stepTo(target.index + 1)}
+                  title={t('下一条（↓）')}
+                  aria-label={t('下一条')}
+                >
+                  <ChevronIcon dir='down' />
+                </Button>
+              </div>
+            ) : null}
+          </SheetHeader>
 
-        <div className='flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-5 py-2.5'>
-          <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
-            aria-label={t('详情内容')} className='self-start' />
-          {detailRow?.origin !== 'local_direct' ? <RequestDebugSwitch /> : null}
-        </div>
+          <div className='flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-5 py-2.5'>
+            <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
+              aria-label={t('详情内容')} className='self-start' />
+            {detailRow?.origin !== 'local_direct' ? <RequestDebugSwitch /> : null}
+          </div>
 
-        <SheetBody ref={bodyRef} className='gap-3.5 [scrollbar-gutter:stable]'>
-          <section hidden={active !== 'detail'} className='min-w-0 shrink-0'>
-            <RequestDetailPane row={detailRow} loadingDetail={detailLoading} />
-          </section>
-          {showRoute ? (
-            <section hidden={active !== 'route'} className='min-w-0 shrink-0'>
-              <RequestRoutePane row={detailRow as RequestRow & { route: RouteDecision }} />
-            </section>
-          ) : null}
-          <section hidden={active !== 'preview'} className='min-w-0 shrink-0'>
-            <PreviewPane state={raw} localDirect={detailRow?.origin === 'local_direct'} />
-          </section>
-          {showRaw ? (
-            <section hidden={active !== 'raw'} className='min-w-0 shrink-0'>
-              <RawPane data={(debug as { data: DebugTraffic }).data} />
-            </section>
-          ) : null}
-        </SheetBody>
+          <SheetBody ref={bodyRef} className='gap-3.5 [scrollbar-gutter:stable]'>
+            {visitedTabs.has('detail') ? (
+              <section hidden={active !== 'detail'} className='min-w-0 shrink-0'>
+                <DetailErrorBoundary key={`detail:${requestKey}`} scope='pane' getCopyText={getFallbackCopyText}>
+                  <RequestDetailPane row={detailRow} loadingDetail={detailLoading} />
+                </DetailErrorBoundary>
+              </section>
+            ) : null}
+            {showRoute && visitedTabs.has('route') ? (
+              <section hidden={active !== 'route'} className='min-w-0 shrink-0'>
+                <DetailErrorBoundary key={`route:${requestKey}`} scope='pane' getCopyText={getFallbackCopyText}>
+                  <RequestRoutePane row={detailRow as RequestRow & { route: RouteDecision }} />
+                </DetailErrorBoundary>
+              </section>
+            ) : null}
+            {visitedTabs.has('preview') ? (
+              <section hidden={active !== 'preview'} className='min-w-0 shrink-0'>
+                <DetailErrorBoundary key={`preview:${requestKey}`} scope='pane' getCopyText={getFallbackCopyText}>
+                  <PreviewPane
+                    state={raw}
+                    localDirect={detailRow?.origin === 'local_direct'}
+                    active={active === 'preview'}
+                    requestKey={requestKey}
+                    scrollContainerRef={bodyRef}
+                    onRetry={() => { void loadRaw() }}
+                  />
+                </DetailErrorBoundary>
+              </section>
+            ) : null}
+            {showRawTab && visitedTabs.has('raw') ? (
+              <section hidden={active !== 'raw'} className='min-w-0 shrink-0'>
+                <DetailErrorBoundary key={`raw:${requestKey}`} scope='pane' getCopyText={getFallbackCopyText}>
+                  <RawPane state={debug} onRetry={() => { void loadDebug() }} />
+                </DetailErrorBoundary>
+              </section>
+            ) : null}
+          </SheetBody>
 
-        <SheetFooter>
-          <span className='min-w-0 text-[11.5px] text-muted-foreground'>{hint}</span>
-          <div className='mr-auto' />
-          {isRunning(detailRow) ? (
-            <Button variant='destructive' disabled={terminate !== 'idle'}
-              onClick={() => { void handleTerminate() }} title={t('断开上游连接，明细记为「请求已被手动终止」')}>
-              {t('终止请求')}
-            </Button>
-          ) : null}
-          <Button variant='outline' onClick={onClose}>{t('关闭')}</Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+          <SheetFooter>
+            {footerHint ? (
+              <span className='min-w-0 text-[11.5px] leading-snug text-muted-foreground'>{footerHint}</span>
+            ) : null}
+            <div className='mr-auto' />
+            {isRunning(detailRow) ? (
+              <Button variant='destructive' disabled={terminate !== 'idle'}
+                onClick={() => { void handleTerminate() }} title={t('断开上游连接，明细记为「请求已被手动终止」')}>
+                {t('终止请求')}
+              </Button>
+            ) : null}
+            <Button variant='outline' onClick={onClose}>{t('关闭')}</Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+    </TooltipProvider>
+  )
+}
+
+function RequestDetailShell(props: Omit<RequestDetailProps, 'onFallbackSourceChange'>) {
+  const getterRef = React.useRef<() => string>(() => '')
+  const setGetter = React.useCallback((getter: () => string) => {
+    getterRef.current = getter
+  }, [])
+  return (
+    <DetailErrorBoundary
+      scope='sheet'
+      title={t('请求详情')}
+      onClose={props.onClose}
+      getCopyText={() => getterRef.current()}
+    >
+      <RequestDetail {...props} onFallbackSourceChange={setGetter} />
+    </DetailErrorBoundary>
   )
 }
 
@@ -416,7 +560,7 @@ function openDetail(id: unknown, row?: unknown, nav?: DetailNavOptions) {
   document.body.append(host)
   root = createRoot(host)
   root.render(
-    <RequestDetail
+    <RequestDetailShell
       initialId={key}
       initialRow={isPlainObject(row) ? (row as RequestRow) : null}
       initialToken={token}
