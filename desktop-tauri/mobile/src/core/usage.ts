@@ -11,7 +11,6 @@ import {
   usageAvailableViewOf,
   usageEmptyStateOf,
   usageNumberOrNull,
-  usageSupplementReadingsOf,
   usageUnitLabel,
   usageWarningsOf,
   usageWindowLabel,
@@ -176,8 +175,9 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
     const value = walletView(wallet)
     if (!value) continue
     rows.push({
-      label: readableName(wallet.displayName || wallet.name || wallet.type, t('明细')),
+      label: readableName(wallet.displayName || wallet.name, t('明细')),
       value,
+      key: stringOf(wallet.type) || stringOf(wallet.displayName) || stringOf(wallet.name),
     })
   }
 
@@ -190,8 +190,9 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
     const value = creditPackView(pack)
     if (!value) continue
     rows.push({
-      label: readableName(pack.name || pack.displayName || pack.key, t('明细')),
+      label: readableName(pack.name || pack.displayName, t('明细')),
       value,
+      key: stringOf(pack.key) || stringOf(pack.name) || stringOf(pack.displayName),
     })
   }
 
@@ -237,6 +238,27 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
   return dedupeRows(rows)
 }
 
+function supplementReadingsOf(data: UsageObject, format: (value: number) => string): string[] {
+  const readings: string[] = []
+  const subscription = objectOf(data.subscription)
+  const planName = stringOf(subscription?.planName)
+  if (planName) readings.push(t('套餐 {name}', { name: planName }))
+  const balanceView = stringOf(data.balanceView)
+  if (balanceView) readings.push(t(balanceView))
+  for (const wallet of creditStatisticsWalletsOf(data) ?? (Array.isArray(data.wallets) ? data.wallets : [])) {
+    const row = objectOf(wallet)
+    if (!row) continue
+    const view = stringOf(row.balanceView) || (() => {
+      const balance = usageNumberOrNull(row.balance)
+      return balance === null ? '' : format(balance)
+    })()
+    if (!view) continue
+    const name = stringOf(row.displayName) || stringOf(row.name)
+    readings.push([name ? t(name) : t('明细'), view].filter(Boolean).join(' '))
+  }
+  return [...new Set(readings)]
+}
+
 /** 账号级主读数；窗口明细存在时仍需保留这个摘要，百分比窗口由窗口行本身表达。 */
 function accountBalanceSummary(data: UsageObject): string {
   const wallets = Array.isArray(data.wallets) ? data.wallets : []
@@ -276,7 +298,6 @@ function accountBalanceSummary(data: UsageObject): string {
   if (!summary) {
     const sources = Array.isArray(data.quotaSources) ? data.quotaSources.map(objectOf).filter(Boolean) as UsageObject[] : []
     const primary = sources.find(source => source.id === 'account')
-      || sources.find(source => source.localOnly !== true && source.localEstimate !== true)
     if (primary) {
       const remaining = usageNumberOrNull(primary.remaining)
       const unit = stringOf(primary.unit) || unitOf(data)
@@ -352,7 +373,7 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
   }
 
   const rows = summaryRows(data)
-  const messages = usageSupplementReadingsOf(data, t, formatUsageNumber).filter(message =>
+  const messages = supplementReadingsOf(data, formatUsageNumber).filter(message =>
     !rows.some(row => message === row.label || message.startsWith(`${row.label} `)),
   )
   const warnings = usageWarningsOf(data).map(line => t(line))
@@ -391,12 +412,12 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
     || Array.isArray(data.quotaSources)
 
   if (hasBalanceShape) {
-    const summary = accountBalanceSummary(data) || messages[0] || ''
-    if (summary) {
+    const summary = accountBalanceSummary(data)
+    if (summary || rows.length) {
       return finish({
         status: 'ready',
         tone: warnings.length ? 'warning' : 'ok',
-        summary,
+        summary: summary || t('明细'),
         rows,
         messages: [...messages, ...warnings],
         freshness,
