@@ -1,5 +1,5 @@
 import type { UsageRow } from './api'
-import { formatNumber } from './format'
+import { formatNumber, formatUsageNumber } from './format'
 import { t } from './i18n'
 import {
   balanceWalletOf,
@@ -62,11 +62,21 @@ function unitOf(data: UsageObject): string {
   return Object.prototype.hasOwnProperty.call(data, 'totalLeft') ? '积分' : ''
 }
 
+function isCountUnit(unit: string): boolean {
+  const normalized = unit.trim().toLowerCase()
+  return normalized === '次'
+    || normalized === 'request'
+    || normalized === 'requests'
+    || normalized === 'call'
+    || normalized === 'calls'
+}
+
 function amountOf(value: unknown, unit: string): string {
   const number = usageNumberOrNull(value)
   if (number === null) return ''
   const label = unit ? usageUnitLabel(unit, t) : ''
-  return [formatNumber(number), label].filter(Boolean).join(' ')
+  const format = isCountUnit(unit) ? formatNumber : formatUsageNumber
+  return [format(number), label].filter(Boolean).join(' ')
 }
 
 function sourceView(source: UsageObject): string {
@@ -162,7 +172,7 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
     })
   }
 
-  for (const reading of snapshotReadingsOf(data, t, formatNumber)) {
+  for (const reading of snapshotReadingsOf(data, t, formatUsageNumber)) {
     rows.push({ label: reading.name, value: reading.view })
   }
 
@@ -182,7 +192,7 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
     const value = sourceView(source)
     if (!value) continue
     rows.push({
-      label: readableName(source.label || source.planName || source.id, t('明细')),
+      label: readableName(source.label || source.planName, t('明细')),
       value,
     })
   }
@@ -212,6 +222,15 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
   }
 
   const freshness = freshnessOf(row, Boolean(row.error))
+  const finish = (display: UsageDisplay): UsageDisplay => {
+    const nextMessages = [...display.messages, ...(row.stale ? [t('配置已变更，请重新查询')] : [])]
+    return {
+      ...display,
+      tone: row.stale ? 'warning' : display.tone,
+      messages: [...new Set(nextMessages.filter(Boolean))],
+    }
+  }
+
   if (row.error) {
     const notice = usageQueryNoticeOf(row.code, t)
     const message = usageFailureMessage(row, t)
@@ -227,30 +246,30 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
 
   const data = objectOf(row.usage) || objectOf(row)
   if (!data) {
-    return {
+    return finish({
       status: 'unknown',
       tone: 'muted',
       summary: t('无数据'),
       rows: [],
       messages: [t('未返回可识别的余额数据')],
       freshness,
-    }
+    })
   }
 
   const empty = usageEmptyStateOf(data, t)
   if (empty) {
-    return {
+    return finish({
       status: 'empty',
       tone: 'muted',
       summary: empty.text,
       rows: [],
       messages: [empty.detail],
       freshness,
-    }
+    })
   }
 
   const rows = summaryRows(data)
-  const messages = usageSupplementReadingsOf(data, t, formatNumber).filter(message =>
+  const messages = usageSupplementReadingsOf(data, t, formatUsageNumber).filter(message =>
     !rows.some(row => message === row.label || message.startsWith(`${row.label} `)),
   )
   const warnings = usageWarningsOf(data).map(line => t(line))
@@ -267,26 +286,26 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
         bonus: bonus || '—',
       }))
     }
-    return {
+    return finish({
       status: 'ready',
       tone: warnings.length ? 'warning' : 'ok',
       summary: t('可用 {total}', { total }),
       rows,
       messages: [...new Set([...messages, ...warnings])],
       freshness,
-    }
+    })
   }
 
   const windows = Array.isArray(data.windows) ? data.windows : []
   if (windows.length) {
-    return {
+    return finish({
       status: 'ready',
       tone: warnings.length ? 'warning' : 'ok',
       summary: t('分窗口额度'),
       rows,
       messages: [...new Set([...messages, ...warnings])],
       freshness,
-    }
+    })
   }
 
   const hasBalanceShape = Object.prototype.hasOwnProperty.call(data, 'available')
@@ -298,26 +317,27 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
   if (hasBalanceShape) {
     const wallets = Array.isArray(data.wallets) ? data.wallets : []
     const fallbackWallet = balanceWalletOf(wallets)
-    const fallbackStat = creditStatisticsWalletsOf(data)?.[0] || null
+    const fallbackStat = creditStatisticsWalletsOf(data)
+      ?.find(wallet => usageNumberOrNull(wallet.creditRemaining) !== null) || null
     let summary = usageAvailableViewOf(data, t)
     if (!summary && fallbackWallet) {
       const unit = stringOf(fallbackWallet.unit) || unitOf(data)
       summary = t('可用 {value} {unit}', {
-        value: formatNumber(usageNumberOrNull(fallbackWallet.balance) ?? 0),
+        value: formatUsageNumber(usageNumberOrNull(fallbackWallet.balance) ?? 0),
         unit: unit ? usageUnitLabel(unit, t) : '',
       })
     }
     if (!summary && fallbackStat) {
       const unit = stringOf(fallbackStat.unit) || unitOf(data)
       summary = t('可用 {value} {unit}', {
-        value: formatNumber(usageNumberOrNull(fallbackStat.creditRemaining) ?? 0),
+        value: formatUsageNumber(usageNumberOrNull(fallbackStat.creditRemaining) ?? 0),
         unit: unit ? usageUnitLabel(unit, t) : '',
       })
     }
     if (!summary && (usageNumberOrNull(data.available) !== null || data.unlimited === true)) {
       const unit = unitOf(data)
       summary = t('可用 {value} {unit}', {
-        value: data.unlimited === true ? '∞' : formatNumber(usageNumberOrNull(data.available) ?? 0),
+        value: data.unlimited === true ? '∞' : formatUsageNumber(usageNumberOrNull(data.available) ?? 0),
         unit: unit ? usageUnitLabel(unit, t) : '',
       })
     }
@@ -325,7 +345,7 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
       const aggregate = usageAggregateOf(data, t)
       if (aggregate) {
         summary = t('可用 {total}', {
-          total: aggregate.unlimited ? '∞' : `${formatNumber(aggregate.remaining ?? 0)} ${aggregate.unit}`.trim(),
+          total: aggregate.unlimited ? '∞' : `${formatUsageNumber(aggregate.remaining ?? 0)} ${aggregate.unit}`.trim(),
         })
       }
     }
@@ -338,7 +358,7 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
         const unit = stringOf(primary.unit) || unitOf(data)
         summary = primary.id === 'account' && remaining !== null
           ? t('可用 {value} {unit}', {
-              value: formatNumber(remaining),
+              value: formatUsageNumber(remaining),
               unit: unit ? usageUnitLabel(unit, t) : '',
             })
           : sourceView(primary)
@@ -346,21 +366,21 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
     }
     if (!summary) summary = messages[0] || ''
     if (summary) {
-      const displayMessages = [...messages, ...warnings]
-      if (row.stale) displayMessages.push(t('配置已变更，请重新查询'))
-      return {
+      return finish({
         status: 'ready',
-        tone: warnings.length || row.stale ? 'warning' : 'ok',
+        tone: warnings.length ? 'warning' : 'ok',
         summary,
         rows,
-        messages: [...new Set(displayMessages)],
+        messages: [...messages, ...warnings],
         freshness,
-      }
+      })
     }
   }
 
   const legacySummary = stringOf(data.summary)
-  if (legacySummary) {
+  const legacyRemaining = usageNumberOrNull(data.remaining)
+  const legacyBalance = usageNumberOrNull(data.balance)
+  if (legacySummary || legacyRemaining !== null || legacyBalance !== null) {
     const legacyItems = Array.isArray(data.items) ? data.items.map(objectOf).filter(Boolean) as UsageObject[] : []
     const legacyRows = legacyItems.map(item => {
       const unit = stringOf(item.unit)
@@ -372,24 +392,25 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
         value: remaining || (used || total ? `${used || '0'} / ${total || '∞'}` : ''),
       }
     })
-    return {
+    const legacyValue = legacyRemaining !== null
+      ? amountOf(legacyRemaining, unitOf(data))
+      : amountOf(legacyBalance, unitOf(data))
+    return finish({
       status: 'ready',
       tone: 'ok',
-      summary: t(legacySummary),
+      summary: legacySummary ? t(legacySummary) : t('可用 {value}', { value: legacyValue }),
       rows: dedupeRows(legacyRows),
-      messages: [],
+      messages: [...messages, ...warnings],
       freshness,
-    }
+    })
   }
 
-  const displayMessages = [...messages, ...warnings]
-  if (row.stale) displayMessages.push(t('配置已变更，请重新查询'))
-  return {
+  return finish({
     status: 'unknown',
     tone: 'muted',
     summary: t('无数据'),
     rows,
-    messages: [...new Set([...displayMessages, t('未返回可识别的余额数据')])],
+    messages: [...messages, ...warnings, t('未返回可识别的余额数据')],
     freshness,
-  }
+  })
 }

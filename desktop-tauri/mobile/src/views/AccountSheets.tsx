@@ -66,6 +66,7 @@ export function AccountDetailSheet({
       const res = await fetchAccountUsage(account.id)
       const row = res.results?.[0] || null
       setUsage(row)
+      void store.refresh(true)
       if (!row) {
         store.toast(t('未返回可识别的余额数据'), 'info')
         return

@@ -133,6 +133,13 @@ export function formatNumber(num?: number | null): string {
   return Math.round(num).toLocaleString(numberLocaleTag())
 }
 
+/** 余额和额度保留最多两位小数；请求次数等计数继续走 formatNumber。 */
+export function formatUsageNumber(num?: number | null): string {
+  if (num === undefined || num === null || !Number.isFinite(num)) return '0'
+  const rounded = Number(num.toFixed(2))
+  return (Object.is(rounded, -0) ? 0 : rounded).toLocaleString(numberLocaleTag())
+}
+
 export function formatPercent(ratioOrPercent?: number | null, isRatio = false): string {
   if (ratioOrPercent === undefined || ratioOrPercent === null || !Number.isFinite(ratioOrPercent)) {
     return '0%'
