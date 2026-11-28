@@ -175,11 +175,14 @@ pub async fn responses_endpoint(
             return error.payload_response();
         }
     };
-    if !chat_body
+    // 空数组同样不是可用的对话：`messages_from_input` 在既无 instructions
+    // 也无 input 时返回空表，放过去只会让上游用自家文案拒绝 —— 实测豆包
+    // 通道回的是「messages 必须包含消息」，客户端看到的是提供商内部表述。
+    let has_messages = chat_body
         .get("messages")
-        .map(Value::is_array)
-        .unwrap_or(false)
-    {
+        .and_then(Value::as_array)
+        .is_some_and(|messages| !messages.is_empty());
+    if !has_messages {
         let error = GatewayError::bad_request("input 必须能转换成对话消息");
         record_early_failure(&state, started_at, "", &client_reasoning, "responses", &source, &error);
         return error.payload_response();
@@ -338,6 +341,14 @@ pub async fn responses_endpoint(
             pipeline::record_entry(&context, None);
             // 记账已完成：解除断线兜底并注销取消令牌
             guard.complete();
+            // 下游要流式（WS 入口恒为 true）：把聚合体补成 SSE 事件序列。
+            // 直接回 JSON 的话，WS 层只看到 200 + application/json，无法区分
+            // 「成功但没流」和「错误响应」，整轮结果与历史都会丢。
+            if stream {
+                let frames = responses::completion_events(&response);
+                let body = futures::stream::iter(frames.into_iter().map(Ok::<_, std::io::Error>));
+                return sse_response(StatusCode::OK, Box::new(body));
+            }
             json_response(response)
         }
         Err(error) => {

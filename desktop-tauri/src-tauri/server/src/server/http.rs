@@ -1099,7 +1099,12 @@ pub fn gateway_router(state: ServerState) -> Router {
     // 会让客户端按「网关不支持」处理，比一个粗略数字更糟。
     let guarded = Router::new()
         .route("/v1/chat/completions", post(api::chat::chat_completions))
-        .route("/v1/responses", post(api::protocol::responses_endpoint))
+        // GET 是 Responses 的 WebSocket 传输（Codex 会先试 wss），POST 仍是
+        // 普通 HTTP 流式入口；两者共用同一套协议与转发链路。
+        .route(
+            "/v1/responses",
+            get(api::responses_ws::responses_ws).post(api::protocol::responses_endpoint),
+        )
         .route("/v1/messages", post(api::protocol::messages_endpoint))
         .route("/v1/messages/count_tokens", post(api::chat::count_tokens))
         .route("/v1/images/generations", post(api::images::generations))
