@@ -1,5 +1,6 @@
 ﻿import { apiCall } from './client'
 import { locale } from './i18n'
+import type { UsageQueryRow } from '../../../ui-shared/usage-query-state'
 
 /* ─── 会话与账号 ─────────────────────────────────────────── */
 
@@ -154,12 +155,10 @@ export function clearAccountRateLimits(
 
 /* ─── 账号余额与额度 ─────────────────────────────────────── */
 
-export type UsageRow = {
-  id?: string
+/** 服务端把余额读数放在 `usage` 里；保留少量旧字段兼容老快照。 */
+export type UsageRow = UsageQueryRow & {
   provider?: string
-  name?: string
   ok?: boolean
-  error?: string | null
   summary?: string | null
   balance?: string | number | null
   remaining?: string | number | null
@@ -175,7 +174,6 @@ export type UsageRow = {
     remaining?: string | number | null
     unit?: string | null
   }>
-  [key: string]: unknown
 }
 
 export type UsageSnapshot = {
