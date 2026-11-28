@@ -1,5 +1,5 @@
 import type { UsageRow } from './api'
-import { formatNumber, formatUsageNumber } from './format'
+import { formatDateTime, formatNumber, formatUsageNumber } from './format'
 import { t } from './i18n'
 import {
   balanceWalletOf,
@@ -77,12 +77,15 @@ function isPercentUnit(unit: string): boolean {
   return normalized === '%' || normalized === 'percent' || normalized === 'percentage'
 }
 
+function formatNumberForUnit(value: number, unit: string): string {
+  return isCountUnit(unit) ? formatNumber(value) : formatUsageNumber(value)
+}
+
 function amountOf(value: unknown, unit: string): string {
   const number = usageNumberOrNull(value)
   if (number === null) return ''
   const label = unit ? usageUnitLabel(unit, t) : ''
-  const format = isCountUnit(unit) ? formatNumber : formatUsageNumber
-  return [format(number), label].filter(Boolean).join(' ')
+  return [formatNumberForUnit(number, unit), label].filter(Boolean).join(' ')
 }
 
 function sourceView(source: UsageObject): string {
@@ -192,6 +195,24 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
     })
   }
 
+  const plans = Array.isArray(data.plans) ? data.plans.map(objectOf).filter(Boolean) as UsageObject[] : []
+  for (const plan of plans) {
+    const state = stringOf(plan.state).toLowerCase()
+    const status = state === 'active' ? t('生效中')
+      : state === 'pending' ? t('待生效')
+        : state === 'expired' ? t('已过期')
+          : state ? t('状态未知') : ''
+    const endsAt = usageNumberOrNull(plan.endsAt)
+    const expiry = endsAt !== null ? t('到期 {time}', { time: formatDateTime(endsAt) }) : ''
+    const value = [status, expiry].filter(Boolean).join(' · ')
+    if (!value) continue
+    rows.push({
+      label: readableName(plan.name || plan.planName, t('套餐')),
+      value,
+      key: stringOf(plan.userPlanId || plan.planId),
+    })
+  }
+
   const sources = Array.isArray(data.quotaSources) ? data.quotaSources.map(objectOf).filter(Boolean) as UsageObject[] : []
   for (const source of sources) {
     if (source.id === 'account' || source.localOnly === true || source.localEstimate === true) continue
@@ -206,9 +227,10 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
 
   const windows = Array.isArray(data.windows) ? data.windows.map(objectOf).filter(Boolean) as UsageObject[] : []
   for (const window of windows) {
+    const windowUnit = stringOf(window.unit)
     rows.push({
       label: usageWindowLabel(window.label, t) || t('明细'),
-      value: usageWindowView(window, t, formatNumber),
+      value: usageWindowView(window, t, value => formatNumberForUnit(value, windowUnit)),
     })
   }
 
@@ -258,7 +280,7 @@ function accountBalanceSummary(data: UsageObject): string {
     if (primary) {
       const remaining = usageNumberOrNull(primary.remaining)
       const unit = stringOf(primary.unit) || unitOf(data)
-      summary = primary.id === 'account' && remaining !== null
+      summary = primary.id === 'account' && remaining !== null && primary.unlimited !== true
         ? t('可用 {value} {unit}', {
             value: formatUsageNumber(remaining),
             unit: unit ? usageUnitLabel(unit, t) : '',
@@ -295,14 +317,14 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
   if (row.error) {
     const notice = usageQueryNoticeOf(row.code, t)
     const message = usageFailureMessage(row, t)
-    return {
+    return finish({
       status: notice ? 'notice' : 'error',
       tone: notice ? 'muted' : 'danger',
       summary: notice || t('查询失败'),
       rows: [],
       messages: [message].filter(Boolean),
       freshness,
-    }
+    })
   }
 
   const data = objectOf(row.usage) || objectOf(row)
@@ -413,7 +435,7 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
       status: 'ready',
       tone: 'ok',
       summary: legacySummary ? t(legacySummary) : t('可用 {value}', { value: legacyValue }),
-      rows: dedupeRows(legacyRows),
+      rows: dedupeRows([...rows, ...legacyRows]),
       messages: [...messages, ...warnings],
       freshness,
     })
