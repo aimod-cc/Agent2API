@@ -1,0 +1,35 @@
+{
+  "model": "glm-5.3",
+  "cases": [
+    {
+      "name": "without-system",
+      "request": {
+        "model": "glm-5.3",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "只回复 OK"
+          }
+        ]
+      }
+    },
+    {
+      "name": "with-system",
+      "request": {
+        "model": "glm-5.3",
+        "stream": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "请准确回答用户的问题。"
+          },
+          {
+            "role": "user",
+            "content": "只回复 OK"
+          }
+        ]
+      }
+    }
+  ]
+}
