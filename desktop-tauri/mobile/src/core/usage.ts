@@ -31,6 +31,7 @@ export type UsageDisplayStatus = 'ready' | 'notice' | 'error' | 'empty' | 'unkno
 export type UsageDisplayRow = {
   label: string
   value: string
+  key?: string
 }
 
 export type UsageDisplay = {
@@ -69,6 +70,11 @@ function isCountUnit(unit: string): boolean {
     || normalized === 'requests'
     || normalized === 'call'
     || normalized === 'calls'
+}
+
+function isPercentUnit(unit: string): boolean {
+  const normalized = unit.trim().toLowerCase()
+  return normalized === '%' || normalized === 'percent' || normalized === 'percentage'
 }
 
 function amountOf(value: unknown, unit: string): string {
@@ -129,7 +135,7 @@ function dedupeRows(rows: UsageDisplayRow[]): UsageDisplayRow[] {
   const seen = new Set<string>()
   return rows.filter(row => {
     if (!row.value) return false
-    const key = `${row.label}\u0000${row.value}`
+    const key = `${row.key || row.label}\u0000${row.label}\u0000${row.value}`
     if (seen.has(key)) return false
     seen.add(key)
     return true
@@ -194,6 +200,7 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
     rows.push({
       label: readableName(source.label || source.planName, t('明细')),
       value,
+      key: stringOf(source.id),
     })
   }
 
@@ -206,6 +213,60 @@ function summaryRows(data: UsageObject): UsageDisplayRow[] {
   }
 
   return dedupeRows(rows)
+}
+
+/** 账号级主读数；窗口明细存在时仍需保留这个摘要，百分比窗口由窗口行本身表达。 */
+function accountBalanceSummary(data: UsageObject): string {
+  const wallets = Array.isArray(data.wallets) ? data.wallets : []
+  const fallbackWallet = balanceWalletOf(wallets)
+  const fallbackStat = creditStatisticsWalletsOf(data)
+    ?.find(wallet => usageNumberOrNull(wallet.creditRemaining) !== null) || null
+  let summary = usageAvailableViewOf(data, t)
+  if (!summary && fallbackWallet) {
+    const unit = stringOf(fallbackWallet.unit) || unitOf(data)
+    summary = t('可用 {value} {unit}', {
+      value: formatUsageNumber(usageNumberOrNull(fallbackWallet.balance) ?? 0),
+      unit: unit ? usageUnitLabel(unit, t) : '',
+    })
+  }
+  if (!summary && fallbackStat) {
+    const unit = stringOf(fallbackStat.unit) || unitOf(data)
+    summary = t('可用 {value} {unit}', {
+      value: formatUsageNumber(usageNumberOrNull(fallbackStat.creditRemaining) ?? 0),
+      unit: unit ? usageUnitLabel(unit, t) : '',
+    })
+  }
+  if (!summary && (usageNumberOrNull(data.available) !== null || data.unlimited === true)) {
+    const unit = unitOf(data)
+    summary = t('可用 {value} {unit}', {
+      value: data.unlimited === true ? '∞' : formatUsageNumber(usageNumberOrNull(data.available) ?? 0),
+      unit: unit ? usageUnitLabel(unit, t) : '',
+    })
+  }
+  if (!summary) {
+    const aggregate = usageAggregateOf(data, t)
+    if (aggregate) {
+      summary = t('可用 {total}', {
+        total: aggregate.unlimited ? '∞' : `${formatUsageNumber(aggregate.remaining ?? 0)} ${aggregate.unit}`.trim(),
+      })
+    }
+  }
+  if (!summary) {
+    const sources = Array.isArray(data.quotaSources) ? data.quotaSources.map(objectOf).filter(Boolean) as UsageObject[] : []
+    const primary = sources.find(source => source.id === 'account')
+      || sources.find(source => source.localOnly !== true && source.localEstimate !== true)
+    if (primary) {
+      const remaining = usageNumberOrNull(primary.remaining)
+      const unit = stringOf(primary.unit) || unitOf(data)
+      summary = primary.id === 'account' && remaining !== null
+        ? t('可用 {value} {unit}', {
+            value: formatUsageNumber(remaining),
+            unit: unit ? usageUnitLabel(unit, t) : '',
+          })
+        : sourceView(primary)
+    }
+  }
+  return summary
 }
 
 /** 把查询行里的嵌套 usage 归一成手机端列表/详情共用的可读视图。 */
@@ -298,10 +359,12 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
 
   const windows = Array.isArray(data.windows) ? data.windows : []
   if (windows.length) {
+    const unit = unitOf(data)
+    const accountSummary = isPercentUnit(unit) ? '' : accountBalanceSummary(data)
     return finish({
       status: 'ready',
       tone: warnings.length ? 'warning' : 'ok',
-      summary: t('分窗口额度'),
+      summary: accountSummary || t('分窗口额度'),
       rows,
       messages: [...new Set([...messages, ...warnings])],
       freshness,
@@ -315,56 +378,7 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
     || Array.isArray(data.quotaSources)
 
   if (hasBalanceShape) {
-    const wallets = Array.isArray(data.wallets) ? data.wallets : []
-    const fallbackWallet = balanceWalletOf(wallets)
-    const fallbackStat = creditStatisticsWalletsOf(data)
-      ?.find(wallet => usageNumberOrNull(wallet.creditRemaining) !== null) || null
-    let summary = usageAvailableViewOf(data, t)
-    if (!summary && fallbackWallet) {
-      const unit = stringOf(fallbackWallet.unit) || unitOf(data)
-      summary = t('可用 {value} {unit}', {
-        value: formatUsageNumber(usageNumberOrNull(fallbackWallet.balance) ?? 0),
-        unit: unit ? usageUnitLabel(unit, t) : '',
-      })
-    }
-    if (!summary && fallbackStat) {
-      const unit = stringOf(fallbackStat.unit) || unitOf(data)
-      summary = t('可用 {value} {unit}', {
-        value: formatUsageNumber(usageNumberOrNull(fallbackStat.creditRemaining) ?? 0),
-        unit: unit ? usageUnitLabel(unit, t) : '',
-      })
-    }
-    if (!summary && (usageNumberOrNull(data.available) !== null || data.unlimited === true)) {
-      const unit = unitOf(data)
-      summary = t('可用 {value} {unit}', {
-        value: data.unlimited === true ? '∞' : formatUsageNumber(usageNumberOrNull(data.available) ?? 0),
-        unit: unit ? usageUnitLabel(unit, t) : '',
-      })
-    }
-    if (!summary) {
-      const aggregate = usageAggregateOf(data, t)
-      if (aggregate) {
-        summary = t('可用 {total}', {
-          total: aggregate.unlimited ? '∞' : `${formatUsageNumber(aggregate.remaining ?? 0)} ${aggregate.unit}`.trim(),
-        })
-      }
-    }
-    if (!summary) {
-      const sources = Array.isArray(data.quotaSources) ? data.quotaSources.map(objectOf).filter(Boolean) as UsageObject[] : []
-      const primary = sources.find(source => source.id === 'account')
-        || sources.find(source => source.localOnly !== true && source.localEstimate !== true)
-      if (primary) {
-        const remaining = usageNumberOrNull(primary.remaining)
-        const unit = stringOf(primary.unit) || unitOf(data)
-        summary = primary.id === 'account' && remaining !== null
-          ? t('可用 {value} {unit}', {
-              value: formatUsageNumber(remaining),
-              unit: unit ? usageUnitLabel(unit, t) : '',
-            })
-          : sourceView(primary)
-      }
-    }
-    if (!summary) summary = messages[0] || ''
+    const summary = accountBalanceSummary(data) || messages[0] || ''
     if (summary) {
       return finish({
         status: 'ready',
