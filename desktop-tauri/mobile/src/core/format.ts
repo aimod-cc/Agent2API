@@ -137,6 +137,10 @@ export function formatNumber(num?: number | null): string {
 export function formatUsageNumber(num?: number | null): string {
   if (num === undefined || num === null || !Number.isFinite(num)) return '0'
   const rounded = Number(num.toFixed(2))
+  if (rounded === 0 && num !== 0) {
+    const threshold = (0.01).toLocaleString(numberLocaleTag())
+    return num < 0 ? `>-${threshold}` : `<${threshold}`
+  }
   return (Object.is(rounded, -0) ? 0 : rounded).toLocaleString(numberLocaleTag())
 }
 
