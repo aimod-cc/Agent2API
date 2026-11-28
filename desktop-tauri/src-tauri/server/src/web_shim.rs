@@ -2420,7 +2420,7 @@ pub fn shim_js() -> &'static str {
     getLogStats: function () { return call('GET', '/api/logs/stats'); },
     // 插件页面清单（侧边栏动态菜单用）。与 desktop 壳的 bridge.rs 同名方法
     // **必须成对维护** —— 只改一边会让 headless 面板里插件页静默消失。
-    getPlugins: function () { return call('GET', '/api/plugins'); },
+    getPlugins: function (rev) { return call('GET', rev ? '/api/plugins' + toQuery({ rev: rev }) : '/api/plugins'); },
     // 侧边栏布局（分组 / 顺序 / 显隐）。与 desktop 壳 bridge.rs 的同名方法
     // **必须成对维护** —— 漏了这一边，网页端就改不到库里的那份布局，
     // 「在 WebUI 里隐藏的菜单客户端也跟着隐藏」这条功能等于不存在。

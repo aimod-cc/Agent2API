@@ -73,8 +73,8 @@ function modelCapabilities(row: AssistantModelRow) {
   const capSources: Partial<Record<CapabilityKey, CapabilitySource>> = {}
   for (const key of CAPABILITY_KEYS) {
     if (!(key in capabilities)) continue
-    // 自定义清单的能力值来自用户保存的覆盖，不是上游探测结果。
-    const source = text(row.provider).startsWith('custom-') ? 'user' : capSourceOf(row, key)
+    // 优先使用后端返回的来源标记（区分 modelsdev 与 user），兼容旧版后端时自定义家回落 user。
+    const source = capSourceOf(row, key) || (text(row.provider).startsWith('custom-') ? 'user' : '')
     if (source) capSources[key] = source
   }
   const reasoning = modelReasoning(row)

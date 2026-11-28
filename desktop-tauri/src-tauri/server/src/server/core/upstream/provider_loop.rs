@@ -1242,7 +1242,11 @@ async fn attempt_queue(
                 crate::server::core::providers::adapter::UpstreamResponse::AiSdkNdjson => "ai_sdk_ndjson",
                 crate::server::core::providers::adapter::UpstreamResponse::AntigravityGemini => "gemini",
                 crate::server::core::providers::adapter::UpstreamResponse::ChatglmSnapshot => "chatglm_snapshot",
-                crate::server::core::providers::adapter::UpstreamResponse::Images(crate::server::core::providers::images::ImageResponseKind::Openai) => "images",
+                crate::server::core::providers::adapter::UpstreamResponse::Images(crate::server::core::providers::images::ImageResponseKind::Openai) => match ctx.images {
+                    Some(crate::server::core::providers::images::ImageOperation::Edit) => "images_edits",
+                    Some(crate::server::core::providers::images::ImageOperation::Generate) => "images_generations",
+                    None => "images",
+                },
                 crate::server::core::providers::adapter::UpstreamResponse::Images(crate::server::core::providers::images::ImageResponseKind::Gemini) => "gemini",
                 crate::server::core::providers::adapter::UpstreamResponse::Images(_) => "proprietary",
             });

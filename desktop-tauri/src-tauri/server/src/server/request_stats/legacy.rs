@@ -106,6 +106,7 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
                         &mut existing.account_stats,
                         &acc.account_id,
                         &acc.account_name,
+                        &acc.provider,
                         acc.requests,
                         acc.successful,
                         acc.tokens,

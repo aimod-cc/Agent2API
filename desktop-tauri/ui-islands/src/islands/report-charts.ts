@@ -24,6 +24,7 @@ export type StatsHour = StatsUsage & {
 /** 排行 / 环形图共用的一条：模型维度用 model 当身份，提供商与账号维度用 id */
 export type StatsGroup = {
   id?: string; label?: string; model?: string
+  provider?: string; providerLabel?: string
   requests?: number; success?: number; failures?: number; totalTokens?: number; tokens?: number
   successRate?: number | null; promptTokens?: number | null; completionTokens?: number | null
   cacheReadTokens?: number | null; cacheRate?: number | null; lastUsedAt?: number | null
@@ -205,6 +206,7 @@ export function overviewCells(overview: StatsOverview | undefined, range: string
 
 export type RankRowView = {
   key: string; id: string; name: string
+  provider?: string; providerLabel?: string
   full: string; tip: string
   tokensText: string; percentText: string; barWidth: string
   costUsd: number; unpricedRequests: number
@@ -219,6 +221,8 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
     .map(item => ({
       id: String(item?.id ?? '').trim(),
       label: String(item?.label ?? '').trim(),
+      provider: String(item?.provider ?? '').trim(),
+      providerLabel: String(item?.providerLabel ?? '').trim(),
       tokens: Number(item?.totalTokens ?? item?.tokens) || 0,
       costUsd: Number(item?.costUsd) || 0,
       unpricedRequests: Number(item?.unpricedRequests) || 0,
@@ -245,6 +249,8 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
       key: `${index}-${item.id || name}`,
       id: item.id,
       name,
+      provider: item.provider || undefined,
+      providerLabel: item.providerLabel || undefined,
       full,
       tip,
       tokensText: text,

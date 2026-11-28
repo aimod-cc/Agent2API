@@ -7,6 +7,7 @@ import { saveGroupSortRules } from './accounts-sort'
 import { RoutingSelect } from './routing-select'
 import { activeGroupSortRules, groupSortSummary, supportsBalanceSort, supportsCreditSort } from './accounts-group-settings'
 import { RouteIcon } from './routing-ui'
+import type { RouteAccountOrderMode } from './routing-types'
 
 export function RoutingCreditExpiry({ id, provider, sorting, now }: {
   id: string; provider: string; sorting?: AccountSorting | null; now: number
@@ -20,8 +21,9 @@ export function RoutingCreditExpiry({ id, provider, sorting, now }: {
   </small>
 }
 
-export function RoutingConsumptionOrder({ provider, sorting, independent, disabled, onSettings }: {
-  provider: string; sorting?: AccountSorting | null; independent: boolean; disabled: boolean; onSettings(): void
+export function RoutingConsumptionOrder({ provider, sorting, independent, disabled, orderMode, onOrderModeChange, onSettings }: {
+  provider: string; sorting?: AccountSorting | null; independent: boolean; disabled: boolean
+  orderMode?: RouteAccountOrderMode; onOrderModeChange?(mode: RouteAccountOrderMode): void; onSettings(): void
 }) {
   const [saving, setSaving] = React.useState(false)
   const pending = React.useRef(false)
@@ -31,7 +33,9 @@ export function RoutingConsumptionOrder({ provider, sorting, independent, disabl
   const balance = rules.find(rule => rule.key === 'balance')
   const creditSupported = supportsCreditSort(provider, sorting)
   const balanceSupported = supportsBalanceSort(provider, sorting)
-  const summary = independent ? t('独立账号顺序') : groupSortSummary(rules) || t('仅按手动顺序')
+  const mode: RouteAccountOrderMode = orderMode === 'manual' ? 'manual' : 'followGroup'
+  const groupSummary = groupSortSummary(rules) || t('仅按手动顺序')
+  const summary = independent ? (mode === 'manual' ? t('独立账号顺序') : groupSummary) : groupSummary
   const changeRule = async (key: 'credit' | 'balance', value: string) => {
     if (disabled || pending.current || independent) return
     pending.current = true; setSaving(true)
@@ -46,6 +50,11 @@ export function RoutingConsumptionOrder({ provider, sorting, independent, disabl
   }
   return <div className='routing-consumption-order'>
     <RouteIcon name='sort' size={13} /><span>{t('消耗顺序')}</span>
+    {independent && onOrderModeChange ? <div className='routing-credit-sort'>
+      <RoutingSelect label={t('消耗顺序')} value={mode} disabled={disabled || saving}
+        onChange={value => onOrderModeChange(value === 'manual' ? 'manual' : 'followGroup')}
+        options={[['followGroup', t('跟随提供商组')], ['manual', t('本路由手动')]]} />
+    </div> : null}
     {!independent && creditSupported ? <div className='routing-credit-sort'>
       <RoutingSelect label={t('积分到期时间')} value={credit?.dir || 'off'} disabled={disabled || saving} onChange={value => void changeRule('credit', value)}
         options={[[ 'off', t('不按到期排序') ], [ 'soon', t('到期 近→远') ], [ 'late', t('到期 远→近') ]]} />
@@ -54,10 +63,10 @@ export function RoutingConsumptionOrder({ provider, sorting, independent, disabl
       <RoutingSelect label={t('可用余额')} value={balance?.dir || 'off'} disabled={disabled || saving} onChange={value => void changeRule('balance', value)}
         options={[[ 'off', t('不按余额排序') ], [ 'high', t('余额大优先') ], [ 'low', t('余额小优先') ]]} />
     </div> : null}
-    <Button variant='ghost' size='sm' disabled={disabled || saving} onClick={onSettings}
-      title={independent ? t('独立路由的账号顺序不受全局消耗规则影响') : t('调整到期时间、可用余额及其他消耗规则的优先级')}>
+    {(!independent || mode === 'followGroup' || !onOrderModeChange) ? <Button variant='ghost' size='sm' disabled={disabled || saving} onClick={onSettings}
+      title={independent && mode === 'manual' ? t('独立路由的账号顺序不受全局消耗规则影响') : t('调整到期时间、可用余额及其他消耗规则的优先级')}>
       {!independent && (creditSupported || balanceSupported) ? t('消耗规则') : summary}<RouteIcon name='chevronRight' size={11} />
-    </Button>
+    </Button> : null}
     {!independent && rules.length ? <small className='basis-full leading-relaxed'>{t('优先级：{rules}；前一项相同才比较后一项。', { rules: summary })}</small> : null}
     {!independent && balance && sorting?.balanceSortStates?.[provider] === 'mixedUnits'
       ? <small className='basis-full text-warning'>{t('账号余额单位不一致，暂不按余额排序，继续比较其他规则')}</small> : null}

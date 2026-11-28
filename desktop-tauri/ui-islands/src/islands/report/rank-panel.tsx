@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { Card, CardContent, CardHeader, CardTitle, Empty, Meter, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
-import { formatInt, rankRows, rankTotalText, type StatsGroup } from '../report-charts'
+import { formatInt, rankRows, rankTotalText, type RankRowView, type StatsGroup } from '../report-charts'
 import { formatCost, usePricingDisplay } from '../model-pricing'
 import { t } from '../../i18n'
 
@@ -8,7 +8,7 @@ const COUNTS = [5, 10, 20, 0] as const
 
 export function RankPanel({ panelId, listId, labelId, title, tip, rows, badge, emptyText }: {
   panelId: string; listId: string; labelId: string; title: string; tip: string
-  rows: StatsGroup[]; badge?: (id: string) => React.ReactNode; emptyText: string
+  rows: StatsGroup[]; badge?: (row: RankRowView) => React.ReactNode; emptyText: string
 }) {
   const pricing = usePricingDisplay()
   const [count, setCount] = React.useState('5')
@@ -34,7 +34,7 @@ export function RankPanel({ panelId, listId, labelId, title, tip, rows, badge, e
           <div className='report-rank-name'>
             <span title={row.full}>{row.name}</span>
             {row.mergedSources ? <span className='report-merged-count'>{t('含 {n} 项', { n: formatInt(row.mergedSources.length) })}</span> : null}
-            {badge?.(row.id)}
+            {badge?.(row)}
           </div>
           <Meter value={Number.parseFloat(row.barWidth) || 0} className='report-rank-meter'
             trackClassName='report-rank-track' indicatorClassName='report-rank-fill' aria-label={row.full} />

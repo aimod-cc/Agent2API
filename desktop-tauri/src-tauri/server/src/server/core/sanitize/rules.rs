@@ -298,6 +298,24 @@ fn default_entries() -> Vec<SanitizeRule> {
             r"(?i)\bDeepSeek[ \t]+Harness\b",
             "DeepSeek",
         ),
+        (
+            "zcode-identity",
+            "ZCode identity",
+            r"(?i)\bYou are[ \t]+ZCode,[ \t]*an interactive agent\b",
+            "You are an interactive coding agent",
+        ),
+        (
+            "kimi-code-identity",
+            "Kimi Code identity",
+            r"(?i)\bYou are[ \t]+Kimi[ \t]+Code,[ \t]*",
+            "You are a coding agent, ",
+        ),
+        (
+            "codex-short-identity",
+            "Codex identity",
+            r"(?i)\bYou are[ \t]+Codex,[ \t]*based on\b",
+            "You are a coding agent, based on",
+        ),
     ] {
         entries.push(SanitizeRule {
             id: id.to_string(),

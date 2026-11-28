@@ -401,3 +401,76 @@ fn missing_database_returns_the_same_empty_query_shape() {
         })
     );
 }
+
+#[test]
+fn usage_summary_accounts_include_provider_for_local_direct_and_legacy_daily_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("agent2api.db")).unwrap();
+    let stats = RequestStats::with_db(Some(db.clone()), Retention::default);
+    let now = crate::server::logging::now_ms();
+    let today = super::clock::date_key(super::clock::day_of(now));
+
+    // 1. 新写入的 Antigravity 本机直连请求，汇总直接带上 provider / providerLabel
+    let mut local_ag = entry("ag-local-1", now);
+    local_ag.provider = Some("antigravity".to_string());
+    local_ag.account_id = "local-direct:antigravity:user@gmail.com".to_string();
+    local_ag.account_name = "user@gmail.com".to_string();
+    local_ag.origin = "local_direct".to_string();
+    stats.record(local_ag);
+
+    // 2. 模拟历史日报 JSON（没有 provider 字段）：包含 local-direct 账号、已删除/隐藏网关账号、未知账号
+    let mut gw_ag = entry("ag-gw-1", now - 1000);
+    gw_ag.provider = Some("antigravity".to_string());
+    gw_ag.account_id = "acc-ag-hidden".to_string();
+    gw_ag.account_name = "Hidden AG".to_string();
+    stats.record(gw_ag);
+
+    let legacy_daily_accounts = json!([
+        {
+            "accountId": "local-direct:antigravity:user@gmail.com",
+            "accountName": "user@gmail.com",
+            "requests": 1,
+            "successful": 1,
+            "tokens": 100
+        },
+        {
+            "accountId": "acc-ag-hidden",
+            "accountName": "Hidden AG",
+            "requests": 1,
+            "successful": 1,
+            "tokens": 50
+        },
+        {
+            "accountId": "",
+            "accountName": "",
+            "requests": 1,
+            "successful": 1,
+            "tokens": 10
+        }
+    ])
+    .to_string();
+    db.with_mut(|conn| {
+        conn.execute(
+            "UPDATE request_daily SET account_stats = ?1, requests = 3, successful = 3, tokens = 160 WHERE date = ?2",
+            rusqlite::params![legacy_daily_accounts, today],
+        )
+    })
+    .unwrap()
+    .unwrap();
+
+    let summary = stats.usage_summary("all", None, None, None, None);
+    let accounts = summary["accounts"].as_array().unwrap();
+    let find = |id: &str| accounts.iter().find(|row| row["id"] == id).unwrap();
+
+    let local_row = find("local-direct:antigravity:user@gmail.com");
+    assert_eq!(local_row["provider"], "antigravity");
+    assert_eq!(local_row["providerLabel"], "Antigravity");
+
+    let hidden_row = find("acc-ag-hidden");
+    assert_eq!(hidden_row["provider"], "antigravity");
+    assert_eq!(hidden_row["providerLabel"], "Antigravity");
+
+    let unknown_row = find("");
+    assert!(unknown_row.get("provider").is_none());
+    assert!(unknown_row.get("providerLabel").is_none());
+}

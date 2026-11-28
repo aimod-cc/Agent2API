@@ -133,6 +133,25 @@ export type ManageView = {
 }
 
 /** 目录缓存里的一条自定义提供商记录（providers.js 的 customList()） */
+export type CustomProviderModelRecord = {
+  id?: unknown
+  enabled?: unknown
+  reasoning?: unknown
+  protocol?: unknown
+  /** 用户手动保存的能力位覆盖（稀疏表；整表写回时原样保留） */
+  capabilities?: unknown
+  /** 后端补齐的生效能力位（models.dev + 用户覆盖，只读，不写回存储） */
+  effectiveCapabilities?: unknown
+  capOverrides?: unknown
+  capSources?: unknown
+  reasoningLevels?: unknown
+  reasoningDefaultLevel?: unknown
+  reasoningFixedLevel?: unknown
+  reasoningBindingSupported?: unknown
+  reasoningSource?: unknown
+  pricing?: import('./model-pricing').ModelPricingInfo | null
+}
+
 export type CustomProviderRecord = {
   id?: string
   name?: string
@@ -141,8 +160,7 @@ export type CustomProviderRecord = {
   urlSuffix?: string
   presetKey?: string
   createdAt?: unknown
-  /** `capabilities` 是该条模型的能力位覆盖（可选稀疏表，键名见 `model-capability`） */
-  models?: Array<{ id?: unknown; enabled?: unknown; reasoning?: unknown; protocol?: unknown; capabilities?: unknown }>
+  models?: CustomProviderModelRecord[]
   mappings?: Array<{ alias?: unknown; target?: unknown; enabled?: unknown; reasoning?: unknown }>
 }
 
@@ -368,10 +386,17 @@ export function buildView(id: string): { models: ManageModel[]; mappings: Manage
   const draft = draftOf(provider)
   const name = provider.name || id
   const providerProtocol = normalizeCustomProtocol(provider.protocol) || 'chat_completions'
+  const rawById = new Map<string, CustomProviderModelRecord>()
+  for (const item of Array.isArray(provider.models) ? provider.models : []) {
+    const key = norm(item?.id)
+    if (key && !rawById.has(key)) rawById.set(key, item)
+  }
   const models: ManageModel[] = []
   const mappings: ManageMapping[] = []
   for (const model of draft.models) {
+    const raw = rawById.get(norm(model.id))
     const effectiveProtocol = effectiveModelProtocol(provider, model.id, model.protocol)
+    const fallbackOverrides = Object.keys(model.capabilities || {})
     models.push({
       id: model.id,
       name: '',
@@ -383,10 +408,16 @@ export function buildView(id: string): { models: ManageModel[]; mappings: Manage
       protocol: model.protocol || '',
       effectiveProtocol,
       providerProtocol,
-      // 能力位是**记录自带的**（用户填的），没有「上游原值」这回事 ——
-      // 覆盖标记恒空，弹窗按「未声明 / 已填」两态呈现
-      capabilities: model.capabilities || {},
-      capOverrides: [],
+      // 优先使用后端叠加 models.dev 与用户覆盖后的只读字段；兼容旧版后端时回落到用户填写的稀疏表
+      capabilities: raw?.effectiveCapabilities ?? (model.capabilities || {}),
+      capOverrides: Array.isArray(raw?.capOverrides) ? raw.capOverrides : fallbackOverrides,
+      capSources: raw?.capSources,
+      reasoningLevels: raw?.reasoningLevels,
+      reasoningDefaultLevel: raw?.reasoningDefaultLevel,
+      reasoningFixedLevel: raw?.reasoningFixedLevel,
+      reasoningBindingSupported: raw?.reasoningBindingSupported,
+      reasoningSource: raw?.reasoningSource,
+      pricing: raw?.pricing ?? null,
     })
     mappings.push({
       alias: model.id,

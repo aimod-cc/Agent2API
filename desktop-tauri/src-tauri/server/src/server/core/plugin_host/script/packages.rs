@@ -238,7 +238,14 @@ fn validate_manifest(
     if bytes.len() > 1024 * 1024 {
         return Err("脚本插件清单过大".into());
     }
-    let package: Value = serde_json::from_slice(&bytes).map_err(|_| "脚本插件清单无法解析")?;
+    let content = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    let package: Value = serde_json::from_slice(content).map_err(|error| {
+        format!(
+            "脚本插件清单（package.json）无法解析（第 {} 行第 {} 列），可能是插件仓库文件格式有误",
+            error.line(),
+            error.column()
+        )
+    })?;
     let name = package["name"].as_str().filter(|name| package_name(name))
         .ok_or("脚本插件清单缺少有效包名")?;
     let version = package["version"].as_str().filter(|version| {
@@ -258,4 +265,30 @@ fn validate_manifest(
         return Err("脚本插件缺少有效的 OpenCode v1 入口".into());
     }
     Ok((name.to_string(), version.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_manifest_accepts_utf8_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.js"), "export default {}\n").unwrap();
+        let mut raw = vec![0xEF, 0xBB, 0xBF];
+        raw.extend_from_slice(br#"{"name":"demo-plugin","version":"1.0.0","main":"./index.js"}"#);
+        std::fs::write(dir.path().join("package.json"), raw).unwrap();
+        let (name, version) = validate_manifest(dir.path(), None).unwrap();
+        assert_eq!(name, "demo-plugin");
+        assert_eq!(version, "1.0.0");
+    }
+
+    #[test]
+    fn validate_manifest_reports_line_and_column_on_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{\n  \"name\": \"demo\",\n}\n").unwrap();
+        let error = validate_manifest(dir.path(), None).unwrap_err();
+        assert!(error.contains("脚本插件清单（package.json）无法解析"));
+        assert!(error.contains("第 3 行"));
+    }
 }

@@ -43,6 +43,11 @@ const STICKY_OPTIONS: ReadonlyArray<PickerOption> = [
   { value: 'off', label: '关闭粘性（逐请求选路）', subtitle: '每次请求都重新按策略选号' },
 ]
 
+const PRIORITY_OPTIONS: ReadonlyArray<PickerOption> = [
+  { value: 'sticky', label: '会话粘滞 > 消耗顺序', subtitle: '同一对话优先留在原账号，保持缓存命中' },
+  { value: 'consumption', label: '消耗顺序 > 会话粘滞', subtitle: '队首临期积分或高优账号变化时立即切号' },
+]
+
 export function RoutingView() {
   const { server, revision, navTabs } = useStore()
   const [tab, setTab] = useState<RoutingTab>('strategy')
@@ -51,7 +56,7 @@ export function RoutingView() {
   const [queueModel, setQueueModel] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [picker, setPicker] = useState<'strategy' | 'sticky' | null>(null)
+  const [picker, setPicker] = useState<'strategy' | 'sticky' | 'priority' | null>(null)
   const [stickySheetOpen, setStickySheetOpen] = useState(false)
   const [errorsNonce, setErrorsNonce] = useState(0)
 
@@ -118,10 +123,13 @@ export function RoutingView() {
 
   const currentStrategy = routing?.routingStrategy || 'order'
   const currentSticky = routing?.routingSticky || 'auto'
+  const currentPriority = routing?.routingPriority || 'sticky'
   const strategyLabel =
     STRATEGY_OPTIONS.find(o => o.value === currentStrategy)?.label || currentStrategy
   const stickyLabel =
     STICKY_OPTIONS.find(o => o.value === currentSticky)?.label || currentSticky
+  const priorityLabel =
+    PRIORITY_OPTIONS.find(o => o.value === currentPriority)?.label || currentPriority
 
   const stickyHeader = (
     <>
@@ -233,6 +241,18 @@ export function RoutingView() {
                     disabled={saving}
                     onClick={() => setPicker('sticky')}
                     ariaLabel={t('会话粘性')}
+                  />
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12.5, color: 'var(--fc-text-secondary)', fontWeight: 600, marginBottom: 6 }}>
+                    {t('生效优先级')}
+                  </div>
+                  <PickerTrigger
+                    valueLabel={t(priorityLabel)}
+                    disabled={saving}
+                    onClick={() => setPicker('priority')}
+                    ariaLabel={t('生效优先级')}
                   />
                 </div>
               </div>
@@ -446,6 +466,15 @@ export function RoutingView() {
         options={STICKY_OPTIONS.map(o => ({ ...o, label: t(o.label), subtitle: o.subtitle ? t(o.subtitle) : undefined }))}
         value={currentSticky}
         onSelect={next => void patchSetting({ routingSticky: next })}
+        onClose={() => setPicker(null)}
+      />
+
+      <PickerSheet
+        open={picker === 'priority'}
+        title={t('选择生效优先级')}
+        options={PRIORITY_OPTIONS.map(o => ({ ...o, label: t(o.label), subtitle: o.subtitle ? t(o.subtitle) : undefined }))}
+        value={currentPriority}
+        onSelect={next => void patchSetting({ routingPriority: next })}
         onClose={() => setPicker(null)}
       />
 

@@ -80,7 +80,6 @@ export type AgentClient = {
   needsRestart: boolean
   configurations: AgentProfile[]
   profiles: AgentProfile[]
-  quickProfiles?: AgentProfile[]
   live: AgentProfile[]
   readError: string | null
   storeError: string | null
@@ -116,5 +115,5 @@ export type AgentPayload = {
   applied?: { changed?: boolean; verified?: boolean; needsRestart?: boolean }
   imported?: { count: number }
 }
-export type AgentOperation = 'apply' | 'default' | 'restore' | 'disconnect' | 'native-edit' | 'native-delete' | 'quick-connect'
-  | 'config-use' | 'config-disable' | 'config-edit' | 'config-delete'
+export type AgentOperation = 'apply' | 'default' | 'restore' | 'disconnect' | 'native-edit' | 'native-delete'
+  | 'config-use' | 'config-disable' | 'config-edit' | 'config-delete' | 'config-save-use'

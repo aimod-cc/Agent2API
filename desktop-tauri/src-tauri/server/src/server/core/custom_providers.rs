@@ -76,7 +76,7 @@ mod presets;
 /// 前置步骤（先有提供商，账号的外键才不悬空）。除此之外它不该被任何人触碰：
 /// 定义的手工增删改走 `create` / `update` / `remove`，不走导入。
 pub(crate) mod transfer;
-pub use bindings::public_models;
+pub use bindings::{enrich_model, public_models};
 
 use std::time::Duration;
 

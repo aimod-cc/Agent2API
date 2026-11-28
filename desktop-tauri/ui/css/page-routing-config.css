@@ -60,6 +60,16 @@
 .routing-protection-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin: 0 16px 12px; padding-top: 10px; border-top: 1px solid var(--hairline); color: var(--text-3); font-size: 11px; }
 .routing-protection-summary > [data-slot='badge'] { white-space: normal; font-weight: 400; padding: 0; }
 .routing-protection-summary > button { margin-left: auto; }
+.routing-priority-list { display: flex; flex-direction: column; gap: 6px; }
+.routing-priority-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--hairline); border-radius: var(--r-sm); background: var(--surface-2); }
+.routing-priority-row.is-muted { opacity: .55; }
+.routing-priority-num { display: inline-flex; width: 20px; height: 20px; flex: none; align-items: center; justify-content: center; border-radius: var(--r-pill); background: var(--primary-soft); color: var(--primary-fg); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.routing-priority-copy { flex: 1; min-width: 0; }
+.routing-priority-copy b { display: block; font-size: 12.5px; font-weight: 600; }
+.routing-priority-copy small { display: block; margin-top: 2px; color: var(--text-3); font-size: 11px; }
+.routing-priority-arrows { display: flex; flex-direction: column; gap: 1px; flex: none; }
+.routing-priority-arrows button { width: 22px; height: 18px; }
+.routing-priority-baseline { margin: 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--surface-2); color: var(--text-3); font-size: 11px; line-height: 1.55; }
 .routing-config-draft { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-top: 1px solid var(--hairline); }
 .routing-config-draft > .right { margin-left: auto; display: flex; gap: 6px; }
 .routing-draft-state { display: flex; align-items: center; gap: 5px; color: var(--text-3); font-size: 11px; }

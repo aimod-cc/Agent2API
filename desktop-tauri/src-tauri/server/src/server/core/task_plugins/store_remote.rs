@@ -129,7 +129,11 @@ pub fn prepare_zip_bytes(
 
 /// 从官网社区插件目录快照里提取「定时任务类」商店条目与可用更新。
 pub fn store_snapshot(installed: &[TaskPlugin]) -> (Vec<Value>, Vec<Value>) {
-    let snap = catalog::snapshot();
+    store_snapshot_with_catalog(installed, &catalog::snapshot())
+}
+
+/// 复用已读取的社区插件目录快照，避免同一响应内重复读库。
+pub fn store_snapshot_with_catalog(installed: &[TaskPlugin], snap: &Value) -> (Vec<Value>, Vec<Value>) {
     let Some(items) = snap["plugins"].as_array() else {
         return (Vec::new(), Vec::new());
     };
@@ -189,6 +193,17 @@ pub fn store_snapshot(installed: &[TaskPlugin]) -> (Vec<Value>, Vec<Value>) {
     }
 
     (store_items, updates)
+}
+
+/// 计算当前可更新的定时任务类插件数量（纯本地缓存比对，不触发外网请求）。
+pub fn updatable_count_with_catalog(snap: &Value) -> usize {
+    let Ok(installed) = store::list_plugins() else {
+        return 0;
+    };
+    if installed.is_empty() {
+        return 0;
+    }
+    store_snapshot_with_catalog(&installed, snap).1.len()
 }
 
 /// 从远程目录下载并安装（或更新）一个官方定时任务类插件。

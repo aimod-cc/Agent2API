@@ -27,12 +27,16 @@ pub struct RoutingProfile {
     pub disabled_providers: Vec<String>,
     #[serde(default)]
     pub account_order: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_order_mode: BTreeMap<String, super::AccountOrderMode>,
     #[serde(default)]
     pub excluded_accounts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticky: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
 }
 
 impl RoutingProfile {
@@ -44,6 +48,17 @@ impl RoutingProfile {
     pub fn includes_provider(&self, provider: &str) -> bool {
         (self.scope() == RoutingProviderScope::All || self.providers.iter().any(|id| id == provider))
             && !self.disabled_providers.iter().any(|id| id == provider)
+    }
+
+    pub fn order_mode_for(&self, provider: &str) -> super::AccountOrderMode {
+        if let Some(mode) = self.account_order_mode.get(provider) {
+            return *mode;
+        }
+        if self.account_order.contains_key(provider) {
+            super::AccountOrderMode::Manual
+        } else {
+            super::AccountOrderMode::FollowGroup
+        }
     }
 }
 
@@ -74,6 +89,7 @@ impl RoutingProfiles {
         for profile in [self.global.as_ref(), self.model_profile(model)].into_iter().flatten() {
             if let Some(strategy) = &profile.strategy { settings.strategy = super::RouteStrategy::from_id(strategy); }
             if let Some(sticky) = &profile.sticky { settings.sticky = super::StickyMode::from_id(sticky); }
+            if let Some(priority) = &profile.priority { settings.priority = super::RoutingPriority::from_id(priority); }
         }
         if let Some(group) = self.group_for_model(model) { return group.settings(settings); }
         settings
@@ -138,6 +154,9 @@ pub fn validate_shape(profile: &RoutingProfile) -> Result<(), String> {
     if profile.sticky.as_deref().is_some_and(|value| !["auto", "session", "turn", "off"].contains(&value)) {
         return Err("会话粘滞必须为 auto、session、turn 或 off".to_string());
     }
+    if profile.priority.as_deref().is_some_and(|value| ![super::ROUTING_PRIORITY_STICKY, super::ROUTING_PRIORITY_CONSUMPTION].contains(&value)) {
+        return Err("生效优先级必须为 sticky 或 consumption".to_string());
+    }
     fn unique(values: &[String], max: usize, label: &str) -> Result<(), String> {
         if values.len() > max {
             return Err(format!("{label}最多允许 {max} 项"));
@@ -179,6 +198,19 @@ pub fn validate_shape(profile: &RoutingProfile) -> Result<(), String> {
     }
     if all_ids.len() > MAX_ROUTING_ACCOUNTS {
         return Err("路由账号数量过多".to_string());
+    }
+    if profile.account_order_mode.len() > MAX_ROUTING_PROVIDERS {
+        return Err("账号顺序模式的提供商数量过多".to_string());
+    }
+    for provider in profile.account_order_mode.keys() {
+        if provider.is_empty() || provider.trim() != provider || provider.len() > 256
+            || provider.chars().any(char::is_control)
+        {
+            return Err("账号顺序模式包含空白或非法提供商标识".to_string());
+        }
+        if !profile.providers.contains(provider) {
+            return Err(format!("账号顺序模式中的提供商「{provider}」不在当前路由中"));
+        }
     }
     Ok(())
 }

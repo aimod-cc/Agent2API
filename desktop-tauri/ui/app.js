@@ -259,12 +259,12 @@ function adoptPluginPages(data) {
 async function refreshPluginPages(payload) {
   if (payload) {
     window.wbCheckin?.invalidate?.();
-    adoptPluginPages(payload);
+    applyPluginsSnapshot(payload);
     return;
   }
   try {
     const data = await api.getPlugins();
-    adoptPluginPages(data);
+    applyPluginsSnapshot(data);
   } catch {
     /* 读不到 = 没有插件页 */
   }
@@ -298,7 +298,7 @@ function readSidebarLayout() {
  *
  * 契约（与 index.html 里那段注释同源，改这里必须一起看）：
  *   · 菜单键 = data-page，与 PAGES / PAGE_LABELS 逐字一致；
- *   · 角标 id 固定三颗：nav-count-requests / -logs / -update；
+ *   · 角标 id 固定四颗：nav-count-requests / -logs / -plugins / -update；
  *   · 分组标题用 .nav-group-label（≤900px 由 layout.css 整列隐藏）。
  * 图标不在这里注入：画完调 paintIcons()，它按 data-icon 从 icons.js 取图形。
  */
@@ -333,6 +333,7 @@ function syncNavBadges() {
   if (!navBadgesReady) return;
   paintRequestsBadge();
   paintLogsBadgeFromMemory();
+  paintPluginsBadge();
   syncUpdateBadge();
 }
 
@@ -957,14 +958,100 @@ let lastUpdateInfo = null;
  */
 let seenUpdateVersion = '';
 
+/** 当前可更新插件总数（社区 WASM + Magpie 脚本 + 定时任务三类汇总；0 = 无可用更新） */
+let pluginUpdateCount = 0;
+/** 最近一次读到的 `/api/plugins` revision，用于条件轮询跳过无变化时的整包解析 */
+let lastPluginsRev = '';
+/** 后端插件目录是否已完成过检查；启动阶段未就绪时跟 20 秒轮询尽快补齐，之后降到 60 秒 */
+let pluginsChecked = false;
+let pluginsBadgeInFlight = false;
+
 /**
- * 三颗角标的内存值都初始化完了 —— 从这里开始 syncNavBadges 才有意义。
+ * 四颗角标的内存值都初始化完了 —— 从这里开始 syncNavBadges 才有意义。
  *
  * 首次 renderSidebar() 发生在模块顶部（见那里的说明：它不能被桥调用中断），
  * 那时上面这些 `let` 还在 TDZ 里，读一下就抛 ReferenceError。置位放在
  * 「所有角标状态声明之后」是刻意的：早一行都可能踩到 TDZ。
  */
 navBadgesReady = true;
+
+/**
+ * 从 `/api/plugins` 完整快照里统计可更新插件总数。
+ * 口径与插件页左侧分类栏一致：已装社区插件 + 已装 Magpie 脚本 + 已装定时任务插件。
+ * 返回 null 表示入参不是完整快照（例如启停/安装返回的部分变更），调用方不覆盖现有计数。
+ */
+function countPluginUpdates(data) {
+  if (!data || !Array.isArray(data.updates)) return null;
+  const packs = Array.isArray(data.packs) ? data.packs : [];
+  const updatablePackIds = new Set(
+    data.updates.filter(item => item?.available === true && item.id).map(item => item.id),
+  );
+  let total = 0;
+  for (const pack of packs) {
+    if (pack?.id && updatablePackIds.has(pack.id)) total += 1;
+  }
+  const scriptPackages = Array.isArray(data.scripts?.packages) ? data.scripts.packages : [];
+  const scriptUpdates = Array.isArray(data.scripts?.updates?.updates) ? data.scripts.updates.updates : [];
+  if (scriptPackages.length && scriptUpdates.length) {
+    const updatableScriptIds = new Set(
+      scriptUpdates.filter(item => item?.available === true && item.id).map(item => item.id),
+    );
+    for (const pack of scriptPackages) {
+      if (pack?.id && updatableScriptIds.has(pack.id)) total += 1;
+    }
+  }
+  const taskUpdates = Number(data.taskUpdateCount);
+  if (Number.isFinite(taskUpdates) && taskUpdates > 0) total += Math.floor(taskUpdates);
+  return total;
+}
+
+/** 按内存中的待更新插件数重画「插件」导航角标（0 时隐藏，>99 显示 99+）。 */
+function paintPluginsBadge() {
+  const badge = $('nav-count-plugins');
+  if (!badge) return;
+  if (pluginUpdateCount <= 0) {
+    badge.style.display = 'none';
+    return;
+  }
+  badge.textContent = pluginUpdateCount > 99 ? '99+' : String(pluginUpdateCount);
+  badge.title = wbI18n.t('{n} 个插件可更新，点开「插件」查看', { n: pluginUpdateCount });
+  badge.style.display = '';
+}
+
+/** 由插件页或后台缓存同步更新待更新插件数并立即重画角标。 */
+function updatePluginsBadge(count) {
+  const value = Number(count);
+  pluginUpdateCount = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  paintPluginsBadge();
+}
+
+/** 消费一次 `/api/plugins` 返回值：同步动态菜单与待更新数量角标。 */
+function applyPluginsSnapshot(data) {
+  if (!data || data.unchanged === true) {
+    if (typeof data?.revision === 'string' && data.revision) lastPluginsRev = data.revision;
+    return;
+  }
+  if (typeof data.revision === 'string' && data.revision) lastPluginsRev = data.revision;
+  if (typeof data.catalog?.checked === 'boolean') pluginsChecked = data.catalog.checked;
+  const count = countPluginUpdates(data);
+  if (count !== null) updatePluginsBadge(count);
+  adoptPluginPages(data);
+}
+
+/** 后台读一次插件缓存（走 revision 条件查询，不触发外网检查），让非插件页也能及时亮起角标。 */
+async function syncPluginsBadge() {
+  if (pluginsBadgeInFlight || currentPage === 'plugins') return;
+  pluginsBadgeInFlight = true;
+  try {
+    const data = await api.getPlugins(lastPluginsRev || undefined);
+    if (currentPage === 'plugins') return;
+    applyPluginsSnapshot(data);
+  } catch {
+    // 静默：保持上一次的显示，不因偶发失败抹掉已有提示
+  } finally {
+    pluginsBadgeInFlight = false;
+  }
+}
 
 /**
  * 按当前状态重画「设置」导航项上的更新提示。
@@ -1289,6 +1376,7 @@ window.wbApp = {
   // 插件页清单重拉（插件页装 / 卸 / 启停之后由插件页的岛调它）：
   // 侧边栏的插件页菜单按这份清单生成，不重拉就会「装完了菜单里还是没有」
   refreshPluginPages,
+  updatePluginsBadge,
   renderTopbarStatus,
   syncNavBadges,
   updateLogsBadge,
@@ -1436,6 +1524,8 @@ setInterval(() => {
   // 内容没变时 `syncFromServer` 自己早退，不会重画（重画会打断正在拖动的项）。
   slowPollTick = (slowPollTick + 1) % 3;
   if (slowPollTick === 0) void window.wbSidebarLayout?.syncFromServer?.();
+  // 插件待更新数读的是后端缓存（带 revision 条件跳过），启动首轮未就绪前按 20 秒跟进，之后每 60 秒对一次。
+  if (!pluginsChecked || slowPollTick === 0) void syncPluginsBadge();
   // 插件页缓存着管理凭证，桌面会话提前续期后要把新值递进去。
   if (api.platform !== 'web') {
     const frame = pluginPageHost()?.querySelector('iframe');

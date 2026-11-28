@@ -187,7 +187,14 @@ export type ScriptOperation = {
   startedAt?: number
   active: boolean
   action?: string
-  target?: { id?: string | null; name?: string | null; source?: string | null; version?: string | null }
+  target?: {
+    id?: string | null
+    name?: string | null
+    source?: string | null
+    version?: string | null
+    enabled?: boolean | null
+    provider?: string | null
+  }
   stage?: string
   message?: string
   received?: number
@@ -268,6 +275,7 @@ export type PluginsPayload = {
   pluginsDir: string
   catalog: ReleaseState
   updates: PluginUpdate[]
+  taskUpdateCount?: number
   operations: PluginOperation[]
 }
 

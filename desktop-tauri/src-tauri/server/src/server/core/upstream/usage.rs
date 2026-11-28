@@ -392,11 +392,14 @@ pub fn normalize_protocol(raw: &str) -> String {
     let trimmed = raw.trim().to_ascii_lowercase();
     match trimmed.as_str() {
         "" => String::new(),
-        "chat" | "chat_completions" | "openai_chat" | "openai" => "chat_completions".to_string(),
-        "responses" | "openai_responses" => "responses".to_string(),
-        "anthropic" | "messages" | "anthropic_messages" => "anthropic".to_string(),
-        "gemini" | "antigravity_gemini" => "gemini".to_string(),
-        "images" | "openai_images" => "images".to_string(),
+        "chat" | "chat_completions" | "openai_chat" | "openai"
+        | "/chat/completions" | "/v1/chat/completions" => "chat_completions".to_string(),
+        "responses" | "openai_responses" | "/responses" | "/v1/responses" => "responses".to_string(),
+        "anthropic" | "messages" | "anthropic_messages" | "/messages" | "/v1/messages" => "anthropic".to_string(),
+        "gemini" | "antigravity_gemini" | ":generatecontent" | ":streamgeneratecontent" => "gemini".to_string(),
+        "images_generations" | "image_generations" | "/images/generations" | "/v1/images/generations" => "images_generations".to_string(),
+        "images_edits" | "image_edits" | "/images/edits" | "/v1/images/edits" => "images_edits".to_string(),
+        "images" | "openai_images" | "/images" => "images".to_string(),
         "claude_cli" => "claude_cli".to_string(),
         "ai_sdk_ndjson" => "ai_sdk_ndjson".to_string(),
         "chatglm_snapshot" => "chatglm_snapshot".to_string(),

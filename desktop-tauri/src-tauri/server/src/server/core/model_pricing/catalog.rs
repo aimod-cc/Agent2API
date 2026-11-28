@@ -444,8 +444,110 @@ pub fn candidate_keys(model: &str) -> Vec<String> {
     candidates
 }
 
+fn custom_provider_catalog_aliases(provider_id: &str) -> Vec<&'static str> {
+    let trimmed = provider_id.trim();
+    if !trimmed.starts_with(crate::server::core::custom_providers::ID_PREFIX) {
+        return vec![];
+    }
+    let Some(custom) = crate::server::core::custom_providers::get(trimmed) else {
+        return vec![];
+    };
+    let preset = custom
+        .get("presetKey")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let base_url = custom
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match preset.as_str() {
+        "openai" => return vec!["openai"],
+        "anthropic" => return vec!["anthropic"],
+        "openrouter" => return vec!["openrouter"],
+        "deepseek" => return vec!["deepseek"],
+        "glm" => return vec!["zai"],
+        "glm-cn" => return vec!["zhipuai"],
+        "minimax" => return vec!["minimax"],
+        "minimax-cn" => return vec!["minimax-cn"],
+        "moonshot" => return vec!["moonshotai"],
+        "moonshot-cn" => return vec!["moonshotai-cn"],
+        "alicode" => return vec!["alibaba-cn"],
+        "alicode-intl" | "alims-intl" | "alitp-intl" => return vec!["alibaba"],
+        "volcengine-ark" => return vec!["volcengine"],
+        "xai" => return vec!["xai"],
+        "mistral" => return vec!["mistral"],
+        "groq" => return vec!["groq"],
+        "nvidia" => return vec!["nvidia"],
+        "huggingface" => return vec!["huggingface"],
+        "siliconflow" => {
+            return if base_url.contains(".siliconflow.cn") {
+                vec!["siliconflow-cn", "siliconflow"]
+            } else {
+                vec!["siliconflow"]
+            };
+        }
+        "stepfun" => return vec!["stepfun"],
+        "stepfun-cn" => return vec!["stepfun-cn"],
+        "tencent-tokenhub" => return vec!["tencent-tokenhub"],
+        "tencent-tokenhub-cn" => return vec!["tencent-tokenhub-cn"],
+        "aihubmix" => return vec!["aihubmix"],
+        "xiaomi" | "xiaomi-tokenplan" => return vec!["xiaomi"],
+        "opencode-go" => return vec!["opencode-go"],
+        "opencode-zen" => return vec!["opencode"],
+        _ => {}
+    }
+    if base_url.is_empty() {
+        return vec![];
+    }
+    if base_url.contains("api.openai.com") {
+        vec!["openai"]
+    } else if base_url.contains("api.anthropic.com") {
+        vec!["anthropic"]
+    } else if base_url.contains("openrouter.ai") {
+        vec!["openrouter"]
+    } else if base_url.contains("api.deepseek.com") {
+        vec!["deepseek"]
+    } else if base_url.contains("api.z.ai") {
+        vec!["zai"]
+    } else if base_url.contains(".bigmodel.cn") {
+        vec!["zhipuai"]
+    } else if base_url.contains("api.minimax.io") {
+        vec!["minimax"]
+    } else if base_url.contains(".minimaxi.com") {
+        vec!["minimax-cn"]
+    } else if base_url.contains("api.moonshot.ai") {
+        vec!["moonshotai"]
+    } else if base_url.contains(".moonshot.cn") {
+        vec!["moonshotai-cn"]
+    } else if base_url.contains("api.x.ai") {
+        vec!["xai"]
+    } else if base_url.contains("api.mistral.ai") {
+        vec!["mistral"]
+    } else if base_url.contains("api.groq.com") {
+        vec!["groq"]
+    } else if base_url.contains("integrate.api.nvidia.com") {
+        vec!["nvidia"]
+    } else if base_url.contains("router.huggingface.co") {
+        vec!["huggingface"]
+    } else if base_url.contains(".siliconflow.cn") {
+        vec!["siliconflow-cn", "siliconflow"]
+    } else if base_url.contains(".siliconflow.com") {
+        vec!["siliconflow"]
+    } else if base_url.contains("aihubmix.com") {
+        vec!["aihubmix"]
+    } else if crate::server::core::custom_providers::is_opencode_go_endpoint(&base_url) {
+        vec!["opencode-go"]
+    } else {
+        vec![]
+    }
+}
+
 fn provider_catalog_aliases(provider_id: &str) -> Vec<&'static str> {
-    match provider_id.trim().to_ascii_lowercase().as_str() {
+    let builtin = match provider_id.trim().to_ascii_lowercase().as_str() {
         "claude-subscription" => vec!["anthropic"],
         "chatgpt-subscription" | "codex-subscription" => vec!["openai"],
         "copilot-subscription" => vec!["github-copilot", "github-models"],
@@ -458,7 +560,11 @@ fn provider_catalog_aliases(provider_id: &str) -> Vec<&'static str> {
         | "codearts" | "raccoon" | "accio" | "accio-cn" | "loomy" | "doubaowork" | "cline-free"
         | "cline-pass" | "iflow" => vec![],
         _ => vec![],
+    };
+    if !builtin.is_empty() {
+        return builtin;
     }
+    custom_provider_catalog_aliases(provider_id)
 }
 
 /// 按提供商专属清单查官网列表价（优先 `models.dev` 对应提供商，其次品牌制作方 + 内嵌快照）。

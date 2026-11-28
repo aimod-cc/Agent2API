@@ -18,6 +18,7 @@ export function RouteIcon({ name, size = 16 }: { name: string; size?: number }) 
     layers: 'm12 3 9 4.5-9 4.5-9-4.5L12 3ZM3 12l9 4.5 9-4.5M3 16.5l9 4.5 9-4.5',
     filter: 'M4 6h16M7 12h10M10 18h4',
     chevronUp: 'm18 15-6-6-6 6',
+    chevronDown: 'm6 9 6 6 6-6',
     chevronLeft: 'm15 5-7 7 7 7',
     chevronRight: 'm9 5 7 7-7 7',
   }

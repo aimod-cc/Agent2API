@@ -6,7 +6,7 @@ use super::{validate, Model, Profile};
 use crate::server::{
     config,
     core::{
-        account_store::AccountStore, capability, custom_providers, key_scope::KeyScope, model_meta,
+        account_store::AccountStore, capability, custom_providers, key_scope::KeyScope,
         models::model_id, providers,
     },
 };
@@ -84,12 +84,10 @@ fn scoped_models(store: &AccountStore, scope: Option<&KeyScope>) -> Vec<CatalogM
                 if !custom {
                     return providers::catalog::manifest_for_provider(provider);
                 }
-                custom_providers::models_of(provider).into_iter().map(|mut model| {
-                    model_meta::apply(&mut model);
-                    let overrides = capability::normalize_object(model.get("capabilities"));
-                    capability::apply_overrides(&mut model, &overrides);
-                    model
-                }).collect()
+                custom_providers::models_of(provider)
+                    .into_iter()
+                    .map(|model| custom_providers::enrich_model(&model).0)
+                    .collect()
             });
             let target = if custom {
                 custom_providers::wire_model_for(provider, &id).0

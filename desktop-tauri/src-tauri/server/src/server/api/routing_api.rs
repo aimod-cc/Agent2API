@@ -83,6 +83,22 @@ pub async fn put_routing(State(_state): State<ServerState>, body: Bytes) -> Resp
         }
         patch.sticky = Some(config::StickyMode::from_id(text));
     }
+    if let Some(value) = object.get(config::KEY_ROUTING_PRIORITY) {
+        let Some(text) = value.as_str() else {
+            return errors::management_error(400, "priority 必须是字符串");
+        };
+        let known = [
+            config::ROUTING_PRIORITY_STICKY,
+            config::ROUTING_PRIORITY_CONSUMPTION,
+        ];
+        if !known.contains(&text) {
+            return errors::management_error(
+                400,
+                format!("未知的生效优先级「{text}」（只支持 {}）", known.join(" / ")),
+            );
+        }
+        patch.priority = Some(config::RoutingPriority::from_id(text));
+    }
     let bool_field = |key: &str| -> Result<Option<bool>, Response> {
         match object.get(key) {
             None => Ok(None),
@@ -155,6 +171,7 @@ pub(crate) fn routing_json(settings: RoutingSettings) -> Value {
     json!({
         config::KEY_ROUTING_STRATEGY: settings.strategy.as_str(),
         config::KEY_ROUTING_STICKY: settings.sticky.as_str(),
+        config::KEY_ROUTING_PRIORITY: settings.priority.as_str(),
         config::KEY_ROUTING_FAILOVER_BACKOFF: settings.failover_backoff,
         config::KEY_ROUTING_SINK: settings.sink,
         config::KEY_ROUTING_BREAKER_ENABLED: settings.breaker_enabled,
@@ -239,6 +256,7 @@ pub(crate) fn queue_for_accounts(state: &ServerState, model: Option<String>, acc
         cursor: None,
         provider_cursors: None,
         sticky_account: None,
+        sticky_beats_order: settings.priority.sticky_beats_order(),
     };
     let plan = routing::plan_route(&scoped, &keys, &counts, &[], now, &meta);
     let entry_json = |entry: &routing::PlanEntry| {
@@ -256,6 +274,7 @@ pub(crate) fn queue_for_accounts(state: &ServerState, model: Option<String>, acc
     json!({
         "strategy": settings.strategy.as_str(),
         "sticky": settings.sticky.as_str(),
+        "priority": settings.priority.as_str(),
         "model": model.clone().map(Value::String).unwrap_or(Value::Null),
         "modelKnown": model.as_ref().map(|_| !providers.is_empty()),
         "lastRequestModel": snapshot.last_request_model(),

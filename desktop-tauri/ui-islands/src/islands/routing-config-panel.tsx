@@ -9,11 +9,12 @@ import { RoutingActions } from './routing-canvas-controls'
 import { RoutingCanvasLayout, RoutingDraftFooter, RoutingRefreshError } from './routing-canvas-layout'
 import { useRoutingCanvasActivity } from './routing-canvas-activity'
 import { RoutingProviderCard } from './routing-provider-card'
+import { RoutingPriorityDialog, RoutingPriorityRow } from './routing-priority-dialog'
 import { routingAccountSections, routingCollapsedSections, useRoutingExpansion } from './routing-account-sections'
 import { RouteIcon, stickyLabel, strategyLabel } from './routing-ui'
 import { draftDirty, type RoutingEditorState } from './routing-editor-state'
 import { RoutingLegacyAccountsDialog, type useRoutingAccounts } from './routing-accounts'
-import { host, type RouteProfile, type RoutingWorkspace } from './routing-types'
+import { host, type RouteAccountOrderMode, type RouteProfile, type RoutingWorkspace } from './routing-types'
 
 export type RoutingConfigProps = {
   editor: RoutingEditorState; scope: string; now: number; accountControl: ReturnType<typeof useRoutingAccounts>
@@ -25,6 +26,7 @@ export type RoutingConfigProps = {
 export function RoutingConfigPanel({ editor, scope, now, accountControl, refreshToken, onWorkspace, onAccount, onSort, onProtection }: RoutingConfigProps) {
   const { setOpened, sectionOpen, setSectionOpen, search, setSearch, query, isOpen } = useRoutingExpansion()
   const [legacyDialog, setLegacyDialog] = React.useState<RoutingWorkspace['legacyGlobalParticipation']>(null)
+  const [priorityOpen, setPriorityOpen] = React.useState(false)
   const draft = editor.draft
   const globalAccounts = !scope
   const legacy = draft?.workspace.legacyGlobalParticipation
@@ -104,6 +106,15 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, refresh
     const target = order[order.indexOf(id) + direction]
     if (target) reorderRoute(next.accountOrder[provider], id, target, direction > 0)
   })
+  const setOrderMode = (provider: string, mode: RouteAccountOrderMode) => mutate((next, currentWorkspace) => {
+    ensure(next, provider)
+    next.accountOrderMode = { ...(next.accountOrderMode || {}), [provider]: mode }
+    if (mode === 'manual') {
+      const liveOrder = currentWorkspace.sorting?.accountOrder?.[provider] || []
+      const providerAccounts = currentWorkspace.accounts.filter(account => providerOf(account) === provider).map(account => account.id)
+      next.accountOrder[provider] = [...new Set([...liveOrder, ...(next.accountOrder[provider] || []), ...providerAccounts])]
+    }
+  })
   const removeAll = async () => {
     if (!await confirmDialog(t('只移出本路由，账号状态和其他路由不变；保存后此入口将没有可用路由。'), {
       title: t('全部移出本路由'), confirmText: t('全部移出'),
@@ -133,7 +144,8 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, refresh
         return
       }
       mutate(next => { next.excludedAccounts = next.excludedAccounts.includes(key) ? next.excludedAccounts.filter(value => value !== key) : [...next.excludedAccounts, key] })
-    }} onAccount={onAccount} onSort={() => onSort(id)} onEnableGroup={globalAccounts ? on => enableGroup(id, on) : undefined} />
+    }} onOrderMode={scope && workspace.customized ? mode => setOrderMode(id, mode) : undefined}
+    onAccount={onAccount} onSort={() => onSort(id)} onEnableGroup={globalAccounts ? on => enableGroup(id, on) : undefined} />
   const groups = <section className='routing-groups-column'>
     <div className='routing-column-head'><RouteIcon name='accounts' size={14} /><b>{t('账号组')}</b><span>{globalAccounts
       ? t('{n} 个账号启用', { n: displayedAccounts.filter(account => account.enabled !== false).length })
@@ -203,6 +215,13 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, refresh
           </div>
           {!globalAccounts ? <p className='routing-config-note'>{profile.providerScope === 'all' ? t('新增提供商自动参与；移出本路由的不会自动加回。') : t('只有加入的提供商参与，新增提供商需要手动加入。')}</p> : null}
           {!scope ? <RoutingModelFilter value={modelFilter.model} models={workspace.models} lastUsed={workspace.modelLastUsed} disabled={disabled} onChange={modelFilter.setModel} /> : null}
+          <RoutingPriorityRow
+            priority={profile.priority}
+            globalPriority={scope ? (workspace.globalSettings?.routingPriority || 'sticky') : undefined}
+            sticky={profile.sticky || workspace.globalSettings?.routingSticky || workspace.settings.routingSticky}
+            disabled={locked}
+            onOpen={() => setPriorityOpen(true)}
+          />
           <div className='routing-protection-summary'><RouteIcon name='shield' size={14} /><span>{t('全局保护设置')}</span>
             <Badge variant='ghost' shape='tag'>{[workspace.settings.routingFailoverBackoff && t('失败退避'), workspace.settings.routingSink && t('限流垫底'), workspace.settings.routingBreakerEnabled && t('熔断保护')].filter(Boolean).join(' · ') || t('已停用')}</Badge>
             <Button variant='link' size='sm' disabled={editor.busy} onClick={() => onProtection(workspace)}>{t('设置')}</Button>
@@ -213,6 +232,14 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, refresh
       </div>
     </RoutingCanvasLayout>
     <RoutingDragOverlay state={drag.state} />
+    {priorityOpen ? <RoutingPriorityDialog
+      title={scope || t('全局默认')}
+      value={profile.priority}
+      globalValue={scope ? (workspace.globalSettings?.routingPriority || 'sticky') : undefined}
+      sticky={profile.sticky || workspace.globalSettings?.routingSticky || workspace.settings.routingSticky}
+      onChange={next => mutate(target => { target.priority = next })}
+      onClose={() => setPriorityOpen(false)}
+    /> : null}
     {legacyDialog ? <RoutingLegacyAccountsDialog legacy={legacyDialog} busy={accountControl.busy} error={accountControl.error}
       onClose={() => setLegacyDialog(null)} onConfirm={() => { void accountControl.convert(legacyDialog.revision).then(done => { if (done) setLegacyDialog(null) }) }} /> : null}
   </>

@@ -8,6 +8,7 @@ import { bridge, errorMessage, type ReplayRow, type RouteGroup, type RoutingWork
 import { traceProvider } from './routing-trace-model'
 import { execScopeLabel } from './routing-exec-model'
 import { RouteIcon, stickyLabel, strategyLabel, timeText } from './routing-ui'
+import { prioritySummaryText } from './routing-priority-dialog'
 
 type CurrentConfig = { workspace: RoutingWorkspace; group?: RouteGroup; missing: boolean }
 const routeStrategy = (strategy?: string, group = false) => strategy ? group && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy) : t('未记录')
@@ -59,6 +60,8 @@ function RoutingSnapshotDialog({ row, onClose, onConfig }: { row: ReplayRow; onC
       after: currentText(routeStrategy(current?.group?.strategy || current?.workspace.settings.routingStrategy, Boolean(current?.group))) },
     { label: t('会话粘滞'), before: snapshot?.sticky || row.route?.sticky ? stickyLabel(snapshot?.sticky || row.route?.sticky) : t('未记录'),
       after: currentText(stickyLabel(current?.group?.sticky || current?.workspace.settings.routingSticky)) },
+    { label: t('生效优先级'), before: snapshot?.priority || row.route?.priority ? prioritySummaryText(snapshot?.priority || row.route?.priority, snapshot?.sticky || row.route?.sticky) : t('未记录'),
+      after: currentText(prioritySummaryText(current?.group?.priority || current?.workspace.settings.routingPriority, current?.group?.sticky || current?.workspace.settings.routingSticky)) },
     { label: t('提供商范围'), before: providerScope(snapshot?.providerScope), after: currentText(current?.group ? t('指定提供商') : providerScope(current?.workspace.profile.providerScope)) },
   ]
   const session = row.route?.sessionId || row.route?.stickyId
@@ -103,12 +106,14 @@ export function RoutingExecSnapshot({ row, onConfig }: { row: ReplayRow; onConfi
   const snapshot = row.route?.configSnapshot
   const strategy = snapshot?.strategy || row.route?.strategy
   const sticky = snapshot?.sticky || row.route?.sticky
+  const priority = snapshot?.priority || row.route?.priority
   return <section className='routing-exec-section'>
     <div className='routing-exec-section-head'><h3>{t('当时配置')}</h3><Button variant='link' size='xs' onClick={() => setOpen(true)}>{t('查看配置详情')}</Button></div>
     <dl className='routing-exec-definitions'>
       <div><dt>{t('配置范围')}</dt><dd>{execScopeLabel(row)}</dd></div>
       <div><dt>{t('选路方式')}</dt><dd>{routeStrategy(strategy, Boolean(snapshot?.groupId))}</dd></div>
       <div><dt>{t('会话粘滞')}</dt><dd>{sticky ? stickyLabel(sticky) : t('未记录')}</dd></div>
+      {priority ? <div><dt>{t('生效优先级')}</dt><dd>{prioritySummaryText(priority, sticky)}</dd></div> : null}
       {row.upstreamModel ? <div className='is-wide'><dt>{t('上游模型')}</dt><dd className='routing-exec-mono'>{row.upstreamModel}</dd></div> : null}
     </dl>
     {snapshot?.members?.length ? <Collapsible className='routing-exec-member-toggle'>

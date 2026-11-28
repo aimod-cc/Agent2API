@@ -55,6 +55,9 @@ pub async fn list(
         result["supportsPackPreview"] = json!(true);
         result["pluginsDir"] = json!(plugin_host::plugins_dir_display());
         result["updates"] = plugin_host::catalog::updates_with_packs(&packs, &catalog)["updates"].clone();
+        result["taskUpdateCount"] = json!(
+            crate::server::core::task_plugins::store_remote::updatable_count_with_catalog(&catalog)
+        );
         result["catalog"] = catalog;
         result["operations"] = plugin_host::operations::snapshot_with_states(&states)["operations"].clone();
         result["scripts"] = plugin_host::script::snapshot();
@@ -147,6 +150,13 @@ pub async fn change_script(body: Bytes) -> Response {
     };
     let id = payload["id"].as_str().unwrap_or("").to_string();
     let action = payload["action"].as_str().unwrap_or("").to_string();
+    if action == "dismiss_error" {
+        let operation_id = payload["operationId"].as_str().filter(|value| !value.is_empty());
+        return match plugin_host::script::dismiss_error(operation_id) {
+            Ok(operation) => ok_json(json!({ "operation": operation })),
+            Err(error) => management_error(400, error),
+        };
+    }
     if action == "bind_alias" {
         let original = payload["original"].as_str().unwrap_or("").to_string();
         let alias = payload["alias"].as_str().unwrap_or("").to_string();

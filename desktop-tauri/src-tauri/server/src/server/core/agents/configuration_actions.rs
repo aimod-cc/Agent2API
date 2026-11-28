@@ -148,19 +148,105 @@ fn plan(def: &ClientDef, context: &Context, selected: &configurations::Configura
     Ok(plan)
 }
 
+fn plan_save_use(
+    def: &ClientDef,
+    context: &Context,
+    old: Option<&configurations::Configuration>,
+    payload: &Value,
+    accounts: &AccountStore,
+    port: u16,
+) -> Result<clients::Plan, String> {
+    if !def.writable || paths::detect(def).unsupported {
+        return Err(def.note.into());
+    }
+    if old.is_some_and(|entry| entry.live_id.is_some()) {
+        return Err("此配置已存在于客户端，请使用编辑保存".into());
+    }
+    if old.is_some_and(|entry| !entry.editable) {
+        return Err("此配置暂不支持切换，请在客户端中管理".into());
+    }
+    let mut profile = draft(def, payload, old.map(|entry| &entry.profile))?;
+    if old.is_none()
+        && (context.profiles.iter().any(|item| item.id == profile.id)
+            || context.live.iter().any(|item| item.id == profile.id))
+    {
+        return Err("配置标识已存在，请重新新增".into());
+    }
+    profile.enabled = true;
+    validate_save(def, &context.path, &profile, None, port)?;
+    catalog::validate_profile(accounts, &profile)?;
+    if profile.native.source_id.is_empty()
+        && !matches!(def.id, "claude-code" | "gemini-cli" | "cline" | "workbuddy")
+    {
+        if let Some(existing) = context
+            .live
+            .iter()
+            .find(|current| current.native.source_id == clients::native_id(&profile))
+        {
+            if profile.protocol != existing.protocol
+                || profile.base_url.trim_end_matches('/')
+                    != existing.base_url.trim_end_matches('/')
+            {
+                return Err("目标配置标识已被客户端占用，请重新检测后编辑已有配置".into());
+            }
+        }
+    }
+    let operation = if def.default_model { "default" } else { "apply" };
+    let mut planned = clients::plan(def, &context.path, &profile, operation, port)?;
+    let wanted = profile.models.iter().map(|model| model.id.as_str()).collect();
+    for existing in &context.live {
+        let replaces = matches!(def.id, "claude-code" | "gemini-cli")
+            || (def.id == "cline" && existing.native.source_id == "openai-compatible")
+            || (!profile.native.source_id.is_empty()
+                && profile.native.source_id == existing.native.source_id
+                && profile.protocol == existing.protocol);
+        if replaces {
+            clients::remove_models(def, &mut planned, existing, &wanted)?;
+        }
+    }
+    planned.operation = "config-save-use".into();
+    Ok(planned)
+}
+
 pub fn create_preview(def: &ClientDef, payload: &Value, accounts: &AccountStore, port: u16) -> Result<Value, String> {
     let context = context(def, payload, port)?;
-    let selected = entry(def, &context, payload)?;
-    preview::create_restore(def.id, &plan(def, &context, &selected, payload, accounts, port)?)
+    let plan = if text(payload, "operation") == "config-save-use" {
+        let old = if text(payload, "profileId").is_empty() {
+            None
+        } else {
+            Some(entry(def, &context, payload)?)
+        };
+        plan_save_use(def, &context, old.as_ref(), payload, accounts, port)?
+    } else {
+        let selected = entry(def, &context, payload)?;
+        plan(def, &context, &selected, payload, accounts, port)?
+    };
+    preview::create_restore(def.id, &plan)
 }
 
 pub fn apply(def: &ClientDef, payload: &Value, accounts: &AccountStore, db: Option<&Db>, port: u16) -> Result<Value, String> {
     let mut context = context(def, payload, port)?;
-    let selected = entry(def, &context, payload)?;
-    let plan = plan(def, &context, &selected, payload, accounts, port)?;
-    let deleting = text(payload, "operation") == "config-delete";
-    configurations::remember(def, &context.path, &mut context.profiles, &context.live, selected.live_id.as_deref(), &plan.profile.id);
-    context.profiles.retain(|profile| !selected.saved_ids.contains(&profile.id));
+    let action = text(payload, "operation");
+    let (selected, plan) = if action == "config-save-use" {
+        let old = if text(payload, "profileId").is_empty() {
+            None
+        } else {
+            Some(entry(def, &context, payload)?)
+        };
+        let plan = plan_save_use(def, &context, old.as_ref(), payload, accounts, port)?;
+        (old, plan)
+    } else {
+        let selected = entry(def, &context, payload)?;
+        let plan = plan(def, &context, &selected, payload, accounts, port)?;
+        (Some(selected), plan)
+    };
+    let deleting = action == "config-delete";
+    let creating = action == "config-save-use" && selected.is_none();
+    let skip_live = selected.as_ref().and_then(|entry| entry.live_id.as_deref());
+    configurations::remember(def, &context.path, &mut context.profiles, &context.live, skip_live, &plan.profile.id);
+    if let Some(selected) = &selected {
+        context.profiles.retain(|profile| !selected.saved_ids.contains(&profile.id));
+    }
     if !deleting {
         let mut profile = plan.profile.clone();
         if context.profiles.iter().any(|item| item.id == profile.id) {
@@ -168,6 +254,9 @@ pub fn apply(def: &ClientDef, payload: &Value, accounts: &AccountStore, db: Opti
         }
         profile.updated_at = crate::server::logging::now_ms();
         context.profiles.push(profile);
+        if creating && context.profiles.len() > 200 {
+            return Err("最多保存 200 套配置".into());
+        }
     }
     if native::revision(&discover::read(def, &context.path)?).as_deref() != Some(text(payload, "nativeRevision")) {
         return Err("客户端配置已变化，请重新检测后再操作".into());

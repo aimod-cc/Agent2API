@@ -212,21 +212,43 @@ pub fn resolve(provider: &Value, requested: &str) -> Option<(String, Option<Stri
     })
 }
 
+/// 把一条自定义提供商模型条目补齐 `models.dev` 元数据并叠加用户能力覆盖。
+///
+/// 优先级与内置提供商一致：**用户覆盖 > models.dev > 未声明**。
+/// 顺序必须为：先对上游真名运行 `model_meta::apply` 补齐能力、来源与参考思考档位，
+/// 再叠加用户保存的稀疏 `capabilities` 覆盖并标记为 `"user"`。
+/// 返回 `(enriched_item, overridden_keys)`：
+/// - `enriched_item` 顶层平铺生效能力位、`capSources`、`reasoningLevels` 等字段；
+/// - `overridden_keys` 是用户手动覆盖过的能力键列表（与内置家 `capOverrides` 同形）。
+pub fn enrich_model(model_entry: &Value) -> (Value, Vec<String>) {
+    let target_id = model_id(model_entry);
+    let user_overrides = capability::normalize_object(model_entry.get("capabilities"));
+    let overridden = capability::overridden_keys(&user_overrides);
+    let mut item = json!({ "id": target_id });
+    model_meta::apply(&mut item);
+    if !user_overrides.is_empty() {
+        capability::apply_overrides(&mut item, &user_overrides);
+        model_meta::mark_user(&mut item, &overridden);
+    }
+    if user_overrides
+        .get("supportsReasoning")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        if let Some(object) = item.as_object_mut() {
+            object.insert("reasoningLevels".to_string(), json!([]));
+            object.remove("reasoningDefaultLevel");
+            object.remove("reasoningFixedLevel");
+        }
+    }
+    (item, overridden)
+}
+
 /// 该家对外的模型条目（`{id, …能力位}`）—— 清单出口与 `/v1/models` 共用。
 ///
-/// 条目的 id 是**对外名**（原始 ID 或某个存活的别名），能力位则取自
-/// **target 的登记条目**：别名的清单条目是这里现造的、没有自己的记录，
-/// 而下游按对外名看到的能力必须与按原始 ID 看到的完全一致 —— 否则同一个
-/// 上游模型会有两套互相打架的声明。
-///
-/// 能力位**平铺**在条目顶层（与各内置家清单同形，`list_item` 直接读它们）；
-/// 存储里那层 `capabilities` 对象由 `capability::apply_overrides` 展开 ——
-/// 归一也走它，手改数据里的坏值到不了出口。
-///
-/// 登记里**没写**的键由 models.dev 补（`core::model_meta::apply`）——那条路径的
-/// 优先级与内置家同一条：用户登记的值（上面的 `capabilities`）> models.dev >
-/// 未声明。自定义家的条目只服务对外清单与管理页的「这家有哪些模型」，
-/// 它不出现在内置家的管理视图里（那套读的是 `providers::catalog::manage_view`）。
+/// 条目的 id 是**对外名**（原始 ID 或某个存活的别名），能力位与 `models.dev` 元数据
+/// 均按 **target 的上游真名与登记条目**解析：别名先复用 target 的识别与覆盖结果，
+/// 再把 `id` 换成对外名，避免别名绕过 `models.dev` 识别或与原始 ID 声明分叉。
 pub fn public_models(provider: &Value) -> Vec<Value> {
     let models = provider
         .get("models")
@@ -255,16 +277,94 @@ pub fn public_models(provider: &Value) -> Vec<Value> {
         let Some((target, _)) = resolve(provider, &name) else {
             continue;
         };
-        let mut item = json!({ "id": name });
-        let capabilities = capability::normalize_object(
-            models
-                .iter()
-                .find(|model| model_id(model).eq_ignore_ascii_case(&target))
-                .and_then(|model| model.get("capabilities")),
-        );
-        capability::apply_overrides(&mut item, &capabilities);
-        model_meta::apply(&mut item);
+        let fallback_entry = json!({ "id": target });
+        let target_entry = models
+            .iter()
+            .find(|model| model_id(model).eq_ignore_ascii_case(&target))
+            .unwrap_or(&fallback_entry);
+        let (mut item, _) = enrich_model(target_entry);
+        if let Some(object) = item.as_object_mut() {
+            object.insert("id".to_string(), Value::String(name));
+        }
         result.push(item);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enrich_model_fills_modelsdev_and_respects_user_overrides() {
+        let entry = json!({
+            "id": "deepseek-v4.1-flash",
+            "enabled": true,
+            "reasoning": ""
+        });
+        let (enriched, overrides) = enrich_model(&entry);
+        assert!(overrides.is_empty());
+        assert_eq!(enriched["maxInputTokens"], json!(1_000_000));
+        assert_eq!(enriched["maxOutputTokens"], json!(384_000));
+        assert_eq!(enriched["supportsToolCall"], json!(true));
+        assert_eq!(enriched["supportsImages"], json!(true));
+        assert_eq!(enriched["supportsVideo"], json!(false));
+        assert_eq!(enriched["supportsReasoning"], json!(true));
+        assert_eq!(enriched["capSources"]["maxInputTokens"], json!("modelsdev"));
+        assert_eq!(enriched["capSources"]["supportsToolCall"], json!("modelsdev"));
+        assert_eq!(enriched["reasoningLevels"], json!(["low", "high", "max"]));
+        assert_eq!(enriched["reasoningSource"], json!("modelsdev"));
+
+        let overridden_entry = json!({
+            "id": "deepseek-v4.1-flash",
+            "capabilities": {
+                "maxInputTokens": 128_000,
+                "supportsReasoning": false
+            }
+        });
+        let (enriched, overrides) = enrich_model(&overridden_entry);
+        assert_eq!(overrides, vec!["maxInputTokens", "supportsReasoning"]);
+        assert_eq!(enriched["maxInputTokens"], json!(128_000));
+        assert_eq!(enriched["maxOutputTokens"], json!(384_000));
+        assert_eq!(enriched["supportsReasoning"], json!(false));
+        assert_eq!(enriched["capSources"]["maxInputTokens"], json!("user"));
+        assert_eq!(enriched["capSources"]["maxOutputTokens"], json!("modelsdev"));
+        assert_eq!(enriched["capSources"]["supportsReasoning"], json!("user"));
+        assert_eq!(enriched["reasoningLevels"], json!([]));
+    }
+
+    #[test]
+    fn public_models_alias_inherits_target_modelsdev_and_overrides() {
+        let provider = json!({
+            "id": "custom-test12345678",
+            "enabled": true,
+            "models": [
+                {
+                    "id": "deepseek-v4.1-flash",
+                    "enabled": true,
+                    "reasoning": "",
+                    "capabilities": { "maxOutputTokens": 65_536 }
+                }
+            ],
+            "mappings": [
+                {
+                    "alias": "my-fast-alias",
+                    "target": "deepseek-v4.1-flash",
+                    "enabled": true,
+                    "reasoning": ""
+                }
+            ]
+        });
+        let items = public_models(&provider);
+        let alias_item = items
+            .iter()
+            .find(|item| model_id(item) == "my-fast-alias")
+            .expect("alias item");
+        assert_eq!(alias_item["maxInputTokens"], json!(1_000_000));
+        assert_eq!(alias_item["maxOutputTokens"], json!(65_536));
+        assert_eq!(alias_item["supportsToolCall"], json!(true));
+        assert_eq!(alias_item["capSources"]["maxInputTokens"], json!("modelsdev"));
+        assert_eq!(alias_item["capSources"]["maxOutputTokens"], json!("user"));
+        assert_eq!(alias_item["reasoningLevels"], json!(["low", "high", "max"]));
+    }
 }

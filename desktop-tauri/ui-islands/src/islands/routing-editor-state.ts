@@ -9,7 +9,11 @@ export type RoutingDraft = { mode: 'inherit' | 'custom'; profile: RouteProfile; 
 const clone = (value: RouteProfile) => structuredClone(value)
 export function editableProfile(workspace: RoutingWorkspace): RouteProfile {
   const profile = clone(workspace.profile)
-  if (!workspace.model) { profile.strategy = workspace.settings.routingStrategy; profile.sticky = workspace.settings.routingSticky }
+  if (!workspace.model) {
+    profile.strategy = workspace.settings.routingStrategy
+    profile.sticky = workspace.settings.routingSticky
+    profile.priority = workspace.settings.routingPriority || 'sticky'
+  }
   return profile
 }
 export function draftDirty(draft: RoutingDraft) {
@@ -142,11 +146,13 @@ export function useRoutingEditor(onSaved: () => void) {
       if (!profile.providerScope) profile.providerScope = 'all'
       if (profile.providerScope === 'selected') profile.disabledProviders = profile.disabledProviders.filter(id => profile.providers.includes(id))
       profile.excludedAccounts = profile.excludedAccounts.filter(id => workspace.accounts.some(account => account.id === id))
+      profile.accountOrderMode = { ...(profile.accountOrderMode || {}) }
       for (const provider of workspace.providers) {
         if (!profile.providers.includes(provider.id)) {
           profile.providers.push(provider.id)
           if (profile.providerScope === 'selected') profile.disabledProviders.push(provider.id)
         }
+        profile.accountOrderMode[provider.id] = 'followGroup'
         if (!profile.accountOrder[provider.id]) {
           profile.accountOrder[provider.id] = workspace.accounts.filter(account => account.provider === provider.id)
             .sort((left, right) => Number(left.priority) - Number(right.priority)).map(account => account.id)

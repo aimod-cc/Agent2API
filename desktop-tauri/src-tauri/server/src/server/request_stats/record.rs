@@ -939,6 +939,8 @@ pub struct AccountAccum {
     pub account_id: String,
     #[serde(rename = "accountName", default)]
     pub account_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
     #[serde(default)]
     pub requests: i64,
     #[serde(default)]

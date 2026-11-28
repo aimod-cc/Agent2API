@@ -508,6 +508,8 @@ pub struct PlanMeta<'a> {
     pub provider_cursors: Option<&'a HashMap<String, usize>>,
     /// 粘性命中的账号 id（`None` = 无命中）
     pub sticky_account: Option<&'a str>,
+    /// 生效优先级：会话粘滞是否高于消耗顺序（`true` = 粘滞优先，`false` = 消耗顺序优先）
+    pub sticky_beats_order: bool,
 }
 
 /// 时间戳 → 「HH:MM」短文案（原因句里用，按**操作者本机时区** —— 与请求
@@ -729,14 +731,21 @@ pub fn plan_route(
     // 命中账号若正处冷却 / 熔断，本就该让位 —— 命中项能走到这一步就说明它
     // 可用（不可用的在收集阶段已进 `blocked`），两者不冲突。
     let mut sticky_hit = false;
+    let mut sticky_demoted = false;
     if let Some(hit) = meta.sticky_account {
         if let Some(index) = arranged
             .iter()
             .position(|account| super::routing_groups::attempt_key(account) == hit)
         {
-            let hit_account = arranged.remove(index);
-            arranged.insert(0, hit_account);
-            sticky_hit = true;
+            if index == 0 {
+                sticky_hit = true;
+            } else if meta.sticky_beats_order {
+                let hit_account = arranged.remove(index);
+                arranged.insert(0, hit_account);
+                sticky_hit = true;
+            } else {
+                sticky_demoted = true;
+            }
         }
     }
 
@@ -789,6 +798,8 @@ pub fn plan_route(
                 } else {
                     format!("会话粘住，但它当前排在第 {position} 位（正在让位于下面的状态）")
                 }
+            } else if sticky_demoted && Some(super::routing_groups::attempt_key(&account).as_str()) == meta.sticky_account {
+                format!("会话原绑定此账号，但按「消耗顺序优先」让位给第 1 位（当前排在第 {position} 位）")
             } else {
                 match meta.strategy {
                     RouteStrategy::Order => {
@@ -897,6 +908,7 @@ mod tests {
             cursor: None,
             provider_cursors: Some(cursors),
             sticky_account: None,
+            sticky_beats_order: true,
         }
     }
 
@@ -1041,6 +1053,7 @@ mod tests {
             cursor: None,
             provider_cursors: None,
             sticky_account: Some("a3"),
+            sticky_beats_order: true,
         };
         let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
         let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
@@ -1077,6 +1090,7 @@ mod tests {
             cursor: None,
             provider_cursors: Some(&cursors),
             sticky_account: Some("b1"),
+            sticky_beats_order: true,
         };
         let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
         let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
@@ -1105,6 +1119,7 @@ mod tests {
             cursor: None,
             provider_cursors: None,
             sticky_account: Some("a2"),
+            sticky_beats_order: true,
         };
         let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
         let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
@@ -1153,6 +1168,7 @@ mod tests {
             cursor: None,
             provider_cursors: Some(&cursors),
             sticky_account: None,
+            sticky_beats_order: true,
         };
         let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
         let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
@@ -1188,6 +1204,7 @@ mod tests {
             cursor: None,
             provider_cursors: None,
             sticky_account: None,
+            sticky_beats_order: true,
         };
         let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
         let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
@@ -1224,6 +1241,7 @@ mod tests {
             cursor: None,
             provider_cursors: None,
             sticky_account: None,
+            sticky_beats_order: true,
         };
         let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
         let ordered_ids: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
@@ -1232,6 +1250,48 @@ mod tests {
         let blocked_ids: Vec<&str> = plan.blocked.iter().map(|entry| entry.id.as_str()).collect();
         assert!(blocked_ids.contains(&"busy_no_cred"));
         assert!(blocked_ids.contains(&"busy_breaker"));
+    }
+
+    /// 消耗顺序优先于会话粘滞：当粘性账号不再位于第 1 位时，立即让位于新首位；
+    /// 若粘性账号仍处于第 1 位，则继续保持粘性命中。
+    #[test]
+    fn consumption_priority_yields_sticky_when_another_account_ranks_first() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let keys = CooldownKeys::new("test-model");
+        let accounts = vec![
+            account("a1", "A", 100),
+            account("a2", "A", 110),
+        ];
+        // 场景 1：a2 仍被会话粘住，但 a1 排在消耗顺序第 1 位 → 切到 a1
+        let demoted_meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: Some("a2"),
+            sticky_beats_order: false,
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &demoted_meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(order, vec!["a1", "a2"]);
+        assert!(!plan.sticky_hit);
+        assert!(plan.ordered[1].reason.contains("消耗顺序优先"), "{}", plan.ordered[1].reason);
+
+        // 场景 2：a1 本身就是消耗顺序第 1 位 → 粘性继续生效
+        let top_meta = PlanMeta {
+            sticky_account: Some("a1"),
+            ..demoted_meta
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &top_meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(order, vec!["a1", "a2"]);
+        assert!(plan.sticky_hit);
+        assert!(plan.ordered[0].reason.contains("会话粘住"), "{}", plan.ordered[0].reason);
     }
 }
 

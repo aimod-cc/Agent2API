@@ -1,7 +1,10 @@
 import { t } from '../i18n'
 import { newId } from '../../../ui-shared/ids'
+import { catalogModel, type CatalogModel } from './agent-catalog'
 import type { AgentClient, AgentModel, AgentOperation, AgentProfile } from './agent-types'
 import { modelLevels } from './agent-model-config'
+
+export const AGENT_MODEL_LIMIT = 200
 
 export function protocolLabel(value: string): string {
   return { anthropic: 'Anthropic Messages', responses: 'OpenAI Responses', openai_chat: 'OpenAI Chat Completions', gemini: 'Gemini API', native: t('客户端原生配置') }[value] || value
@@ -86,3 +89,46 @@ export function validateDraft(client: AgentClient, profile: AgentProfile): strin
 }
 
 export function profileSignature(profile: AgentProfile): string { return JSON.stringify(profile) }
+
+export function selectProfileModels(profile: AgentProfile, models: AgentModel[]): Partial<AgentProfile> {
+  const selected = models.find(model => model.id === profile.model)?.id || models[0]?.id || ''
+  return {
+    models,
+    model: selected,
+    effort: selected === profile.model ? profile.effort : '',
+    ...(Object.values(profile.claudeModels).some(Boolean) ? { claudeModels: syncClaudeTiers(profile.claudeModels, profile.model, selected) } : {}),
+  }
+}
+
+export function fillDefaultProfile(client: AgentClient, profile: AgentProfile, catalog: CatalogModel[], preferred: string): AgentProfile {
+  if (client.supportsModels && profile.models.length) {
+    return {
+      ...profile,
+      models: profile.models.map(model => {
+        const known = catalog.find(item => item.id === model.id)
+        if (!known) return model
+        const inferred = catalogModel(client, known)
+        return {
+          ...model,
+          name: model.name === model.id ? inferred.name : model.name,
+          contextWindow: model.contextWindow ?? inferred.contextWindow,
+          maxOutputTokens: model.maxOutputTokens ?? inferred.maxOutputTokens,
+          supportsTools: model.supportsTools ?? inferred.supportsTools,
+          supportsImages: model.supportsImages ?? inferred.supportsImages,
+          supportsVideo: model.supportsVideo ?? inferred.supportsVideo,
+          supportsReasoning: model.supportsReasoning ?? inferred.supportsReasoning,
+          reasoningLevels: [...new Set([...inferred.reasoningLevels, ...model.reasoningLevels])],
+        }
+      }),
+    }
+  }
+  const selected = catalog.find(model => model.id === profile.model) || catalog.find(model => model.id === preferred)
+    || catalog.find(model => model.supportsTools === true) || catalog[0]
+  if (!selected) return profile
+  return {
+    ...profile,
+    model: selected.id,
+    ...(client.supportsModels ? { models: [catalogModel(client, selected)] } : {}),
+    ...(client.id === 'claude-code' ? { claudeModels: syncClaudeTiers(profile.claudeModels, profile.model, selected.id) } : {}),
+  }
+}

@@ -207,6 +207,7 @@ pub(super) fn range_totals(
                 &mut totals.account_totals,
                 &acc.account_id,
                 &acc.account_name,
+                &acc.provider,
                 acc.requests,
                 acc.successful,
                 acc.tokens,
@@ -238,6 +239,7 @@ pub(super) fn range_totals(
     let covered_unpriced: i64 = totals.account_totals.iter().map(|item| item.unpriced_requests).sum();
     push_account_accum(
         &mut totals.account_totals,
+        "",
         "",
         "",
         (totals.requests - covered_requests).max(0),
@@ -380,6 +382,7 @@ pub(super) fn push_account_accum(
     list: &mut Vec<AccountAccum>,
     account_id: &str,
     account_name: &str,
+    provider: &str,
     requests: i64,
     successful: i64,
     tokens: i64,
@@ -396,10 +399,18 @@ pub(super) fn push_account_accum(
             if !account_name.is_empty() {
                 item.account_name = account_name.to_string();
             }
+            if !provider.is_empty() && provider != "local-direct" {
+                item.provider = provider.to_string();
+            }
         }
         None => list.push(AccountAccum {
             account_id: account_id.to_string(),
             account_name: account_name.to_string(),
+            provider: if provider == "local-direct" {
+                String::new()
+            } else {
+                provider.to_string()
+            },
             requests,
             successful,
             tokens,
@@ -536,6 +547,24 @@ pub(super) fn build_models(totals: &[ModelAccum]) -> Vec<Value> {
 ///      取名字的优先级是「快照名 → id」，两者都空的那一组用「未知账号」。
 ///   2. 没有 `providerLabel` 那种「id → 现算 label」的派生：账号名不是派生值，
 ///      就是数据本身，所以直接原样给出。
+/// 从本机直连虚拟账号 ID（`local-direct:<provider>:<identity>`）中提取提供商 ID。
+pub(super) fn infer_provider_from_account_id(account_id: &str) -> Option<&str> {
+    let rest = account_id.strip_prefix("local-direct:")?;
+    let provider = rest.split(':').next()?.trim();
+    if provider.is_empty() || provider.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+    Some(provider)
+}
+
+fn effective_account_provider<'a>(account_id: &'a str, stored: &'a str) -> &'a str {
+    let trimmed = stored.trim();
+    if !trimmed.is_empty() && trimmed != "local-direct" {
+        return trimmed;
+    }
+    infer_provider_from_account_id(account_id).unwrap_or("")
+}
+
 pub(super) fn build_accounts(totals: &[AccountAccum]) -> Vec<Value> {
     // 与 build_providers 同一取舍：全零的组不返回
     let mut rows: Vec<&AccountAccum> = totals
@@ -559,7 +588,8 @@ pub(super) fn build_accounts(totals: &[AccountAccum]) -> Vec<Value> {
             } else {
                 UNKNOWN_ACCOUNT_LABEL.to_string()
             };
-            json!({
+            let provider = effective_account_provider(&item.account_id, &item.provider);
+            let mut row = json!({
                 "id": item.account_id,
                 "label": label,
                 "requests": item.requests,
@@ -568,7 +598,14 @@ pub(super) fn build_accounts(totals: &[AccountAccum]) -> Vec<Value> {
                 "totalTokens": item.tokens,
                 "costUsd": item.cost_usd,
                 "unpricedRequests": item.unpriced_requests,
-            })
+            });
+            if !provider.is_empty() {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("provider".to_string(), json!(provider));
+                    obj.insert("providerLabel".to_string(), json!(provider_label(provider)));
+                }
+            }
+            row
         })
         .collect()
 }

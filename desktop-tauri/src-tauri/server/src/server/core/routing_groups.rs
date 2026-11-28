@@ -50,12 +50,14 @@ impl RequestNeeds {
 
 fn manifest(provider: &str) -> Vec<Value> {
     if let Some(owner) = custom_providers::get(provider) {
-        owner.get("models").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().map(|mut item| {
-            super::model_meta::apply(&mut item);
-            let overrides = capability::normalize_object(item.get("capabilities"));
-            capability::apply_overrides(&mut item, &overrides);
-            item
-        }).collect()
+        owner
+            .get("models")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| custom_providers::enrich_model(&item).0)
+            .collect()
     } else { providers::catalog::manifest_for_provider(provider) }
 }
 
@@ -112,9 +114,36 @@ pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, s
     project_with_vision(group, accounts, needs, scope, None)
 }
 
+fn order_member_accounts(member: &config::RoutingMember, sorting: &super::account_order::AccountSorting) -> Vec<String> {
+    let mut ordered = member.accounts.clone();
+    if member.order_mode() == config::AccountOrderMode::FollowGroup {
+        if let Some(group_order) = sorting.account_order.get(&member.provider) {
+            let positions: HashMap<&str, usize> = group_order
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (id.as_str(), index))
+                .collect();
+            let original: HashMap<&str, usize> = member
+                .accounts
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (id.as_str(), index))
+                .collect();
+            ordered.sort_by_key(|id| {
+                (
+                    positions.get(id.as_str()).copied().unwrap_or(usize::MAX),
+                    original.get(id.as_str()).copied().unwrap_or(usize::MAX),
+                )
+            });
+        }
+    }
+    ordered
+}
+
 pub fn project_with_vision(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>,
     vision: Option<&config::vision_compat::VisionSettings>) -> GroupProjection {
     let mut result = GroupProjection::default();
+    let sorting = super::account_order::sorting(accounts, crate::server::logging::now_ms());
     let by_id: HashMap<_, _> = accounts.iter().filter_map(|account| routing::account_id(account).map(|id| (id, account))).collect();
     let manifests: HashMap<_, _> = group.members.iter().map(|member| member.provider.clone()).collect::<HashSet<_>>()
         .into_iter().map(|id| { let items = manifest(&id); (id, items) }).collect();
@@ -142,7 +171,8 @@ pub fn project_with_vision(group: &RoutingGroup, accounts: &[Value], needs: &Req
             result.blocked.push(json!({ "id": member.id, "memberId": member.id, "provider": member.provider, "model": actual,
                 "name": actual, "state": "excluded", "reason": "该成员没有参与账号" }));
         }
-        for id in &member.accounts {
+        let ordered_ids = order_member_accounts(member, &sorting);
+        for id in &ordered_ids {
             let Some(account) = by_id.get(id.as_str()).filter(|account| routing::provider_of(account) == member.provider) else {
                 result.blocked.push(json!({ "id": id, "memberId": member.id, "provider": member.provider, "model": actual,
                     "name": id, "state": "unavailable", "reason": "参与账号已移除或不属于此提供商" }));
@@ -203,5 +233,35 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
         item["created"] = 0.into();
         item["is_default"] = false.into();
         data.push(item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_member_follows_provider_order_by_default_and_respects_manual_mode() {
+        let accounts = vec![
+            json!({ "id": "a2", "provider": "demo", "priority": 100 }),
+            json!({ "id": "a3", "provider": "demo", "priority": 200 }),
+            json!({ "id": "a1", "provider": "demo", "priority": 300 }),
+        ];
+        let sorting = super::super::account_order::sorting(&accounts, 1_700_000_000_000);
+        let follow = config::RoutingMember {
+            id: "m1".into(),
+            provider: "demo".into(),
+            model: "demo-model".into(),
+            included: true,
+            accounts: vec!["a1".into(), "a2".into(), "missing".into()],
+            account_order_mode: None,
+        };
+        assert_eq!(order_member_accounts(&follow, &sorting), vec!["a2", "a1", "missing"]);
+
+        let manual = config::RoutingMember {
+            account_order_mode: Some(config::AccountOrderMode::Manual),
+            ..follow
+        };
+        assert_eq!(order_member_accounts(&manual, &sorting), vec!["a1", "a2", "missing"]);
     }
 }

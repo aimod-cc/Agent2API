@@ -2,7 +2,7 @@ import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import {
-  Alert, Button, Card, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
+  Button, Card, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
   DialogTitle, Empty, EmptyDescription, EmptyTitle,
 } from '@ui'
 import { InstalledPluginCard, StorePluginCard } from './plugins-cards'
@@ -38,6 +38,7 @@ import { buildUnifiedRows, filterAndSortRows, indexScriptPackages, type UnifiedP
 import type { PluginStatusFilter } from '../../../ui-shared/plugins-filters'
 import { TaskPluginsSection } from '../../../ui-shared/task-plugins-section'
 import { PluginScheduledFilterBar, usePluginsTaskData } from './plugins-scheduled-pane'
+import { PluginErrorBanner, type PluginErrorBannerState } from '../../../ui-shared/plugins-error-banner'
 import '../styles/plugins-page.css'
 
 const VIEW_MODE_KEY = 'agent2api-plugins-view-mode'
@@ -544,13 +545,40 @@ function PluginsPage(): React.ReactElement {
     scheduled: taskData.totalCount,
     scheduledUpdatable: taskData.updatableCount,
   }), [railCounts, taskData.totalCount, taskData.updatableCount])
+
+  React.useEffect(() => {
+    if (!payload) return
+    const taskUpdatable = taskData.loaded ? taskData.updatableCount : (payload.taskUpdateCount ?? 0)
+    bridge().wbApp?.updatePluginsBadge?.(railCounts.updatable + taskUpdatable)
+  }, [payload, railCounts.updatable, taskData.loaded, taskData.updatableCount])
   const toolbarCount = isScheduledRail ? taskData.countMatching(taskStatus, deferredKeyword) : filteredRows.length
   const showCommunityCatalogStatus = (rail === 'all' || rail === 'community') && Boolean(catalog?.error)
   const isMagpieRail = rail === 'magpie-official' || rail === 'magpie-recommended' || rail === 'magpie-third-party'
   const showScriptCatalogStatus = Boolean(
     scripts?.catalog && (isMagpieRail || (rail === 'all' && (scripts.catalog.refreshing || scripts.catalog.marketError || scripts.catalog.githubError)))
   )
-  const topError = isScheduledRail ? taskData.error : (error || syncError || (typeof scriptCtrl.failure === 'string' ? scriptCtrl.failure : ''))
+  const topBanner: PluginErrorBannerState | null = isScheduledRail
+    ? (taskData.error ? {
+      message: taskData.error,
+      retryDisabled: locked,
+      onRetry: () => { void taskData.refresh() },
+      onDismiss: taskData.clearError,
+    } : null)
+    : error ? {
+      message: error,
+      retryDisabled: locked,
+      onRetry: () => { void forceLoad() },
+      onDismiss: () => setError(''),
+    } : syncError ? {
+      message: syncError,
+      retryDisabled: locked,
+      onRetry: () => {
+        void bridge().wbApp?.refresh?.().then(refreshed => {
+          if (mounted.current && refreshed === true) setSyncError('')
+        })
+      },
+      onDismiss: () => setSyncError(''),
+    } : scriptCtrl.failureBanner
 
   const renderRow = (row: UnifiedPluginRow) => {
     const selectionDisabled = locked || batchItemByKey.get(row.selectionKey)?.active === true
@@ -629,7 +657,7 @@ function PluginsPage(): React.ReactElement {
             onScript={handleOpenScript}
             onDiagnostics={handleOpenDiagnostics}
           />
-          {topError ? <Alert variant='destructive' className='whitespace-pre-wrap break-words'>{topError}</Alert> : null}
+          {topBanner ? <PluginErrorBanner {...topBanner} t={t} /> : null}
           {!isScheduledRail && (missing.required.length || missing.bindable.length || missing.unresolved.length) ? <PluginMissingBanner
             count={missing.required.length + missing.bindable.length + missing.unresolved.length}
             accounts={missingAccounts} onOpen={handleOpenMissing} t={t} /> : null}

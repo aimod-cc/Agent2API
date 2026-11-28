@@ -213,9 +213,6 @@ pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> R
         }
         let profile = selected_profile(def, &payload, true)?;
         agents::catalog::validate_profile(state.store(), &profile)?;
-        if action == "quick-connect" {
-            return agents::quick_connect::create_preview(def, &path, &profile, state.port);
-        }
         agents::preview::create(def, &path, &profile, &operation(def, &payload)?, state.port)
     })
     .await
@@ -232,13 +229,9 @@ pub async fn apply_profile(State(state): State<ServerState>, body: Bytes) -> Res
         } else if action == "native-edit" || action == "native-delete" {
             agents::native::apply(def, &path, &payload, state.port)?
         } else {
-            let profile = selected_profile(def, &payload, action == "quick-connect")?;
+            let profile = selected_profile(def, &payload, false)?;
             agents::catalog::validate_profile(state.store(), &profile)?;
-            if action == "quick-connect" {
-                agents::quick_connect::apply(def, &path, &profile, text(&payload, "token"), state.port)?
-            } else {
-                agents::apply::apply(def, &path, &profile, &operation(def, &payload)?, text(&payload, "token"), state.port)?
-            }
+            agents::apply::apply(def, &path, &profile, &operation(def, &payload)?, text(&payload, "token"), state.port)?
         };
         let mut snapshot = agents::snapshot(state.port);
         if let Some(object) = snapshot.as_object_mut() {

@@ -83,8 +83,11 @@ function statusText(
       ? t('已填写：对下游声明 {value}', { value: shown })
       : t('已覆盖：对下游声明 {value}', { value: shown })
   }
-  if (custom) return t('未填写（下游按未声明处理）')
-  if (!has) return t('上游未声明（下游会按不支持处理）')
+  if (!has) {
+    return custom
+      ? t('未填写（下游按未声明处理）')
+      : t('上游未声明（下游会按不支持处理）')
+  }
   if (source === 'gateway') return t('由网关模拟：非上游原生工具能力')
   return source === 'modelsdev'
     ? t('models.dev 补齐：对下游声明 {value}', { value: shown })
@@ -92,19 +95,11 @@ function statusText(
 }
 
 /**
- * 「这一项现在有没有值」的两套判据（这是两家数据源的**唯一**差异）：
- *   · 内置家：看 `capOverrides`（覆盖键列表）—— 值本身从清单来，「有没有
- *     覆盖」才是用户的状态；
- *   · 自定义家：`capOverrides` 恒空（那家没有「上游原值」这回事，见
- *     models-custom-source 的说明），判据换成「这一项填没填」—— 不这样区分，
- *     用户填过的值会被当成未设置：输入框显示为空、保存时被静默清掉。
+ * 这一项是否由用户手动填写 / 覆盖：内置家与自定义家现在统一读后端返回的 `capOverrides`
+ * （`models.dev` 自动补齐的键不计入覆盖，只有用户明确保存的键才进入草稿并标成已覆盖）。
  */
-function setKeysOf(capabilities: ReturnType<typeof capabilitiesOf>, overrides: CapabilityKey[], custom: boolean): CapabilityKey[] {
-  if (!custom) return overrides
-  return CAPABILITY_KEYS.filter(key => {
-    const value = capabilities[key]
-    return value !== undefined && value !== null
-  })
+function setKeysOf(overrides: CapabilityKey[]): CapabilityKey[] {
+  return overrides
 }
 
 /**
@@ -132,7 +127,7 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
   // 模型自己能配的思考档位（`null` = 上游没声明 → 那一块整个不显示）
   const levelsInfo = reasoningLevelsOf(row)
   const capabilities = capabilitiesOf(row)
-  const setKeys = setKeysOf(capabilities, normalizeOverrides(row?.capOverrides), custom)
+  const setKeys = setKeysOf(normalizeOverrides(row?.capOverrides))
   const [draft, setDraft] = React.useState<CapabilityDraft>(() => draftFrom(capabilities, setKeys))
   const [status, setStatus] = React.useState('')
   const [saving, setSaving] = React.useState(false)
@@ -163,15 +158,19 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
   // 保留 `if (!row)` 的收窄 —— 用 row.id 会按 `possibly null` 报错
   const rowId = row.id
   const providerLabel = row.providerLabel || providerLabelOf(context.provider)
-  const inheritLabel = custom ? t('未声明') : t('继承上游')
-  const clearLabel = custom ? t('清除') : t('恢复继承')
+  const inheritLabel = custom ? t('自动识别') : t('继承上游')
+  const clearLabel = custom ? t('恢复默认') : t('恢复继承')
 
-  /** 数值字段的 placeholder：这一项没有值/未覆盖时提示上游值或「未声明」 */
+  /** 数值字段的 placeholder：这一项没有值/未覆盖时提示上游值、models.dev 补齐值或「未声明」 */
   function tokenPlaceholder(key: CapabilityKey): string {
     const current = capabilities[key]
     if (isSet(key)) return ''
-    if (custom) return t('未填写')
-    return typeof current === 'number' ? t('继承上游 {value}', { value: exactTokens(current) }) : t('上游未声明')
+    if (typeof current === 'number') {
+      return capSourceOf(row, key) === 'modelsdev'
+        ? t('models.dev 补齐 {value}', { value: exactTokens(current) })
+        : t('继承上游 {value}', { value: exactTokens(current) })
+    }
+    return custom ? t('未填写') : t('上游未声明')
   }
 
   /** 这一项当前有没有值（判据见 setKeysOf） */
@@ -230,7 +229,7 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
                 <Label htmlFor={`cap-${key}`}>{CAPABILITY_LABELS[key]}</Label>
                 {isSet(key) ? (
                   <Button variant='ghost' size='2xs' disabled={saving}
-                    title={custom ? t('清除这一项（回到未声明）') : t('清除覆盖，回到上游声明值')}
+                    title={custom ? t('清除手动填写（恢复自动识别或未声明）') : t('清除覆盖，回到上游声明值')}
                     onClick={() => setValue(key, '')}>{clearLabel}</Button>
                 ) : null}
               </div>
@@ -290,7 +289,7 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
             <code>/v1/models</code>{t(' 里的 ')}<code>max_input_tokens</code> / <code>supports_*</code>{t(' 与 ')}<code>input_modalities</code>
             {t('），下游按它们决定发不发图片、按多大的窗口堆历史。')}
             <b>{t('不影响网关的转发与路由')}</b>{t('。上游清单给的值不准时，在这里改；')}
-            {custom ? t('这家的清单是你自己登记的，不填的项下游按未声明处理。') : t('「恢复继承」会把这一项交还给上游清单的值。')}
+            {custom ? t('未手动填写的项会自动复用 models.dev 识别结果，未收录的按未声明处理。') : t('「恢复继承」会把这一项交还给上游清单的值。')}
           </p>
           {/* 状态行：高度固定，出现错误时弹窗不跳高 */}
           <div className='min-h-[18px] text-xs text-subtle'>{status}</div>

@@ -82,7 +82,7 @@ fn preview_json(state: &ServerState, payload: Preview) -> Value {
     let mut member_blocked = Vec::new();
     let group = payload.group.or_else(|| profiles.group_for_model(&payload.model).cloned());
     let mut candidates = if let Some(group) = &group {
-        settings = group.settings(base);
+        settings = group.settings(profiles.settings_for("", base));
         let projection = routing_groups::project(group, &accounts, &payload.needs, None);
         member_blocked = projection.blocked;
         projection.accounts
@@ -96,6 +96,7 @@ fn preview_json(state: &ServerState, payload: Preview) -> Value {
         }
         settings = snapshot.settings_for(&payload.model, base);
         let profile = if let Some(mut profile) = global_draft {
+            profile.account_order_mode.clear();
             let sorting = crate::server::core::account_order::sorting(&accounts, crate::server::logging::now_ms());
             for (provider, rules) in &sorting.rules {
                 let automatic = rules.iter().any(|rule| sorting.rule_enabled(provider, rule));
@@ -128,7 +129,8 @@ fn preview_json(state: &ServerState, payload: Preview) -> Value {
     let limiter = candidates.iter().filter(|account| crate::server::core::limiter::evaluate::blocked(account, &keys.for_account(account), &facts, &counters, now))
         .map(routing_groups::attempt_key).collect();
     let meta = routing::PlanMeta { strategy: settings.strategy, sunk: &sunk, resting: &resting, open: &open,
-        limiter_blocked: &limiter, cursor: None, provider_cursors: None, sticky_account: None };
+        limiter_blocked: &limiter, cursor: None, provider_cursors: None, sticky_account: None,
+        sticky_beats_order: settings.priority.sticky_beats_order() };
     let mut plan = routing::plan_route(&candidates, &keys, &counts, &[], now, &meta);
     if payload.fail_first {
         if let Some(first) = plan.ordered.first() {
@@ -145,6 +147,6 @@ fn preview_json(state: &ServerState, payload: Preview) -> Value {
     let mut blocked: Vec<_> = plan.blocked.iter().map(row).collect(); blocked.extend(member_blocked);
     json!({ "model": payload.model, "customized": group.is_some() || profiles.model_profile(&payload.model).is_some(),
         "group": group, "preview": true, "settings": super::routing_api::routing_json(settings),
-        "queue": { "strategy": settings.strategy.as_str(), "sticky": settings.sticky.as_str(),
+        "queue": { "strategy": settings.strategy.as_str(), "sticky": settings.sticky.as_str(), "priority": settings.priority.as_str(),
             "pickedId": plan.ordered.first().map(|entry| &entry.id), "ordered": plan.ordered.iter().map(row).collect::<Vec<_>>(), "blocked": blocked } })
 }

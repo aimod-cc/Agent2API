@@ -172,11 +172,13 @@ export async function addModel(model: string): Promise<boolean> {
   const workspace = await bridge().getRoutingWorkspace(model)
   const profile = independentProfile(workspace.profile)
   profile.excludedAccounts = profile.excludedAccounts.filter(id => workspace.accounts.some(account => account.id === id))
+  profile.accountOrderMode = { ...(profile.accountOrderMode || {}) }
   for (const provider of workspace.providers) {
     if (!profile.providers.includes(provider.id)) {
       profile.providers.push(provider.id)
       if (profile.providerScope === 'selected') profile.disabledProviders.push(provider.id)
     }
+    profile.accountOrderMode[provider.id] = 'followGroup'
     if (!profile.accountOrder[provider.id]) {
       profile.accountOrder[provider.id] = workspace.accounts.filter(account => account.provider === provider.id)
         .sort((left, right) => Number(left.priority) - Number(right.priority)).map(account => account.id)

@@ -48,7 +48,9 @@ pub(super) fn write(value: &mut Value, profile: &Profile, provider: &str) -> Res
         smart.retain(|rule| !matches(rule));
         manual.retain(|rule| !matches(rule));
         if entry.get("config").is_none_or(Value::is_null) { entry["config"] = json!({}); }
-        if profile.id == "quick-zcode" { set(&mut entry, &["config", "enabled"], json!(true))?; }
+        if profile.enabled && entry.pointer("/config/enabled").is_none() {
+            set(&mut entry, &["config", "enabled"], json!(true))?;
+        }
         if let Some(value) = model.context_window { set(&mut entry, &["config", "properties", "contextWindow"], json!(value))?; }
         if let Some(value) = model.max_output_tokens { set(&mut entry, &["config", "optionSpecs", "maxOutputTokens", "max"], json!(value))?; }
         if let Some(value) = model.supports_tools { set(&mut entry, &["config", "properties", "supportsToolCall"], json!(value))?; }

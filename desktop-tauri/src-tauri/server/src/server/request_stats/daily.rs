@@ -15,7 +15,7 @@
 //! 推进总量会让「各维之和 = 当天总量」变成两处维护。一天只有一行、数组通常
 //! 几十条，一个事务里读-改-写的代价可以接受。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::{params, Connection};
 
@@ -161,4 +161,53 @@ pub(super) fn count_daily(conn: &Connection) -> rusqlite::Result<usize> {
 /// 清空全部聚合行（`clear()` 用）
 pub(super) fn delete_all_daily(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM request_daily", [])
+}
+
+/// 为历史日报中尚未记录 `provider` 的账号补查所属提供商：
+/// 先查 `accounts` 表（主键定位，覆盖已启用及插件停用/隐藏的账号），
+/// 未命中时再按 `idx_requests_account_ts` 查最近一条带提供商的明细（覆盖已删除账号）。
+pub(super) fn resolve_account_providers(
+    conn: &Connection,
+    account_ids: &[String],
+) -> rusqlite::Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    if account_ids.is_empty() {
+        return Ok(out);
+    }
+    let mut stmt_account = conn
+        .prepare("SELECT provider FROM accounts WHERE id = ?1 LIMIT 1")
+        .ok();
+    let mut stmt_request = conn
+        .prepare(
+            "SELECT provider FROM requests \
+             WHERE account_id = ?1 AND provider <> '' AND provider <> 'local-direct' \
+             ORDER BY ts DESC LIMIT 1",
+        )
+        .ok();
+    for id in account_ids {
+        let trimmed = id.trim();
+        if trimmed.is_empty() || out.contains_key(trimmed) {
+            continue;
+        }
+        let from_account = stmt_account.as_mut().and_then(|stmt| {
+            stmt.query_row(params![trimmed], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && value != "local-direct")
+        });
+        if let Some(provider) = from_account {
+            out.insert(trimmed.to_string(), provider);
+            continue;
+        }
+        let from_request = stmt_request.as_mut().and_then(|stmt| {
+            stmt.query_row(params![trimmed], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && value != "local-direct")
+        });
+        if let Some(provider) = from_request {
+            out.insert(trimmed.to_string(), provider);
+        }
+    }
+    Ok(out)
 }

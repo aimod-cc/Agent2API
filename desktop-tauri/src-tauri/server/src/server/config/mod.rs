@@ -1952,6 +1952,12 @@ pub fn set_routing(patch: RoutingPatch) -> bool {
                 .insert(KEY_ROUTING_STICKY.to_string(), Value::from(sticky.as_str()));
             next.sticky = sticky;
         }
+        if let Some(priority) = patch.priority {
+            config
+                .raw
+                .insert(KEY_ROUTING_PRIORITY.to_string(), Value::from(priority.as_str()));
+            next.priority = priority;
+        }
         let mut write_bool = |key: &str, value: bool, slot: &mut bool| {
             config.raw.insert(key.to_string(), Value::Bool(value));
             *slot = value;

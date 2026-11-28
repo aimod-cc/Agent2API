@@ -4,18 +4,22 @@ import type { AccountRecord, AccountSorting, BatchAccountsPayload, BatchAccounts
 export type RouteOrderChange = { kind: 'provider' } | { kind: 'account'; provider: string }
 
 export type RouteProviderScope = 'all' | 'selected'
+export type RouteAccountOrderMode = 'followGroup' | 'manual'
+export type RoutePriority = 'sticky' | 'consumption'
 
 export type RouteProfile = {
   providerScope?: RouteProviderScope
   providers: string[]
   disabledProviders: string[]
   accountOrder: Record<string, string[]>
+  accountOrderMode?: Record<string, RouteAccountOrderMode>
   excludedAccounts: string[]
   strategy?: string
   sticky?: string
+  priority?: string
 }
-export type RouteMember = { id: string; provider: string; model: string; included: boolean; accounts: string[] }
-export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; members: RouteMember[] }
+export type RouteMember = { id: string; provider: string; model: string; included: boolean; accounts: string[]; accountOrderMode?: RouteAccountOrderMode }
+export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; priority?: string; members: RouteMember[] }
 export type RouteModelChoice = { provider: string; providerLabel: string; model: string; name: string; accountCount: number;
   capabilities: { supportsToolCall?: boolean | null; supportsImages?: boolean | null; supportsVideo?: boolean | null; supportsReasoning?: boolean | null; maxInputTokens?: number | null; maxOutputTokens?: number | null } }
 export type RouteGroups = { groups: Array<{ group: RouteGroup; revision: string }>; newRevision: string; catalog: RouteModelChoice[] }
@@ -38,6 +42,7 @@ export type RouteEntry = {
 export type RouteDecision = {
   strategy?: string
   sticky?: string
+  priority?: string
   stickyHit?: boolean
   picked?: string
   pickedCandidate?: string
@@ -45,7 +50,7 @@ export type RouteDecision = {
   stickyId?: string
   sessionId?: string
   sessionSource?: string
-  configSnapshot?: { groupId?: string; groupName?: string; members?: Array<Omit<RouteMember, 'accounts'> & { accountCount: number }>; capturedAt: number; scope: string; strategy: string; sticky: string; providerScope?: RouteProviderScope; accountCount?: number; providerCount?: number }
+  configSnapshot?: { groupId?: string; groupName?: string; members?: Array<Omit<RouteMember, 'accounts'> & { accountCount: number }>; capturedAt: number; scope: string; strategy: string; sticky: string; priority?: string; providerScope?: RouteProviderScope; accountCount?: number; providerCount?: number }
   orderedTotal?: number
   blockedTotal?: number
   ordered?: RouteEntry[]
@@ -54,6 +59,7 @@ export type RouteDecision = {
 export type RouteSettings = {
   routingStrategy: string
   routingSticky: string
+  routingPriority?: string
   routingFailoverBackoff: boolean
   routingSink: boolean
   routingBreakerEnabled: boolean
@@ -75,7 +81,7 @@ export type RoutingWorkspace = {
   providers: Array<{ id: string; label: string; accountCount: number; custom: boolean; available: boolean }>
   accounts: AccountRecord[]
   sorting: AccountSorting
-  queue: { strategy: string; sticky: string; pickedId: string; ordered: RouteEntry[]; blocked: RouteEntry[]; lastRequestModel?: string }
+  queue: { strategy: string; sticky: string; priority?: string; pickedId: string; ordered: RouteEntry[]; blocked: RouteEntry[]; lastRequestModel?: string }
   settings: RouteSettings
   globalSettings?: RouteSettings
   revision?: string

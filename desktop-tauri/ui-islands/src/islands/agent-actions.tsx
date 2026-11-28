@@ -1,5 +1,6 @@
 import * as React from 'react'
-import { Button, Popover, PopoverContent, PopoverTrigger } from '@ui'
+import { Button, Popover, PopoverContent, PopoverTrigger, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { t } from '../i18n'
 
 export type AgentIconName =
   | 'plus'
@@ -9,7 +10,6 @@ export type AgentIconName =
   | 'chevron'
   | 'refresh'
   | 'folder'
-  | 'bolt'
   | 'radar'
   | 'sliders'
   | 'trash'
@@ -25,7 +25,6 @@ export function AgentIcon({ name, size = 16 }: { name: AgentIconName; size?: num
     chevron: <path d='m6 9 6 6 6-6' />,
     refresh: <path d='M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M8 16H3v5' />,
     folder: <path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z' />,
-    bolt: <path d='M13 2 4 14h7l-1 8 9-12h-7l1-8Z' />,
     radar: <><circle cx='12' cy='12' r='2' /><path d='M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14' /></>,
     sliders: <path d='M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4' />,
     trash: <path d='M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6' />,
@@ -48,6 +47,16 @@ export function AgentIcon({ name, size = 16 }: { name: AgentIconName; size?: num
       {paths[name]}
     </svg>
   )
+}
+
+export function AgentSelect({ value, options, onChange, disabled, label }: {
+  value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void; disabled?: boolean; label: string
+}) {
+  const selected = options.find(option => option.value === value)?.label || value || t('请选择')
+  return <Select value={value} disabled={disabled} onValueChange={next => { if (typeof next === 'string') onChange(next) }}>
+    <SelectTrigger aria-label={label} title={selected} className='w-full'><SelectValue>{selected}</SelectValue></SelectTrigger>
+    <SelectContent>{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+  </Select>
 }
 
 export function AgentActions({ label, disabled, actions }: {

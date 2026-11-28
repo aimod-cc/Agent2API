@@ -264,6 +264,7 @@ export function RoutingPage() {
             specialKey === 'title' ? <TitleSpecialPanel editor={titleEditor} /> :
               groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
                 reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
+                globalPriority={workspace?.globalSettings?.routingPriority || workspace?.settings.routingPriority || 'sticky'}
                 onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} lastUsed={modelLastUsed}
                 refreshToken={replay.refreshToken} paused={pageEditor.busy} onWorkspace={replay.acceptWorkspace} /> :
                 <RoutingConfigPanel key={editor.scope} editor={pageEditor} scope={editor.scope} now={replay.now} accountControl={accountControl}
@@ -303,7 +304,7 @@ export function RoutingPage() {
     {modal?.kind === 'sort' ? <GroupSettingsDialog key={modal.id} provider={modal.id} onClose={close}
       accounts={workspace?.accounts} sorting={sorting}
       routeContext={groups.selected || editor.scope && editor.draft?.mode !== 'inherit'
-        ? <p className='routing-config-note'>{t('这里调整的是账号组的全局消耗规则；当前独立路由的账号顺序保持不变。')}</p> : undefined} /> : null}
+        ? <p className='routing-config-note'>{t('这里调整的是提供商组的全局消耗规则；设为「跟随提供商组」的路由会同步生效，设为「本路由手动」的不受影响。')}</p> : undefined} /> : null}
     {modal?.kind === 'account' ? <AccountSettingsDialog key={modal.id} id={modal.id} initialAccount={replay.workspace?.accounts.find(account => account.id === modal.id) || workspace?.accounts.find(account => account.id === modal.id)} onClose={close}
       routeContext={<p className='routing-config-note'>{t('账号设置与所有路由共用，不改变当前路由的参与名单。')}</p>} /> : null}
   </>

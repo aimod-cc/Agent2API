@@ -484,6 +484,34 @@ impl RequestStats {
         };
         let (daily, cache_totals, entries, has_local_direct) = loaded.unwrap_or_default();
         let mut summary = summarize(&daily, &cache_totals, &entries, range, now, custom);
+        if let Some(rows) = summary.get_mut("accounts").and_then(Value::as_array_mut) {
+            let missing: Vec<String> = rows
+                .iter()
+                .filter_map(|row| {
+                    let id = row.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+                    let provider = row.get("provider").and_then(Value::as_str).map(str::trim).unwrap_or("");
+                    (!id.is_empty() && provider.is_empty()).then(|| id.to_string())
+                })
+                .collect();
+            if !missing.is_empty() {
+                let resolved = {
+                    let guard = self.guard();
+                    self.with_conn(&guard, |conn| daily::resolve_account_providers(conn, &missing))
+                }
+                .unwrap_or_default();
+                for row in rows {
+                    let Some(id) = row.get("id").and_then(Value::as_str).map(str::trim) else {
+                        continue;
+                    };
+                    if let Some(provider) = resolved.get(id) {
+                        if let Some(obj) = row.as_object_mut() {
+                            obj.insert("provider".to_string(), json!(provider));
+                            obj.insert("providerLabel".to_string(), json!(provider_label(provider)));
+                        }
+                    }
+                }
+            }
+        }
         let start = summary["startDate"].as_str().unwrap_or("");
         let end = summary["endDate"].as_str().unwrap_or("");
         let client_models = client.and_then(|client_id| {

@@ -16,6 +16,7 @@ export type PluginsTaskData = {
   totalCount: number
   load: () => Promise<void>
   refresh: () => Promise<void>
+  clearError: () => void
   countMatching: (status: PluginStatusFilter, keyword: string) => number
 }
 
@@ -115,6 +116,10 @@ export function usePluginsTaskData(): PluginsTaskData {
     return visibleInstalled.length + visibleStore.length
   }, [payload])
 
+  const clearError = React.useCallback(() => {
+    setError('')
+  }, [])
+
   return {
     payload,
     loaded,
@@ -126,6 +131,7 @@ export function usePluginsTaskData(): PluginsTaskData {
     totalCount,
     load,
     refresh,
+    clearError,
     countMatching,
   }
 }

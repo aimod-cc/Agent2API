@@ -23,10 +23,9 @@ import {
 } from '@ui'
 import { t } from '../i18n'
 import { SearchableSelect } from '../../../ui-shared/searchable-select'
-import { AgentIcon } from './agent-actions'
+import { AgentIcon, AgentSelect } from './agent-actions'
 import { catalogModel, refreshCatalogModels, useAgentCatalog, type CatalogModel } from './agent-catalog'
-import { AgentSelect } from './agent-fields'
-import { cloneProfile, profileSignature, protocolLabel, validateDraft } from './agent-model'
+import { cloneProfile, fillDefaultProfile, profileSignature, protocolLabel, validateDraft } from './agent-model'
 import { WritePreview } from './agent-preview'
 import {
   ClaudeMappingWorkspace,
@@ -37,8 +36,7 @@ import {
   SingleModelWorkspace,
   SplitModelsWorkspace,
 } from './agent-profile-models'
-import { fillQuickProfile } from './agent-quick-model'
-import { applyProfile, confirm, errorMessage, getAgentStore, requestPreview, saveConfiguration, toast } from './agent-state'
+import { applyProfile, confirm, errorMessage, getAgentStore, requestPreview, saveConfiguration, subscribeAgentStore, toast } from './agent-state'
 import type { AgentClient, AgentPreview, AgentProfile } from './agent-types'
 
 function gatewayUrlFor(gateway: string, protocol: string): string {
@@ -72,9 +70,10 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
   creating: boolean
   onClose: () => void
 }) {
-  const store = getAgentStore()
+  const store = React.useSyncExternalStore(subscribeAgentStore, getAgentStore, getAgentStore)
   const native = Boolean(profile.liveId)
   const isClaude = client.id === 'claude-code'
+  const canApplyDirectly = !native && client.writable && client.detected
   const [draft, setDraft] = React.useState(() => cloneProfile(profile))
   const [claudeDefaultTier, setClaudeDefaultTier] = React.useState<ClaudeTierKey>(() => detectClaudeDefaultTier(profile))
   const [advancedOpen, setAdvancedOpen] = React.useState(false)
@@ -98,7 +97,7 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
   const previousCatalog = React.useRef<CatalogModel[]>([])
   const initialized = React.useRef(!creating)
   const dirty = profileSignature(draft) !== initial.current
-  const operation = 'config-edit' as const
+  const operation = native ? ('config-edit' as const) : ('config-save-use' as const)
   const busy = saving || previewing
 
   const single = ['codex', 'claude-code'].includes(client.id) && !draft.baseUrl && draft.authMode === 'preserve' && !draft.models.length
@@ -123,15 +122,22 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
             || catalog.find(item => item.supportsTools === true)
             || catalog[0]
           if (!preferred) return current
-          return {
+          const next = {
             ...current,
             model: preferred.id,
             claudeModels: { opus: preferred.id, sonnet: preferred.id, haiku: preferred.id, subagent: preferred.id },
           }
+          if (profileSignature(current) === initial.current) initial.current = profileSignature(next)
+          return next
         })
         return
       }
-      setDraft(current => current.models.length || current.model ? current : fillQuickProfile(client, current, catalog, store.defaultModel))
+      setDraft(current => {
+        if (current.models.length || current.model) return current
+        const next = fillDefaultProfile(client, current, catalog, store.defaultModel)
+        if (profileSignature(current) === initial.current) initial.current = profileSignature(next)
+        return next
+      })
       return
     }
     if (!previous.length || !client.supportsModels) return
@@ -186,21 +192,40 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
     return { ...source, model: fallbackModel, models: nextModels }
   }
 
+  const isGateway = draft.kind === 'gateway'
+  const requiresGatewayKey = isGateway && draft.authMode === 'gateway' && client.id !== 'zed' && store.requiresKey
+  const selectedGatewayKey = draft.gatewayKeyId
+    ? store.gatewayKeys.find(key => key.id === draft.gatewayKeyId)
+    : store.gatewayKeys[0]
+  const missingGatewayKey = requiresGatewayKey && !selectedGatewayKey
+
+  const collectUnavailable = (source: AgentProfile): string[] => {
+    if (source.kind !== 'gateway' || source.authMode !== 'gateway' || catalogLoading || catalogError) return []
+    const raw = isClaude
+      ? [source.model, ...Object.values(source.claudeModels), ...source.models.map(m => m.id)]
+      : validationClient.supportsModels
+        ? [source.model, ...source.models.map(m => m.id)]
+        : [source.model]
+    const ids = [...new Set(raw.map(id => id.trim()).filter(Boolean))]
+    const allowed = new Set(catalog.map(item => item.id.toLowerCase()))
+    return ids.filter(id => !allowed.has(id.toLowerCase()))
+  }
+  const unavailableModels = React.useMemo(
+    () => collectUnavailable(draft),
+    [draft, isClaude, validationClient.supportsModels, catalogLoading, catalogError, catalog]
+  )
+
   const close = async () => {
     if (saving) return
     if (dirty && !await confirm(t('放弃未保存的修改？'), t('关闭后丢弃本次修改，不会保存配置或改动客户端。'), t('放弃修改'))) return
     onClose()
   }
 
-  const save = async () => {
-    if (saving) return
+  const saveOnly = async () => {
+    if (busy) return
     const prepared = prepareForSubmit(draft)
     const message = validateDraft(validationClient, prepared)
     if (message) { setError(message); return }
-    if (native) {
-      await showPreview(prepared)
-      return
-    }
     setSaving(true); setError('')
     try {
       await saveConfiguration(previewClient, prepared, creating)
@@ -208,11 +233,24 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
     } catch (err) { setError(errorMessage(err)); setSaving(false) }
   }
 
+  const saveAndApply = async () => {
+    if (busy) return
+    const prepared = prepareForSubmit(draft)
+    if (missingGatewayKey) { setError(t('请先在「网关 Key」页创建并启用一把 Key')); return }
+    const message = validateDraft(validationClient, prepared)
+    if (message) { setError(message); return }
+    if (collectUnavailable(prepared).length) {
+      setError(t('部分已选模型已不可用或所选 Key 无权使用，请移除或更换 Key。'))
+      return
+    }
+    await showPreview(prepared)
+  }
+
   const showPreview = async (prepared: AgentProfile) => {
     const generation = ++previewGeneration.current
     setPreviewing(true); setError('')
     try {
-      const result = await requestPreview(previewClient, prepared, operation)
+      const result = await requestPreview(previewClient, prepared, operation, creating)
       if (generation === previewGeneration.current) { setDraft(prepared); setPreview(result); setConfirming(true) }
     } catch (err) {
       if (generation === previewGeneration.current) setError(errorMessage(err))
@@ -224,12 +262,11 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
   const apply = async () => {
     if (!preview || saving) return
     setSaving(true); setError('')
-    try { await applyProfile(previewClient, draft, operation, preview); onClose() }
+    try { await applyProfile(previewClient, draft, operation, preview, creating); onClose() }
     catch (err) { setError(errorMessage(err)); setPreview(null); setConfirming(false) }
     finally { setSaving(false) }
   }
 
-  const isGateway = draft.kind === 'gateway'
   const connectionMode: 'gateway' | 'custom' = isGateway ? 'gateway' : 'custom'
   const authOptions = client.id === 'zed'
     ? [{ value: 'preserve', label: t('在客户端管理认证') }]
@@ -471,10 +508,19 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
                 </Collapsible>
               </section>
 
-              {isGateway && catalogError ? (
+              {missingGatewayKey ? (
+                <Alert variant='warning' className='shrink-0'>{t('请先在「网关 Key」页创建并启用一把 Key')}</Alert>
+              ) : isGateway && catalogError ? (
                 <Alert variant='warning' className='flex shrink-0 items-center justify-between gap-3'>
                   <span>{t('模型目录读取失败，可手动填写真实模型 ID。')} {catalogError}</span>
                   <Button variant='outline' size='xs' onClick={retryCatalog} disabled={busy}>{t('重试')}</Button>
+                </Alert>
+              ) : isGateway && !catalogLoading && !catalog.length ? (
+                <Alert variant='warning' className='shrink-0'>{t('所选 Key 下没有可用的对话模型，请先启用模型或更换 Key。')}</Alert>
+              ) : unavailableModels.length > 0 ? (
+                <Alert variant='warning' className='shrink-0'>
+                  {t('部分已选模型已不可用或所选 Key 无权使用，请移除或更换 Key。')}
+                  <code className='mt-1 block break-all'>{unavailableModels.join('、')}</code>
                 </Alert>
               ) : null}
 
@@ -543,12 +589,28 @@ export function ProfileDialog({ client, profile, creating, onClose }: {
           ) : null}
           <span className='mr-auto truncate text-xs text-muted-foreground'>{!confirming ? summaryText : ''}</span>
           <Button variant='outline' disabled={busy} onClick={() => void close()}>{t('取消')}</Button>
-          <Button
-            disabled={busy || (!creating && !dirty) || (confirming && !preview)}
-            onClick={() => void (confirming ? apply() : save())}
-          >
-            {saving ? t('保存中…') : previewing ? t('处理中…') : confirming ? t('确认保存') : native ? t('预览并保存') : t('保存')}
-          </Button>
+          {confirming ? (
+            <Button disabled={busy || !preview} onClick={() => void apply()}>
+              {saving ? t('保存中…') : native ? t('确认保存') : t('确认应用')}
+            </Button>
+          ) : canApplyDirectly ? (
+            <>
+              <Button variant='outline' disabled={busy || (!creating && !dirty)} onClick={() => void saveOnly()}>
+                {saving ? t('保存中…') : t('仅保存')}
+              </Button>
+              <Button disabled={busy || (isGateway && catalogLoading)} onClick={() => void saveAndApply()}>
+                {previewing ? t('处理中…') : t('保存并应用')}
+              </Button>
+            </>
+          ) : native ? (
+            <Button disabled={busy || !dirty} onClick={() => void saveAndApply()}>
+              {previewing ? t('处理中…') : t('预览并保存')}
+            </Button>
+          ) : (
+            <Button disabled={busy || (!creating && !dirty)} onClick={() => void saveOnly()}>
+              {saving ? t('保存中…') : t('保存')}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

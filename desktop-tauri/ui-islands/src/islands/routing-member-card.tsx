@@ -5,24 +5,33 @@ import { displayNameOf, providerOf } from './accounts-domain'
 import type { AccountRecord, AccountSorting } from './accounts-shared'
 import { RoutingConsumptionOrder } from './routing-account-order'
 import type { RoutingCanvasActivity } from './routing-canvas-activity'
-import type { RouteMember } from './routing-types'
+import type { RouteAccountOrderMode, RouteMember } from './routing-types'
 import type { useRoutingDrag } from './routing-drag'
 import { RoutingAccountRow, RoutingActions, RoutingProviderMark, routingOrderKey } from './routing-canvas-controls'
 import { RouteIcon } from './routing-ui'
 
 export function RoutingMemberCard({ member, accounts, label, name, index, first, last, open, locked, query, drag, sorting, now, activity,
-  onOpen, onJoin, onMove, onAccounts, onToggleAccount, onMoveAccount, onAccount, onSort }: {
+  onOpen, onJoin, onMove, onAccounts, onToggleAccount, onMoveAccount, onOrderMode, onAccount, onSort }: {
   member: RouteMember; accounts: AccountRecord[]; label: string; name: string; index: number; first: boolean; last: boolean; open: boolean; locked: boolean; query: string
   drag: ReturnType<typeof useRoutingDrag>; onOpen(open: boolean): void; onJoin(on: boolean): void; onMove(direction: number): void
-  onAccounts(): void; onToggleAccount(id: string): void; onMoveAccount(id: string, direction: number): void; onAccount(id: string): void
-  sorting?: AccountSorting | null; now: number; activity: RoutingCanvasActivity; onSort(): void
+  onAccounts(): void; onToggleAccount(id: string): void; onMoveAccount(id: string, direction: number): void; onOrderMode(mode: RouteAccountOrderMode): void
+  onAccount(id: string): void; sorting?: AccountSorting | null; now: number; activity: RoutingCanvasActivity; onSort(): void
 }) {
   const available = accounts.filter(account => providerOf(account) === member.provider)
   const runningAccounts = activity.members[member.id] || {}
-  const order = [...new Set([...member.accounts, ...available.map(account => account.id), ...Object.keys(runningAccounts)])]
+  const orderMode: RouteAccountOrderMode = member.accountOrderMode === 'manual' ? 'manual' : 'followGroup'
+  const followGroup = orderMode === 'followGroup'
+  const liveOrder = followGroup ? sorting?.accountOrder?.[member.provider] : undefined
+  const joinedOrder = React.useMemo(() => {
+    if (!liveOrder?.length) return member.accounts
+    const rank = new Map(liveOrder.map((id, i) => [id, i]))
+    return [...member.accounts].sort((a, b) => (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER))
+  }, [liveOrder, member.accounts])
+  const order = [...new Set([...joinedOrder, ...(liveOrder || []), ...available.map(account => account.id), ...Object.keys(runningAccounts)])]
   const searchingMember = `${label} ${name} ${member.model}`.toLowerCase().includes(query)
   const orderLocked = locked || Boolean(query)
   const accountDrag = drag.state?.kind === 'account' && drag.state.provider === member.id ? drag.state : null
+  const orderHint = followGroup ? t('当前跟随提供商组顺序，切为「本路由手动」后可单独调整') : undefined
   return <Collapsible render={<section />} open={open} onOpenChange={onOpen} data-route-sort={member.included ? member.id : undefined}
     data-route-node={member.id} data-route-connected={member.included ? '' : undefined} data-route-expanded={open ? '' : undefined}
     data-route-running={Object.values(runningAccounts).some(count => count > 0) ? '' : undefined} className={cn('routing-config-provider', !member.included && 'is-off',
@@ -45,7 +54,8 @@ export function RoutingMemberCard({ member, accounts, label, name, index, first,
         { label: t('参与账号'), icon: 'accounts', disabled: locked, onClick: onAccounts },
       ]} />
     </header>
-    <RoutingConsumptionOrder provider={member.provider} sorting={sorting} independent disabled={locked} onSettings={onSort} />
+    <RoutingConsumptionOrder provider={member.provider} sorting={sorting} independent disabled={locked}
+      orderMode={orderMode} onOrderModeChange={onOrderMode} onSettings={onSort} />
     <CollapsibleContent className='routing-config-accounts'>
       <div className='routing-member-summary'><span>{t('{selected} / {total} 个账号参与', { selected: member.accounts.length, total: available.length })}</span>
         <Button variant='link' size='sm' disabled={locked} onClick={onAccounts}>{t('选择账号')}</Button></div>
@@ -54,13 +64,13 @@ export function RoutingMemberCard({ member, accounts, label, name, index, first,
         {order.filter(id => member.accounts.includes(id) === joined).filter(id => !query || searchingMember
           || displayNameOf(available.find(account => account.id === id)).toLowerCase().includes(query)).map(id => {
           const account = available.find(item => item.id === id)
-          const rank = member.accounts.indexOf(id)
+          const rank = joinedOrder.indexOf(id)
           const state = !account ? 'missing' : account.enabled === false ? 'disabled' : account.hasCredentials === false ? 'no-credentials' : 'enabled'
           return <RoutingAccountRow key={id} id={id} account={account} rank={rank + 1} joined={joined} state={state}
             sorting={sorting} now={now} settingsDisabled={locked} running={(runningAccounts[id] || 0) > 0}
             note={[(runningAccounts[id] || 0) > 0 ? t('{n} 在途', { n: runningAccounts[id] }) : '', joined ? t('参与本路由') : t('未参与本路由')].filter(Boolean).join(' · ')}
-            locked={locked || !member.included} orderLocked={orderLocked || !member.included}
-            first={rank === 0} last={rank === member.accounts.length - 1} dragging={accountDrag?.id === id}
+            locked={locked || !member.included} orderLocked={orderLocked || followGroup || !member.included} orderHint={orderHint}
+            first={rank === 0} last={rank === joinedOrder.length - 1} dragging={accountDrag?.id === id}
             drop={accountDrag?.target === id ? accountDrag.after ? 'after' : 'before' : undefined}
             onDrag={event => drag.start(event, 'account', member.id, id)} onMove={direction => onMoveAccount(id, direction)}
             onToggle={() => onToggleAccount(id)} onAccount={account ? () => onAccount(id) : undefined} />

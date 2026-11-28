@@ -616,6 +616,7 @@ export function testModelOnline(
 export type RouteSettings = {
   routingStrategy?: string
   routingSticky?: string
+  routingPriority?: string
   routingFailoverBackoff?: boolean
   routingSink?: boolean
   routingBreakerEnabled?: boolean
@@ -638,6 +639,7 @@ export type RouteQueueEntry = {
 export type RouteQueuePayload = {
   strategy?: string
   sticky?: string
+  priority?: string
   model?: string | null
   lastRequestModel?: string | null
   pickedId?: string

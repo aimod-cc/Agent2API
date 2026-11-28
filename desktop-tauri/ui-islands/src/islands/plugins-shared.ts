@@ -11,6 +11,7 @@ export type PluginBridge = {
     toast?: (message: string, kind?: 'err' | 'ok' | 'warn') => void
     refresh?: () => Promise<boolean>
     refreshPluginPages?: (payload?: PluginMutation) => Promise<void> | void
+    updatePluginsBadge?: (count: number) => void
     showPage?: (page: string) => void
     readonly currentPage?: string
   }

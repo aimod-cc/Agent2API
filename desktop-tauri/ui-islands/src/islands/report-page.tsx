@@ -143,22 +143,46 @@ function TipQ({ text }: { text: string }) {
 }
 
 /**
+ * 从本机直连虚拟账号 ID（`local-direct:<provider>:<identity>`）提取提供商 ID，
+ * 兜底旧版后端未返回 `provider` 字段的情况。
+ */
+function inferLocalDirectProvider(accountId: string): string {
+  if (!accountId.startsWith('local-direct:')) return ''
+  const seg = accountId.slice('local-direct:'.length).split(':')[0]?.trim() || ''
+  return seg && seg.toLowerCase() !== 'unknown' ? seg : ''
+}
+
+/**
  * 账号行的提供商徽章：与账号页「提供商」列**同一枚**（`pbadge p-<provider>`，配色按
  * provider id 生成，带 edition 的家把「国际版 / 国内版」拼在同一枚里，判定走
  * wbAccountsModel.editionSuffix）。
  *
- * 查的是**当前账号表**（wbApp 的状态）：报表聚合里没有 provider 维度，后端补这一维要动记账
- * 链路且历史数据没有；而「这条账号属于哪家」现查现用就是准确的。账号已删除（聚合里的历史名字
- * 快照）或后端的「未知账号」行查不到归属，不给徽章 —— 空壳徽章是噪音。
+ * 优先匹配当前账号表（保留国内版 / 国际版等账号级后缀），未命中时（本机直连 Antigravity、
+ * 插件停用隐藏账号、已删除账号或首屏账号表未到达）回退到后端返回的 provider / providerLabel
+ * 与 `local-direct:<provider>:` 前缀；仅对真正没有归属的「未知账号」省略徽章。
  */
-function ProviderBadge({ accountId }: { accountId: string }) {
-  const account = (shared().wbApp?.getState?.()?.accounts?.accounts || [])
-    .find(item => item?.id === accountId)
-  const provider = typeof account?.provider === 'string' ? account.provider : ''
+function ProviderBadge({ accountId, provider: rowProvider, providerLabel: rowProviderLabel }: {
+  accountId: string
+  provider?: string
+  providerLabel?: string
+}) {
+  const account = accountId
+    ? (shared().wbApp?.getState?.()?.accounts?.accounts || []).find(item => item?.id === accountId)
+    : undefined
+  const provider = (typeof account?.provider === 'string' && account.provider.trim())
+    || (typeof rowProvider === 'string' && rowProvider.trim())
+    || inferLocalDirectProvider(accountId)
   if (!provider) return null
-  const label = shared().wbProviders?.labelOf?.(provider) || provider
+  const catalogLabel = shared().wbProviders?.labelOf?.(provider) || ''
+  const rawLabel = (catalogLabel && catalogLabel !== provider ? catalogLabel : '')
+    || (typeof rowProviderLabel === 'string' ? rowProviderLabel.trim() : '')
+    || catalogLabel
+    || provider
   const suffix = (account && shared().wbAccountsModel?.editionSuffix?.(account)) || ''
-  const text = suffix ? `${label} ${suffix}` : label
+  const displayLabel = t(rawLabel)
+  const text = suffix && !rawLabel.includes(suffix) && !displayLabel.includes(suffix)
+    ? `${displayLabel} ${suffix}`
+    : displayLabel
   return <Badge variant='outline' shape='tag' className={`pbadge p-${provider}`} title={t('提供商：{text}', { text })}>{text}</Badge>
 }
 
@@ -441,7 +465,7 @@ function ReportPage() {
         {accountList ? (
           <RankPanel panelId='report-accounts-panel' listId='report-accounts' labelId='report-accounts-label'
             title={t('Top 账号')} tip={TIP_ACCOUNTS} rows={accountList}
-            badge={id => <ProviderBadge accountId={id} />} emptyText={t('所选范围内还没有账号用量')} />
+            badge={row => <ProviderBadge accountId={row.id} provider={row.provider} providerLabel={row.providerLabel} />} emptyText={t('所选范围内还没有账号用量')} />
         ) : null}
         {providerList ? (
           <RankPanel panelId='report-providers-panel' listId='report-providers' labelId='report-providers-label'

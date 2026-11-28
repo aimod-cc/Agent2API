@@ -258,25 +258,17 @@
   }
 }
 
-/* 列宽（合计 100%，table-layout: fixed 下按 colgroup 分配） */
-/* 选择列：一整列只有一枚复选框，给 3.5% 的窄档（46px 上下，照账号页勾选列的量级）；
-   多出的宽度从映射列（chips 有弹性）与操作列（按钮定宽、无长文案）各挪一点 ——
-   合计仍 100%，没有换行风险。 */
+/* 列宽（方案 A 默认 6 列合计 100%，展开独立列后由 table-layout + min-width 自动配合横向滚动） */
 .models-table .c-check { width: 3.5%; }
-/* 勾选列的表头 / 单元格都居中：一整列只有复选框，居中才与账号页勾选列同一观感
-   （数据行走列设置的 ta-center；th 上的 text-align 是全局 left，这里单独补） */
 .models-table th[data-col="check"] { text-align: center; }
-.models-table .c-model { width: 14.5%; }
-.models-table .c-rate { width: 6%; }
-.models-table .c-pricing { width: 10.5%; }
-/* 可见性列：「可见 / 不展示」两个短词，6% 够放下。 */
-.models-table .c-visibility { width: 6%; }
-.models-table .c-source { width: 5.5%; }
-/* 能力位两列：数值一格（上下文 / 最大输出）、四枚图标圆点一格。 */
-.models-table .c-budget { width: 9.5%; }
-.models-table .c-caps { width: 11%; }
-.models-table .c-alias { width: 25%; }
-.models-table .c-act { width: 8.5%; }
+.models-table .c-model { width: 22%; }
+.models-table .c-rate { width: 6.5%; }
+.models-table .c-pricing { width: 12.5%; }
+.models-table .c-visibility { width: 6.5%; }
+.models-table .c-source { width: 6%; }
+.models-table .c-spec { width: 13.5%; }
+.models-table .c-alias { width: 39%; }
+.models-table .c-act { width: 9.5%; }
 .keys-table .k-name { width: 18%; }
 .keys-table .k-key { width: 30%; }
 .keys-table .k-usage { width: 22%; }
@@ -516,7 +508,7 @@
   min-height: 26px;
   max-width: 100%;
   box-sizing: border-box;
-  padding: 3px 5px;
+  padding: 3px 6px;
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: var(--surface-3);
@@ -524,15 +516,13 @@
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
+  white-space: nowrap;
 }
 .alias.off { border-color: var(--border); background: var(--surface-inset); color: var(--text-3); text-decoration: line-through; }
-/* 关闭的映射（chip 上自己的开关关着）：虚线弱化 + 删除线，但仍可点
-   （开关就在 chip 里）。与行级压淡的 .off 互相独立 —— 「行开着、某条映射
-   关着」的状态要一眼可辨，所以另起一个类名。 */
 .alias.map-off { border-style: dashed; background: transparent; color: var(--text-3); }
 .alias.map-off .t { text-decoration: line-through; font-weight: 500; }
-.alias .t { min-width: 0; overflow-wrap: anywhere; }
-.binding-default { flex: 0 0 auto; padding: 0 4px; border: 1px solid var(--border); border-radius: var(--r-xs); background: var(--surface); color: var(--text-3); font-family: var(--font-sans); font-size: 10px; font-weight: 500; }
+.alias .t { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.binding-default { flex: 0 0 auto; white-space: nowrap; padding: 0 4px; border: 1px solid var(--border); border-radius: var(--r-xs); background: var(--surface); color: var(--text-3); font-family: var(--font-sans); font-size: 10px; font-weight: 500; }
 .alias .switch { flex: 0 0 auto; }
 .alias .alias-level, .alias .x { flex: 0 0 auto; }
 
@@ -659,10 +649,18 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 218px minmax(0, 1fr);
-  /* 行高必须显式吃满容器：grid 的行高默认按内容算，不写这条时左栏与右栏
-     都只有内容高，下面的「表格区 flex:1」就没有可分配的剩余空间 */
+  grid-template-columns: 214px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
+  transition: grid-template-columns .18s ease;
+}
+.mm.is-rail-collapsed {
+  grid-template-columns: 0px minmax(0, 1fr);
+}
+.mm.is-rail-collapsed > .prov-rail {
+  padding: 0;
+  border-right: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 .mm-main {
   min-width: 0;
@@ -850,9 +848,16 @@
 /* 窄窗口（约 900px 以下）改成上下堆叠：左栏在上一行，横向铺满、自己滚 */
 @media (max-width: 900px) {
   /* 窄窗口改成上下两行：左栏一行（自己的高度上限），表格区吃掉剩下的 */
-  .mm {
+  .mm,
+  .mm.is-rail-collapsed {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
+  }
+  .mm.is-rail-collapsed > .prov-rail {
+    padding: 6px 6px 10px;
+    border-bottom: 1px solid var(--sidebar-border);
+    opacity: 1;
+    pointer-events: auto;
   }
   .prov-rail {
     max-height: 210px;
@@ -860,6 +865,105 @@
     border-bottom: 1px solid var(--sidebar-border);
   }
 }
+
+/* ── 方案 A 精简 6 列与抽屉补充样式 ─────────────────────── */
+.mm-row-clickable { cursor: pointer; }
+.page[data-page="gateway"] .models-table tbody tr.mm-row-active td {
+  background: color-mix(in srgb, var(--primary) 9%, transparent);
+}
+.page[data-page="gateway"] .models-table tbody tr.mm-row-active td.cell-act {
+  background: color-mix(in srgb, var(--primary) 9%, var(--surface));
+}
+.mm-inline-badge { min-height: 17px; padding: 0 5px; font-size: 10px; }
+.mm-model-subrow { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 2px; }
+.mm-model-subrow .mname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-proto-tag {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.mm-proto-tag.is-custom {
+  border-color: var(--primary-bd);
+  background: var(--primary-soft);
+  color: var(--primary-fg);
+}
+.mm-cost-top { display: flex; align-items: center; gap: 5px; max-width: 100%; }
+.mm-rate-pill {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+}
+.mm-rate-pill.is-free { background: var(--success-soft); color: var(--success); }
+.caps-open.mm-spec-open {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  height: auto;
+  padding: 3px 5px;
+}
+.mm-spec-tokens { display: inline-flex; align-items: center; gap: 3px; }
+.mm-spec-dots { display: inline-flex; align-items: center; gap: 4px; }
+.mm-spec-img-tags { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+
+.mm-active-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mm-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--primary-bd);
+  border-radius: 6px;
+  background: var(--primary-soft);
+  color: var(--primary-fg);
+  font-size: 11.5px;
+}
+.mm-filter-chip button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 1px; line-height: 1; }
+
+.mm-batch-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 16px;
+  border-top: 1px solid var(--primary-bd);
+  background: var(--primary-soft);
+  font-size: 12px;
+}
+.mm-batch-count { font-weight: 600; color: var(--primary-fg); font-variant-numeric: tabular-nums; }
+
+.mm-drawer-section { display: flex; flex-direction: column; gap: 8px; }
+.mm-drawer-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mm-drawer-section-head h3 { margin: 0; font-size: 12px; font-weight: 650; color: var(--text-2); }
+.mm-bind-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.mm-bind-card.is-off { border-style: dashed; background: transparent; opacity: 0.78; }
+.mm-meta-dl { margin: 0; border: 1px solid var(--hairline); border-radius: 10px; overflow: hidden; }
+.mm-meta-dl > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 12px;
+}
+.mm-meta-dl > div:last-child { border-bottom: 0; }
+.mm-meta-dl dt { color: var(--text-3); }
+.mm-meta-dl dd { margin: 0; color: var(--text); font-weight: 500; }
 
 /* ── 未挂载的模型映射（models-dangling.tsx）──────────────────────
    指向的上游模型已不在任何模型行上（上游下线 / 承载它的那家当前没有行），

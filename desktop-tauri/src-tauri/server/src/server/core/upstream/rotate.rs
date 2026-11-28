@@ -288,6 +288,7 @@ fn select_target_account_sync(
             cursor,
             provider_cursors: provider_cursors.as_ref(),
             sticky_account: snap.sticky_hit.as_deref(),
+            sticky_beats_order: settings.priority.sticky_beats_order(),
         },
     );
     // 粘性命中项没有排到第 1 位：这一次请求用不上它，照常消耗一格环位重排。
@@ -308,6 +309,7 @@ fn select_target_account_sync(
                 cursor,
                 provider_cursors: provider_cursors.as_ref(),
                 sticky_account: snap.sticky_hit.as_deref(),
+                sticky_beats_order: settings.priority.sticky_beats_order(),
             },
         );
     }
@@ -759,6 +761,7 @@ pub(super) fn pick_next_account(
         cursor: None,
         provider_cursors: None,
         sticky_account: None,
+        sticky_beats_order: settings.priority.sticky_beats_order(),
     };
     let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
     plan.ordered.into_iter().next().map(|entry| entry.account)
@@ -789,6 +792,7 @@ fn decision_json(
     json!({
         "strategy": settings.strategy.as_str(),
         "sticky": settings.sticky.as_str(),
+        "priority": settings.priority.as_str(),
         "stickyHit": plan.sticky_hit,
         "picked": plan.ordered.first().map(|entry| entry.id.clone()).unwrap_or_default(),
         "ordered": plan.ordered.iter().take(12).map(entry_json).collect::<Vec<_>>(),

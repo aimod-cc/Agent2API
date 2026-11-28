@@ -421,6 +421,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         &mut day.account_stats,
         &item.account_id,
         &item.account_name,
+        &item.provider,
         1,
         i64::from(success),
         item.total_tokens,

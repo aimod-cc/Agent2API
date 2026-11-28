@@ -232,19 +232,19 @@ export async function importFromClient(client: AgentClient): Promise<void> {
   } catch (error) { toast(errorMessage(error), 'err') }
 }
 
-export async function requestPreview(client: AgentClient, profile: AgentProfile | undefined, operation: AgentOperation): Promise<AgentPreview> {
+export async function requestPreview(client: AgentClient, profile: AgentProfile | undefined, operation: AgentOperation, creating = false): Promise<AgentPreview> {
   const call = host().workbuddyDesktop?.previewAgentProfile
   if (!call) throw new Error(t('当前环境不支持预览'))
-  return call({ clientId: client.id, profileId: profile?.id || '', ...(profile ? { profile } : {}), operation,
+  return call({ clientId: client.id, profileId: creating ? '' : (profile?.id || ''), ...(profile ? { profile } : {}), operation,
     ...(operation.startsWith('native-') || operation.startsWith('config-') ? { nativeRevision: client.nativeRevision } : {}),
     ...(operation.startsWith('config-') ? { revision: client.revision, liveId: profile?.liveId || '', configPath: client.configPath } : {}) })
 }
 
-export async function applyProfile(client: AgentClient, profile: AgentProfile, operation: AgentOperation, preview: AgentPreview): Promise<void> {
+export async function applyProfile(client: AgentClient, profile: AgentProfile, operation: AgentOperation, preview: AgentPreview, creating = false): Promise<void> {
   const call = host().workbuddyDesktop?.applyAgentProfile
   if (!call) throw new Error(t('当前环境不支持应用'))
-  const direct = operation.startsWith('native-') || operation.startsWith('config-') || operation === 'quick-connect'
-  const result = await mutation(client.id, () => call({ clientId: client.id, profileId: profile.id, operation, token: preview.token,
+  const direct = operation.startsWith('native-') || operation.startsWith('config-')
+  const result = await mutation(client.id, () => call({ clientId: client.id, profileId: creating ? '' : profile.id, operation, token: preview.token,
     ...(direct ? { profile, nativeRevision: client.nativeRevision } : {}),
     ...(operation.startsWith('config-') ? { revision: client.revision, liveId: profile.liveId || '', configPath: client.configPath } : {}) }))
   if (!result.applied?.verified) throw new Error(t('客户端配置写入后未通过校验'))

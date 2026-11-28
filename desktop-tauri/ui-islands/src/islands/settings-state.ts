@@ -2215,6 +2215,7 @@ export async function refreshModelsDev(): Promise<void> {
     const status = String(result?.status || '')
     if (status === 'refreshed') {
       toast(t('models.dev 元数据已更新（{count} 条）', { count: Number(result?.count) || 0 }))
+      void (window as unknown as { wbProviders?: { refreshCustom?: () => Promise<unknown> } }).wbProviders?.refreshCustom?.()
     } else if (status === 'failed') {
       toast(t('刷新失败：{message}', { message: String(result?.message || '') }), 'err')
     } else {

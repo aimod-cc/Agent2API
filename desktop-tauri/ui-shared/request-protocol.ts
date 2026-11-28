@@ -8,7 +8,7 @@ export type RequestProtocolDisplay = {
   subLabel: string
   mainFullLabel: string
   subFullLabel: string
-  /** 详情页与移动端单行展示：未转换 `OpenAI Chat`，发生转换 `Anthropic → OpenAI Chat`，未知 `''` */
+  /** 详情页与移动端单行展示：未转换 `/chat/completions`，发生转换 `/messages → /chat/completions`，未知 `''` */
   inlineText: string
 }
 
@@ -25,19 +25,38 @@ export function normalizeRequestProtocol(raw: unknown): string {
     case 'chat_completions':
     case 'openai_chat':
     case 'openai':
+    case '/chat/completions':
+    case '/v1/chat/completions':
       return 'chat_completions'
     case 'responses':
     case 'openai_responses':
+    case '/responses':
+    case '/v1/responses':
       return 'responses'
     case 'anthropic':
     case 'messages':
     case 'anthropic_messages':
+    case '/messages':
+    case '/v1/messages':
       return 'anthropic'
     case 'gemini':
     case 'antigravity_gemini':
+    case ':generatecontent':
+    case ':streamgeneratecontent':
       return 'gemini'
+    case 'images_generations':
+    case 'image_generations':
+    case '/images/generations':
+    case '/v1/images/generations':
+      return 'images_generations'
+    case 'images_edits':
+    case 'image_edits':
+    case '/images/edits':
+    case '/v1/images/edits':
+      return 'images_edits'
     case 'images':
     case 'openai_images':
+    case '/images':
       return 'images'
     case 'claude_cli':
       return 'claude_cli'
@@ -58,15 +77,19 @@ export function requestProtocolShortLabel(raw: unknown, translate: Translate = i
     case '':
       return ''
     case 'chat_completions':
-      return 'OpenAI Chat'
+      return '/chat/completions'
     case 'responses':
-      return 'Responses'
+      return '/responses'
     case 'anthropic':
-      return 'Anthropic'
+      return '/messages'
     case 'gemini':
-      return 'Gemini'
+      return ':generateContent'
+    case 'images_generations':
+      return '/images/generations'
+    case 'images_edits':
+      return '/images/edits'
     case 'images':
-      return 'Images'
+      return '/images'
     case 'claude_cli':
       return 'Claude CLI'
     case 'ai_sdk_ndjson':
@@ -86,15 +109,19 @@ export function requestProtocolFullLabel(raw: unknown, translate: Translate = id
     case '':
       return ''
     case 'chat_completions':
-      return 'OpenAI Chat Completions'
+      return '/chat/completions (OpenAI Chat Completions)'
     case 'responses':
-      return 'OpenAI Responses'
+      return '/responses (OpenAI Responses)'
     case 'anthropic':
-      return 'Anthropic Messages'
+      return '/messages (Anthropic Messages)'
     case 'gemini':
-      return 'Gemini API'
+      return ':generateContent (Gemini API)'
+    case 'images_generations':
+      return '/images/generations (OpenAI Images)'
+    case 'images_edits':
+      return '/images/edits (OpenAI Images)'
     case 'images':
-      return 'OpenAI Images'
+      return '/images (OpenAI Images)'
     case 'claude_cli':
       return 'Claude Code CLI'
     case 'ai_sdk_ndjson':
@@ -108,6 +135,10 @@ export function requestProtocolFullLabel(raw: unknown, translate: Translate = id
   }
 }
 
+function isSpecificImages(key: string): boolean {
+  return key === 'images_generations' || key === 'images_edits'
+}
+
 export function describeRequestProtocol(
   clientRaw: unknown,
   upstreamRaw: unknown,
@@ -115,8 +146,13 @@ export function describeRequestProtocol(
 ): RequestProtocolDisplay {
   const client = normalizeRequestProtocol(clientRaw)
   const upstream = normalizeRequestProtocol(upstreamRaw)
-  const converted = Boolean(client && upstream && client !== upstream)
-  const shown = upstream || client
+  const sameImageFamily =
+    (client === 'images' && isSpecificImages(upstream))
+    || (upstream === 'images' && isSpecificImages(client))
+  const converted = Boolean(client && upstream && client !== upstream && !sameImageFamily)
+  const shown = sameImageFamily
+    ? (isSpecificImages(upstream) ? upstream : client)
+    : (upstream || client)
   const mainKey = converted ? upstream : shown
   const subKey = converted ? client : ''
   const mainLabel = requestProtocolShortLabel(mainKey, translate)

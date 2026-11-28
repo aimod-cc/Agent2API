@@ -30,7 +30,7 @@ mod websocket;
 
 pub(crate) use login_ui::{decorate as decorate_login, remember as remember_login};
 pub(super) use websocket::{abort as abort_ws, open as open_ws, open_with_policy as open_ws_with_policy, read as read_ws, send as send_ws};
-pub use operations::{bind_alias, change, install, operation, reconcile_after_restore};
+pub use operations::{bind_alias, change, dismiss_error, install, operation, reconcile_after_restore};
 pub(super) use protocol::{close as close_stream, open as open_stream, push as push_stream};
 pub(super) use runtime::{host, observe_concurrency, package_for_provider, registered_label};
 pub use runtime::{concurrency_default, known_provider, provider_icons, provider_state, snapshot, start};

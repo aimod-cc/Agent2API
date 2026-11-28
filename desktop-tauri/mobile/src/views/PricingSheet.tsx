@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { fetchCustomProviders } from '../core/api'
 import {
   fetchModelPricing,
   saveModelPricing,
@@ -63,10 +64,24 @@ export function PricingSheet({
   const [cacheWritePrice, setCacheWritePrice] = useState('')
   const [sameAs, setSameAs] = useState('')
 
-  // 提供商倍率表单
-  const providerList = (session?.accounts?.providers || [])
-    .map(p => ({ id: p.id || '', label: p.label || p.id || '' }))
-    .filter(p => p.id)
+  // 提供商倍率表单（合并内置提供商与自定义提供商）
+  const [customProviders, setCustomProviders] = useState<Array<{ id: string; label: string }>>([])
+  const providerList = useMemo(() => {
+    const seen = new Set<string>()
+    const list: Array<{ id: string; label: string }> = []
+    for (const p of session?.accounts?.providers || []) {
+      const id = (p.id || '').trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      list.push({ id, label: p.label || id })
+    }
+    for (const p of customProviders) {
+      if (!p.id || seen.has(p.id)) continue
+      seen.add(p.id)
+      list.push(p)
+    }
+    return list
+  }, [session?.accounts?.providers, customProviders])
   const [providerId, setProviderId] = useState(
     () => initialProvider || providerList[0]?.id || 'workbuddy',
   )
@@ -103,9 +118,19 @@ export function PricingSheet({
   }
 
   useEffect(() => {
+    const ac = new AbortController()
     void fetchModelPricing()
       .then(applyLoaded)
       .catch(err => store.toast(err instanceof Error ? err.message : '加载计价设置失败', 'danger'))
+    void fetchCustomProviders(ac.signal)
+      .then(res => {
+        const items = (res?.providers || [])
+          .map(p => ({ id: (p.id || '').trim(), label: (p.name || p.label || p.id || '').trim() }))
+          .filter(p => p.id)
+        setCustomProviders(items)
+      })
+      .catch(() => {})
+    return () => ac.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -402,7 +427,9 @@ export function PricingSheet({
                 style={{ marginTop: 6 }}
               >
                 {providerList.map(p => (
-                  <option key={p.id} value={p.id}>{p.label} ({p.id})</option>
+                  <option key={p.id} value={p.id}>
+                    {p.id.startsWith('custom-') ? p.label : `${p.label} (${p.id})`}
+                  </option>
                 ))}
               </select>
             </label>

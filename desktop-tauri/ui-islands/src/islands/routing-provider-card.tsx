@@ -9,24 +9,35 @@ import { accountFlowState } from './routing-flow-model'
 import { RoutingAccountRow, RoutingActions, RoutingProviderMark, routingOrderKey } from './routing-canvas-controls'
 import { formatDuration, RouteIcon } from './routing-ui'
 import type { useRoutingDrag } from './routing-drag'
-import type { RouteProfile, RoutingWorkspace } from './routing-types'
+import type { RouteAccountOrderMode, RouteProfile, RoutingWorkspace } from './routing-types'
 
 export function RoutingProviderCard({ id, profile, workspace, scope, now, index, first, last, included, open, locked, busy, query, drag, activity,
-  onOpen, onJoin, onMove, onMoveAccount, onToggleAccount, onAccount, onSort, onEnableGroup }: {
+  onOpen, onJoin, onMove, onMoveAccount, onToggleAccount, onOrderMode, onAccount, onSort, onEnableGroup }: {
   id: string; profile: RouteProfile; workspace: RoutingWorkspace; scope: string; now: number; activity: RoutingCanvasActivity
   index: number; first: boolean; last: boolean; included: boolean; open: boolean; locked: boolean; busy: boolean; query: string
   drag: ReturnType<typeof useRoutingDrag>; onOpen(open: boolean): void; onJoin(on: boolean): void; onMove(direction: number): void
-  onMoveAccount(id: string, direction: number): void; onToggleAccount(id: string): void; onAccount(id: string): void; onSort(): void
-  onEnableGroup?(enabled: boolean): void
+  onMoveAccount(id: string, direction: number): void; onToggleAccount(id: string): void; onOrderMode?(mode: RouteAccountOrderMode): void
+  onAccount(id: string): void; onSort(): void; onEnableGroup?(enabled: boolean): void
 }) {
   const label = workspace.providers.find(provider => provider.id === id)?.label || id
   const accounts = workspace.accounts.filter(account => providerOf(account) === id)
-  const order = [...new Set([...(profile.accountOrder[id] || []), ...accounts.map(account => account.id)])].filter(key => accounts.some(account => account.id === key))
+  const independent = Boolean(scope) && workspace.customized
+  const orderMode: RouteAccountOrderMode = independent
+    ? (profile.accountOrderMode?.[id] ?? (profile.accountOrder?.[id] ? 'manual' : 'followGroup'))
+    : 'followGroup'
+  const followGroup = !independent || orderMode === 'followGroup'
+  const baseOrder = followGroup && workspace.sorting?.accountOrder?.[id]?.length
+    ? workspace.sorting.accountOrder[id]
+    : (profile.accountOrder[id] || [])
+  const order = [...new Set([...baseOrder, ...(profile.accountOrder[id] || []), ...accounts.map(account => account.id)])].filter(key => accounts.some(account => account.id === key))
   const globalAccounts = !scope
   const joined = (key: string) => globalAccounts ? accounts.find(account => account.id === key)?.enabled !== false : !profile.excludedAccounts.includes(key)
   const participants = order.filter(joined)
-  const rules = !scope || !workspace.customized ? activeGroupSortRules(id, workspace.sorting?.rules?.[id] || [], workspace.sorting) : []
-  const sorted = rules.length > 0
+  const rules = followGroup ? activeGroupSortRules(id, workspace.sorting?.rules?.[id] || [], workspace.sorting) : []
+  const sorted = independent ? followGroup : rules.length > 0
+  const orderHint = independent && followGroup
+    ? t('当前跟随提供商组顺序，切为「本路由手动」后可单独调整')
+    : sorted ? manualOrderBlockedMessage(rules) : undefined
   const unavailable = workspace.providers.find(provider => provider.id === id)?.available === false
   const orderLocked = locked || Boolean(query)
   const summary = globalAccounts ? t('{selected} / {total} 个账号启用', { selected: participants.length, total: accounts.length })
@@ -63,7 +74,8 @@ export function RoutingProviderCard({ id, profile, workspace, scope, now, index,
         { label: t('降低优先级'), icon: 'arrowDown', disabled: orderLocked || !included || last, onClick: () => onMove(1) },
       ]} />
     </header>
-    <RoutingConsumptionOrder provider={id} sorting={workspace.sorting} independent={Boolean(scope) && workspace.customized} disabled={busy} onSettings={onSort} />
+    <RoutingConsumptionOrder provider={id} sorting={workspace.sorting} independent={independent} disabled={busy || locked}
+      orderMode={independent ? orderMode : undefined} onOrderModeChange={independent ? onOrderMode : undefined} onSettings={onSort} />
     <CollapsibleContent className='routing-config-accounts' id={bodyId}>
       {[true, false].map(active => <div key={String(active)} data-route-list>
         {!active && order.some(key => !joined(key)) ? <p className='routing-account-section'>{globalAccounts ? t('已禁用账号') : t('未参与本路由')}</p> : null}
@@ -81,7 +93,7 @@ export function RoutingProviderCard({ id, profile, workspace, scope, now, index,
             sorting={workspace.sorting} now={now} settingsDisabled={busy} running={(activity.accounts[key] || 0) > 0}
             state={account.enabled === false ? 'disabled' : account.hasCredentials === false ? 'no-credentials' : status.state}
             stateText={account.enabled !== false && account.hasCredentials !== false && status.state === 'partial' ? status.label : undefined}
-            note={note} locked={locked || !globalAccounts && !included} orderLocked={orderLocked || sorted || !included} orderHint={sorted ? manualOrderBlockedMessage(rules) : undefined}
+            note={note} locked={locked || !globalAccounts && !included} orderLocked={orderLocked || sorted || !included} orderHint={orderHint}
             first={accountIndex === 0} last={accountIndex === participants.length - 1} dragging={drag.state?.id === key}
             drop={drag.state?.target === key ? drag.state.after ? 'after' : 'before' : undefined}
             onDrag={event => drag.start(event, 'account', id, key)} onMove={direction => onMoveAccount(key, direction)}

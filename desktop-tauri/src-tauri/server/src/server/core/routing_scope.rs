@@ -85,7 +85,11 @@ pub fn project_accounts(accounts: &[Value], profile: &RoutingProfile) -> Vec<Val
             .filter(|account| routing::account_id(account)
                 .is_some_and(|id| !profile.excluded_accounts.iter().any(|excluded| excluded == id)))
             .cloned().collect();
-        if let Some(ids) = profile.account_order.get(provider).or_else(|| sorting.account_order.get(provider)) {
+        let ids = match profile.order_mode_for(provider) {
+            config::AccountOrderMode::FollowGroup => sorting.account_order.get(provider),
+            config::AccountOrderMode::Manual => profile.account_order.get(provider).or_else(|| sorting.account_order.get(provider)),
+        };
+        if let Some(ids) = ids {
             let positions: HashMap<&str, usize> = ids.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect();
             members.sort_by_key(|account| routing::account_id(account)
                 .and_then(|id| positions.get(id)).copied().unwrap_or(usize::MAX));
@@ -125,6 +129,7 @@ pub fn materialize_profile_with(accounts: &[Value], available: &[String], model:
         }
         profile.providers = providers;
         profile.account_order.clear();
+        profile.account_order_mode.clear();
     }
     if !independent && !model.is_empty() {
         profile.providers.retain(|id| available.contains(id));
@@ -132,11 +137,68 @@ pub fn materialize_profile_with(accounts: &[Value], available: &[String], model:
             profile.disabled_providers.retain(|id| profile.providers.contains(id));
         }
     }
+    if independent {
+        profile.account_order_mode.retain(|provider, _| profile.providers.contains(provider));
+    }
     for provider in &profile.providers {
+        if independent {
+            let mode = profile.order_mode_for(provider);
+            profile.account_order_mode.insert(provider.clone(), mode);
+            if mode == config::AccountOrderMode::FollowGroup {
+                profile.account_order.insert(
+                    provider.clone(),
+                    sorting.account_order.get(provider).cloned().unwrap_or_default(),
+                );
+                continue;
+            }
+        }
         let ids = profile.account_order.entry(provider.clone()).or_default();
         for id in sorting.account_order.get(provider).into_iter().flatten() {
             if !ids.contains(id) { ids.push(id.clone()); }
         }
     }
     profile
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use serde_json::json;
+
+    #[test]
+    fn model_profile_follow_group_uses_live_provider_order_while_manual_keeps_saved_order() {
+        let accounts = vec![
+            json!({ "id": "a1", "provider": "demo", "priority": 100 }),
+            json!({ "id": "a2", "provider": "demo", "priority": 200 }),
+        ];
+        // 保存的 manual 顺序是 [a2, a1]，但切换到 FollowGroup 后应按账号库实时顺序 [a1, a2]
+        let follow = RoutingProfile {
+            provider_scope: Some(RoutingProviderScope::Selected),
+            providers: vec!["demo".into()],
+            account_order: BTreeMap::from([("demo".into(), vec!["a2".into(), "a1".into()])]),
+            account_order_mode: BTreeMap::from([("demo".into(), config::AccountOrderMode::FollowGroup)]),
+            ..Default::default()
+        };
+        let ids: Vec<_> = project_accounts(&accounts, &follow)
+            .iter()
+            .filter_map(routing::account_id)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(ids, vec!["a1", "a2"]);
+
+        // 显式 Manual 或未带 accountOrderMode 的旧版已保存配置，保持 [a2, a1]
+        let legacy_manual = RoutingProfile {
+            provider_scope: Some(RoutingProviderScope::Selected),
+            providers: vec!["demo".into()],
+            account_order: BTreeMap::from([("demo".into(), vec!["a2".into(), "a1".into()])]),
+            ..Default::default()
+        };
+        let ids: Vec<_> = project_accounts(&accounts, &legacy_manual)
+            .iter()
+            .filter_map(routing::account_id)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(ids, vec!["a2", "a1"]);
+    }
 }

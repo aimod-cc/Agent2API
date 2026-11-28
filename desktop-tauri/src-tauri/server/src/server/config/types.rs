@@ -1097,6 +1097,11 @@ pub const KEY_ROUTING_STRATEGY: &str = "routingStrategy";
 ///   - `Turn`：只在单条请求内不换号（与转发既有行为一致，跨请求不粘）；
 ///   - `Off`：每条请求独立选。
 pub const KEY_ROUTING_STICKY: &str = "routingSticky";
+/// 生效优先级：会话粘滞与消耗顺序冲突时谁先生效（`routingPriority`）。
+///
+///   - `Sticky`（默认）：会话粘滞 > 消耗顺序（同一会话继续留在原账号）；
+///   - `Consumption`：消耗顺序 > 会话粘滞（队列首位变化时立即切到新首位）。
+pub const KEY_ROUTING_PRIORITY: &str = "routingPriority";
 /// 失败退避：转发失败的账号休息一会儿再回来（`routingFailoverBackoff`，默认开）
 pub const KEY_ROUTING_FAILOVER_BACKOFF: &str = "routingFailoverBackoff";
 /// 限流垫底（Sink）：还有额度时被 429 的账号排到队尾，**30 分钟后自动回到队列**，
@@ -1127,6 +1132,9 @@ pub const STICKY_OFF: &str = "off";
 pub const STICKY_TURN: &str = "turn";
 pub const STICKY_SESSION: &str = "session";
 pub const STICKY_AUTO: &str = "auto";
+
+pub const ROUTING_PRIORITY_STICKY: &str = "sticky";
+pub const ROUTING_PRIORITY_CONSUMPTION: &str = "consumption";
 
 /// 熔断阈值合法范围：1~20 次
 pub const ROUTING_BREAKER_MIN_THRESHOLD: i64 = 1;
@@ -1212,12 +1220,49 @@ impl StickyMode {
     }
 }
 
+/// 生效优先级档位（`RoutingPriority`）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutingPriority {
+    Sticky,
+    Consumption,
+}
+
+impl RoutingPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sticky => ROUTING_PRIORITY_STICKY,
+            Self::Consumption => ROUTING_PRIORITY_CONSUMPTION,
+        }
+    }
+
+    pub fn from_id(value: &str) -> Self {
+        match value {
+            ROUTING_PRIORITY_CONSUMPTION => Self::Consumption,
+            _ => Self::Sticky,
+        }
+    }
+
+    /// 会话粘滞是否高于消耗顺序
+    pub fn sticky_beats_order(&self) -> bool {
+        matches!(self, Self::Sticky)
+    }
+}
+
+/// 独立路由内单个提供商的账号消耗顺序来源（跟随提供商组 / 本路由手动）。
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountOrderMode {
+    FollowGroup,
+    Manual,
+}
+
 /// 账号路由设置（账号页「路由」区域）。转发层逐请求取一次快照
 /// （`Copy`），改完设置下一个请求立即生效 —— 与超时 / 重试同一模式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoutingSettings {
     pub strategy: RouteStrategy,
     pub sticky: StickyMode,
+    pub priority: RoutingPriority,
     pub failover_backoff: bool,
     pub sink: bool,
     pub breaker_enabled: bool,
@@ -1231,6 +1276,7 @@ impl Default for RoutingSettings {
         Self {
             strategy: RouteStrategy::Order,
             sticky: StickyMode::Auto,
+            priority: RoutingPriority::Sticky,
             failover_backoff: true,
             sink: true,
             breaker_enabled: false,
@@ -1246,6 +1292,7 @@ impl Default for RoutingSettings {
 pub struct RoutingPatch {
     pub strategy: Option<RouteStrategy>,
     pub sticky: Option<StickyMode>,
+    pub priority: Option<RoutingPriority>,
     pub failover_backoff: Option<bool>,
     pub sink: Option<bool>,
     pub breaker_enabled: Option<bool>,

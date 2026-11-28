@@ -46,7 +46,10 @@ function Navigation() {
     {groups.length ? groups.map((group, index) => <React.Fragment key={`${group.label}-${index}`}>
       <SidebarGroupLabel className='nav-group-label'>{host().wbSidebarLayout?.groupLabel(group.label) || group.label}</SidebarGroupLabel>
       {group.items.map(menu => {
-        const badgeId = menu.key === 'requests' ? 'nav-count-requests' : menu.key === 'logs' ? 'nav-count-logs' : menu.key === 'settings' ? 'nav-count-update' : ''
+        const badgeId = menu.key === 'requests' ? 'nav-count-requests'
+          : menu.key === 'logs' ? 'nav-count-logs'
+          : menu.key === 'plugins' ? 'nav-count-plugins'
+          : menu.key === 'settings' ? 'nav-count-update' : ''
         return <NavItem key={menu.key} className={`nav-item ${page === menu.key ? 'active' : ''}`} active={page === menu.key}
           data-page={menu.key} data-icon={menu.icon} icon={<Icon name={menu.icon} />}
           trailing={badgeId ? <Badge id={badgeId} variant='destructive' shape='tag' className='count min-w-5 px-1.5 py-0 text-[10.5px]' style={{ display: 'none' }}>{menu.key === 'settings' ? t('新') : '0'}</Badge> : undefined}>

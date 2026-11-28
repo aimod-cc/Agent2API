@@ -10,7 +10,13 @@ use super::{RoutingProfile, RoutingProfiles, CONFIG, CONFIG_UPDATE_LOCK};
 use crate::server::core::{account_order, account_store::store::AccountStore, routing, routing_scope};
 
 pub fn revision(profile: &RoutingProfile, settings: super::RoutingSettings, customized: bool) -> String {
-    let value = json!({ "profile": profile, "strategy": settings.strategy.as_str(), "sticky": settings.sticky.as_str(), "customized": customized });
+    let value = json!({
+        "profile": profile,
+        "strategy": settings.strategy.as_str(),
+        "sticky": settings.sticky.as_str(),
+        "priority": settings.priority.as_str(),
+        "customized": customized,
+    });
     format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
 }
 
@@ -73,7 +79,9 @@ pub fn save_workspace(
         if let Some(profile) = &mut global {
             if let Some(strategy) = profile.strategy.take() { next.routing.strategy = super::RouteStrategy::from_id(&strategy); next.raw.insert(super::KEY_ROUTING_STRATEGY.into(), strategy.into()); }
             if let Some(sticky) = profile.sticky.take() { next.routing.sticky = super::StickyMode::from_id(&sticky); next.raw.insert(super::KEY_ROUTING_STICKY.into(), sticky.into()); }
+            if let Some(priority) = profile.priority.take() { next.routing.priority = super::RoutingPriority::from_id(&priority); next.raw.insert(super::KEY_ROUTING_PRIORITY.into(), priority.into()); }
             profile.account_order.clear();
+            profile.account_order_mode.clear();
         }
         profiles.global = global;
     } else if let Some(profile) = profile { profiles.models.insert(model.to_string(), profile); }
@@ -84,7 +92,7 @@ pub fn save_workspace(
         let tx = conn.transaction()?;
         tx.execute("INSERT INTO kv(key,value) VALUES('routingProfiles',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![serialized.to_string()])?;
         if model.is_empty() {
-            for key in [super::KEY_ROUTING_STRATEGY, super::KEY_ROUTING_STICKY] {
+            for key in [super::KEY_ROUTING_STRATEGY, super::KEY_ROUTING_STICKY, super::KEY_ROUTING_PRIORITY] {
                 if let Some(value) = next.raw.get(key) { tx.execute("INSERT INTO kv(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![key, value.to_string()])?; }
             }
             crate::server::core::account_store::sql::apply_priorities(&tx, &priorities)?;

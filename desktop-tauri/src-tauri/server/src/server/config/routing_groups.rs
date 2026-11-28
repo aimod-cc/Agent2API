@@ -17,6 +17,14 @@ pub struct RoutingMember {
     pub model: String,
     pub included: bool,
     pub accounts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_order_mode: Option<super::AccountOrderMode>,
+}
+
+impl RoutingMember {
+    pub fn order_mode(&self) -> super::AccountOrderMode {
+        self.account_order_mode.unwrap_or(super::AccountOrderMode::FollowGroup)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,6 +37,8 @@ pub struct RoutingGroup {
     pub description: String,
     pub strategy: String,
     pub sticky: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     pub members: Vec<RoutingMember>,
 }
 
@@ -36,6 +46,9 @@ impl RoutingGroup {
     pub fn settings(&self, mut base: RoutingSettings) -> RoutingSettings {
         base.strategy = super::RouteStrategy::from_id(&self.strategy);
         base.sticky = super::StickyMode::from_id(&self.sticky);
+        if let Some(priority) = &self.priority {
+            base.priority = super::RoutingPriority::from_id(priority);
+        }
         base
     }
 
@@ -45,7 +58,8 @@ impl RoutingGroup {
             if !providers.contains(&member.provider) { providers.push(member.provider.clone()); }
         }
         RoutingProfile { provider_scope: Some(super::RoutingProviderScope::Selected), providers,
-            strategy: Some(self.strategy.clone()), sticky: Some(self.sticky.clone()), ..Default::default() }
+            strategy: Some(self.strategy.clone()), sticky: Some(self.sticky.clone()),
+            priority: self.priority.clone(), ..Default::default() }
     }
 }
 

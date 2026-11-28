@@ -9,17 +9,19 @@
  * 颜色一律走 tokens.css 的变量，深浅两套主题自动适配。
  */
 
-/* ─── 导航「设置」项上的更新提示 ───
+/* ─── 导航「设置 / 插件」项上的更新提示 ───
    复用 layout.css 里 .count 胶囊的尺寸/排版（与账号计数、日志未读同一套），
    只把配色换成提示色：有新版本是好消息，用日志未读那种警示红会让人以为出了故障。
    这里用 ID 选择器，是为了稳定压过 .nav-item .count:not(.muted) 的红色。 */
-#nav-count-update {
+#nav-count-update,
+#nav-count-plugins {
   border-color: var(--warn-bd);
   background: var(--warn-soft);
   color: var(--warn);
 }
 
-.nav-item.active #nav-count-update { background: var(--surface); }
+.nav-item.active #nav-count-update,
+.nav-item.active #nav-count-plugins { background: var(--surface); }
 
 /* ─── 关于作者 / 收藏项目 ─── */
 .update-author {

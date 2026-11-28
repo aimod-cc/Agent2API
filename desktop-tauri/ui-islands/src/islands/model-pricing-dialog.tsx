@@ -136,7 +136,7 @@ export function ModelPricingDialog({ context, onClose, onSaved }: {
 
   const scopeOptions = [
     { value: exactKey, label: t('仅当前提供商（{provider}）', { provider: context.providerLabel }) },
-    { value: providerWildKey, label: t('当前提供商全部模型（{provider}/*）', { provider: context.provider }) },
+    { value: providerWildKey, label: t('当前提供商全部模型（{provider}/*）', { provider: context.providerLabel }) },
     { value: modelWildKey, label: t('全部提供商该模型（*/{model}）', { model: context.modelId }) },
   ]
   const currentScopeLabel = scopeOptions.find(opt => opt.value === targetKey)?.label || scopeOptions[0].label

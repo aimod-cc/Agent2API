@@ -56,6 +56,26 @@ pub(super) fn finished(result: Result<(), String>) {
     }
 }
 
+pub fn dismiss_error(operation_id: Option<&str>) -> Result<Value, String> {
+    let mut value = state().lock().map_err(|_| "脚本插件任务不可用")?;
+    if value["active"] == true {
+        return Ok(value.clone());
+    }
+    if let Some(expected) = operation_id.filter(|id| !id.is_empty()) {
+        if value["operationId"].as_str() != Some(expected) {
+            return Ok(value.clone());
+        }
+    }
+    if value.get("error").is_some_and(|error| !error.is_null()) || value["stage"] == "failed" {
+        value["error"] = Value::Null;
+        if value["stage"] == "failed" {
+            value["stage"] = json!("");
+        }
+        value["updatedAt"] = json!(crate::server::logging::now_ms());
+    }
+    Ok(value.clone())
+}
+
 fn allow_catalog_fallback(
     expected_id: Option<&str>,
     packages: &[super::storage::Package],
@@ -82,11 +102,17 @@ pub fn install(
     }
     let source = super::source::InstallSource::parse(&name, &version)?;
     let before_registry = super::storage::read()?;
-    if let Some(id) = &expected_id {
-        if !before_registry.packages.iter().any(|package| &package.id == id) {
-            return Err("待更新的脚本插件不存在".into());
-        }
-    }
+    let existing = if let Some(id) = &expected_id {
+        Some(
+            before_registry
+                .packages
+                .iter()
+                .find(|package| &package.id == id)
+                .ok_or("待更新的脚本插件不存在")?,
+        )
+    } else {
+        None
+    };
     let allow_fallback = allow_catalog_fallback(expected_id.as_deref(), &before_registry.packages, &source);
     let mut target = match &source {
         super::source::InstallSource::Local { path } => json!({ "source": format!("file:{}", path.display()) }),
@@ -100,8 +126,13 @@ pub fn install(
             "source": format!("github:{repository}"), "version": reference,
         }),
     };
-    if let Some(id) = &expected_id { target["id"] = json!(id); }
-    begin("install", target)?;
+    if let Some(existing) = existing {
+        target["id"] = json!(existing.id);
+        if target.get("name").and_then(Value::as_str).is_none_or(str::is_empty) {
+            target["name"] = json!(existing.name);
+        }
+    }
+    begin(if existing.is_some() { "update" } else { "install" }, target)?;
     crate::spawn_task(async move {
         let result = async {
             let executable = super::bun::ensure().await?;
@@ -171,7 +202,13 @@ pub fn change(
         .iter_mut()
         .find(|package| package.id == id)
         .ok_or("脚本插件不存在")?;
-    let target = json!({ "id": package.id, "name": package.name, "version": package.version });
+    let mut target = json!({ "id": package.id, "name": package.name, "version": package.version });
+    if let Some(flag) = enabled {
+        target["enabled"] = json!(flag);
+    }
+    if let Some(ref provider_id) = provider {
+        target["provider"] = json!(provider_id);
+    }
     match action.as_str() {
         "reload" => {
             if !package.enabled { return Err("插件已停用，请先启用后再重新加载".into()); }
@@ -473,5 +510,42 @@ mod tests {
         assert!(!allow_catalog_fallback(Some(&installed.id), &[], &source));
         assert!(!allow_catalog_fallback(None, &[installed], &source));
         assert!(allow_catalog_fallback(None, &[], &source));
+    }
+
+    #[test]
+    fn dismiss_error_clears_failed_operation_and_respects_operation_id() {
+        {
+            let mut value = state().lock().unwrap();
+            *value = json!({
+                "active": false,
+                "action": "update",
+                "operationId": "op-1",
+                "stage": "failed",
+                "error": "脚本插件清单无法解析",
+                "updatedAt": 1
+            });
+        }
+        let mismatched = dismiss_error(Some("op-other")).unwrap();
+        assert_eq!(mismatched["error"], "脚本插件清单无法解析");
+
+        let cleared = dismiss_error(Some("op-1")).unwrap();
+        assert!(cleared["error"].is_null());
+        assert_eq!(cleared["stage"], "");
+
+        {
+            let mut value = state().lock().unwrap();
+            *value = json!({
+                "active": true,
+                "action": "update",
+                "operationId": "op-2",
+                "stage": "package",
+                "error": null
+            });
+        }
+        let active = dismiss_error(Some("op-2")).unwrap();
+        assert_eq!(active["active"], true);
+        assert_eq!(active["stage"], "package");
+
+        *state().lock().unwrap() = json!({ "active": false });
     }
 }

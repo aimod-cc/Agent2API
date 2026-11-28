@@ -73,7 +73,7 @@ impl RequestRouting {
                             && continuation.get("model").and_then(Value::as_str) == routing_groups::candidate_model(account)
                     });
                 }
-                routing.settings = group.settings(base);
+                routing.settings = group.settings(profiles.settings_for("", base));
                 routing.profile = Some(group.profile());
                 routing.scope = group.model.clone();
                 routing.group = Some(group);
@@ -176,6 +176,7 @@ impl RequestRouting {
     pub fn json(&self) -> Value {
         json!({ "capturedAt": self.captured_at, "scope": self.scope,
             "strategy": self.settings.strategy.as_str(), "sticky": self.settings.sticky.as_str(),
+            "priority": self.settings.priority.as_str(),
             "providerScope": self.profile.as_ref().map(|profile| profile.scope()).unwrap_or(config::RoutingProviderScope::All),
             "providerCount": self.profile.as_ref().map(|profile| profile.providers.len()),
             "accountCount": if self.group.is_some() { self.group_projection.accounts.len() } else { self.positions.len() },

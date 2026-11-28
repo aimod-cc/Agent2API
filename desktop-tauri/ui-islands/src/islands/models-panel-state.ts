@@ -29,12 +29,13 @@ import { t } from '../i18n'
 /* ─── 类型 ───────────────────────────────────── */
 
 export type Align = 'left' | 'center' | 'right'
-type ColumnDecl = { key: string; label?: string; align?: Align }
+type ColumnDecl = { key: string; label?: string; desc?: string; visible?: boolean; locked?: boolean; align?: Align }
 export type ColumnView = ColumnDecl & { align?: Align }
 type ColSettingsHandle = { apply<C extends { key: string }>(columns: C[]): (C & { align: Align })[] }
 type ColSettingsSpec = {
   id: string
   label?: string
+  schemaVersion?: number
   columns: ColumnDecl[]
   mount?: () => Element | null
   onChange?: () => void
@@ -55,7 +56,7 @@ export type CustomModelContext = { provider: string; locked: boolean }
  */
 export type CapabilityContext = { provider: string; id: string }
 
-type Filters = { provider: string; state: string; search: string; sort: string; visibility: string }
+type Filters = { provider: string; state: string; search: string; sort: string; visibility: string; source: string }
 
 /** 表格现造的绑定（默认绑定 alias == target 由模型行合成，不在 mappings 里另占一格） */
 export type Binding = {
@@ -192,7 +193,9 @@ export const MODEL_STATE_OPTIONS: readonly SegmentedControlOption<string>[] = MO
  * 倍率取自清单上的 `credits` 文本（如 `x0.7 credits`），解析不出的一律排在最后：
  * 「查不到倍率」与「倍率是 0」是两件事，按 0 参与排序会把未知的顶到最前面。
  */
-const MODEL_SORTS: readonly string[] = ['default', 'rate-asc', 'rate-desc']
+const MODEL_SORTS: readonly string[] = ['default', 'rate-asc', 'rate-desc', 'price-asc', 'price-desc']
+
+const MODEL_SOURCES: readonly string[] = ['all', 'remote', 'builtin', 'manual']
 
 /* ─── 可见性筛选 ───────────────────────────────── */
 
@@ -238,47 +241,36 @@ export function visibilityOf(model: ManageModel): 'visible' | 'hidden' | 'undecl
 }
 
 /**
- * 列的 key 用表格里既有的 `data-col`（index.html 的 `<col class="c-xxx" data-col="xxx">`、
- * 表头 th、table-columns.js 的列宽登记三处同名，键名只有一套）。顺序即默认渲染顺序。
+ * 列的 key 用表格里既有的 `data-col`（table-columns.js 的列宽登记与表头 th 同名）。
+ * 方案 A 精简 6 列默认视图（选择 / 上游模型 / 成本 / 规格与能力 / 模型映射 / 操作），
+ * 倍率 / 可见性 / 来源默认折叠进成本列与名称异常微标，用户可在列设置里随时单独展开。
+ * schemaVersion 升至 2，自动把老用户的 10 列缓存迁移到精简默认配置。
  */
+const COLUMNS_SCHEMA_VERSION = 2
+
 const COLUMNS: ColumnDecl[] = [
-  // 「选择」列：整行的批量操作入口（照账号页勾选列的口径 —— 列设置里要有名字，
-  // 表格里那格是「全选」复选框，没有表头文案）
   { key: 'check', label: t('选择'), align: 'center' },
-  { key: 'model', label: t('上游模型') },
-  { key: 'rate', label: t('倍率') },
-  { key: 'pricing', label: t('计价') },
-  // 「可见性」紧挨「来源」：两者回答的是同一类问题（这条记录哪来的 / 上游
-  // 认不认它），并排放读起来才连贯。没判据的家显示 `—`（见 models-page 的
-  // `visibilityCell`）—— 那是「这家没这个信息」，不是「确认可见」。
-  { key: 'visibility', label: t('可见性') },
-  { key: 'source', label: t('来源') },
-  // 能力位两列（顺序、文案与 model-capability 的键序对应）：数值合并在
-  // 「上下文 / 输出」一格里，三个布尔合并成一列徽章 —— 分成五列会把
-  // 复合控件最宽的「模型映射」列挤到不可用（列数取舍见交付说明）
-  { key: 'budget', label: t('上下文 / 输出') },
-  { key: 'caps', label: t('能力') },
-  { key: 'alias', label: t('模型映射') },
-  { key: 'act', label: t('操作'), align: 'right' },
+  { key: 'model', label: t('上游模型'), desc: t('模型 ID、名称与非默认状态标'), locked: true },
+  { key: 'rate', label: t('倍率'), desc: t('单独展开积分倍率（默认已并入成本列）'), visible: false },
+  { key: 'pricing', label: t('成本'), desc: t('单价、计价来源与积分倍率') },
+  { key: 'visibility', label: t('可见性'), desc: t('官方是否展示（不展示默认已在名称旁标注）'), visible: false },
+  { key: 'source', label: t('来源'), desc: t('远程 / 内置 / 手动（非远程默认已在名称旁标注）'), visible: false },
+  { key: 'spec', label: t('规格与能力'), desc: t('上下文窗口、最大输出与四项能力') },
+  { key: 'alias', label: t('模型映射'), desc: t('对外名称、开关与思考等级') },
+  { key: 'act', label: t('操作'), align: 'right', locked: true },
 ]
 
 /**
- * 自定义家没有「倍率」「来源」这两个概念（它们是内置家清单的字段）：选中自定义家时这两列
- * **按视图隐藏**，列设置里的配置本身不动 —— 切回内置家原样恢复。表头（syncStaticHead 的
- * 第三个参数）与数据行（visibleColumns）读同一份过滤结果，不会各画一个样。
+ * 自定义家没有「倍率」「来源」「可见性」三个概念（它们是内置家清单的字段）：选中自定义家时
+ * 按视图隐藏，列设置里的配置本身不动 —— 切回内置家原样恢复。
  */
 const CUSTOM_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(['rate', 'source', 'visibility'])
 
 const EMPTY_VIEW: ManageView = { models: [], mappings: [] }
 
-/**
- * 默认筛选。
- *
- * `visibility: 'visible'` 是**有意偏离「全部」**的唯一一处：上游目录里混着
- * 官方客户端根本不展示的模型（本仓已默认关闭它们的默认绑定），把它们摆在表里
- * 只会盖住用户真能用的那些。想看全的切到「未声明 / 全部」即可（落盘，会记住）。
- */
-const DEFAULT_FILTERS: Filters = { provider: 'all', state: 'all', search: '', sort: 'default', visibility: 'visible' }
+const DEFAULT_FILTERS: Filters = {
+  provider: 'all', state: 'all', search: '', sort: 'default', visibility: 'visible', source: 'all',
+}
 
 /* ─── 共享快照（外部 store）──────────────────── */
 
@@ -288,8 +280,10 @@ export type PanelState = {
   stateFilter: string
   /** 可见性筛选（全部 / 可见 / 不展示 / 未声明），见 MODEL_VISIBILITIES */
   visibilityFilter: string
+  /** 来源筛选（全部 / 远程 / 内置 / 手动或自定义） */
+  sourceFilter: string
   search: string
-  /** 排序档位（默认 / 倍率升序 / 倍率降序），见 MODEL_SORTS */
+  /** 排序档位（默认 / 倍率升序 / 倍率降序 / 单价升序 / 单价降序），见 MODEL_SORTS */
   sort: string
   /** 内置家的 manage 视图（null = 还没拉到） */
   data: ManageView | null
@@ -305,25 +299,17 @@ export type PanelState = {
   capability: CapabilityContext | null
 }
 
-/**
- * 读上次会话的筛选。不能做成模块顶层的常量：wbFilterMemory 由 filter-memory.js 挂在 window
- * 上，而那个文件排在 islands/ui.js **之后**（index.html 1455 行），首次渲染是否已经晚于它
- * 取决于解析器有没有在两个脚本之间让出 —— 读不到就返回默认值并留个记号，由
- * restoreSavedFilters 在挂载后补读一次，免得把「筛选记忆」整个丢掉。
- */
 function readSavedFilters(): Filters {
   const memory = shared().wbFilterMemory
   if (!memory) return { ...DEFAULT_FILTERS }
   const saved = memory.load(FILTERS_KEY, { ...DEFAULT_FILTERS })
   return {
     provider: String(saved.provider || 'all'),
-    // 存坏的状态档位回落「全部」（原生 select 赋一个不存在的值也是这个结果）
     state: MODEL_STATES.includes(saved.state) ? saved.state : 'all',
     search: String(saved.search || ''),
-    // 存坏的排序档位回落「默认」（与状态档位同一口径）
     sort: MODEL_SORTS.includes(saved.sort) ? saved.sort : 'default',
-    // 存坏的可见性档位回落「可见」（与默认值一致，不是「全部」）
     visibility: MODEL_VISIBILITIES.includes(saved.visibility) ? saved.visibility : 'visible',
+    source: MODEL_SOURCES.includes(saved.source) ? saved.source : 'all',
   }
 }
 
@@ -337,6 +323,7 @@ let snapshot: PanelState = {
   provider: initialFilters.provider,
   stateFilter: initialFilters.state,
   visibilityFilter: initialFilters.visibility,
+  sourceFilter: initialFilters.source,
   search: initialFilters.search,
   sort: initialFilters.sort,
   data: null,
@@ -394,10 +381,10 @@ export function restoreSavedFilters(): void {
   const saved = readSavedFilters()
   if (saved.provider !== snapshot.provider || saved.state !== snapshot.stateFilter
     || saved.search !== snapshot.search || saved.sort !== snapshot.sort
-    || saved.visibility !== snapshot.visibilityFilter) {
+    || saved.visibility !== snapshot.visibilityFilter || saved.source !== snapshot.sourceFilter) {
     patch({
       provider: saved.provider, stateFilter: saved.state, search: saved.search,
-      sort: saved.sort, visibilityFilter: saved.visibility,
+      sort: saved.sort, visibilityFilter: saved.visibility, sourceFilter: saved.source,
     })
   }
 }
@@ -642,9 +629,11 @@ let colSettings: ColSettingsHandle | null = null
 /** 表格元素（静态表头同步要用它；由 <table ref> 在提交时写入） */
 let tableEl: HTMLTableElement | null = null
 
-/** 该表当前可见的列（顺序即配置顺序；列设置未就绪时退回全部列） */
+/** 该表当前可见的列（顺序即配置顺序；列设置未就绪时退回默认显示的列） */
 export function visibleColumns(): ColumnView[] {
-  const columns: ColumnView[] = colSettings ? colSettings.apply(COLUMNS) : COLUMNS
+  const columns: ColumnView[] = colSettings
+    ? colSettings.apply(COLUMNS)
+    : COLUMNS.filter(column => column.visible !== false)
   if (!isCustomView()) return columns
   return columns.filter(column => !CUSTOM_HIDDEN_COLUMNS.has(column.key))
 }
@@ -654,26 +643,18 @@ export function syncHead(): void {
   shared().wbColSettings?.syncStaticHead('models', tableEl, isCustomView() ? CUSTOM_HIDDEN_COLUMNS : null)
 }
 
-/**
- * 登记这张表：读回本地列配置，并把「列设置」按钮插进操作区末尾（排在那排操作按钮**之后**：
- * 这一排有明确主次 —— 添加 / 刷新是主操作，列设置是「怎么看这张表」的辅助开关）。
- *
- * 必须在挂载后调：按钮要插进 React 渲染出来的 `.head-actions` 里，且 `syncStaticHead` 要求
- * 登记表已存在（它按 id 查配置，没登记就直接返回）。
- */
 export function registerColumnSettings(): void {
   if (colSettings) return
   const handle = shared().wbColSettings?.register({
     id: 'models',
     label: t('模型管理表'),
+    schemaVersion: COLUMNS_SCHEMA_VERSION,
     columns: COLUMNS,
     mount: () => document.querySelector('.page[data-page="gateway"] .panel-head .head-actions'),
     buttonPlacement: 'last',
-    // 表头重排 + 数据行按新的列集合重画（两处读同一份配置，不会各画一个样）
     onChange: () => { syncHead(); render() },
   })
   colSettings = handle || null
-  // 注册之前的那一次渲染读的是「全列」兜底值：用户存过的显隐 / 顺序要在首屏就落到数据行上
   if (colSettings) render()
 }
 
@@ -950,6 +931,15 @@ export function setVisibilityFilter(next: string): void {
   filtersTouched = true
   patch({ visibilityFilter: value })
   saveFilters({ visibility: value })
+}
+
+/** 来源筛选项（全部 / 远程 / 内置 / 手动或自定义） */
+export function setSourceFilter(next: string): void {
+  const value = MODEL_SOURCES.includes(next) ? next : 'all'
+  if (value === snapshot.sourceFilter) return
+  filtersTouched = true
+  patch({ sourceFilter: value })
+  saveFilters({ source: value })
 }
 
 export function setSearch(next: string): void {

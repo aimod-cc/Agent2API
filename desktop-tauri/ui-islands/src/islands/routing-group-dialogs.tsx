@@ -2,7 +2,7 @@ import * as React from 'react'
 import { Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Empty } from '@ui'
 import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
-import type { AccountRecord } from './accounts-shared'
+import type { AccountRecord, AccountSorting } from './accounts-shared'
 import { RouteIcon } from './routing-ui'
 import type { RouteGroup, RouteMember, RouteModelChoice } from './routing-types'
 import { createRouteMembers, routeGroupFieldsError, routeModelKey, RoutingGroupForm, ROUTING_MEMBER_LIMIT, type RoutingGroupFields } from './routing-group-form'
@@ -58,12 +58,15 @@ export function RoutingMemberDialog({ choices, members, accounts, lastUsed, onAd
   </DialogContent></Dialog>
 }
 
-export function RoutingMemberAccounts({ member, accounts, onSave, onClose }: {
-  member: RouteMember; accounts: AccountRecord[]; onSave(ids: string[]): void; onClose(): void
+export function RoutingMemberAccounts({ member, accounts, sorting, onSave, onClose }: {
+  member: RouteMember; accounts: AccountRecord[]; sorting?: AccountSorting | null; onSave(ids: string[]): void; onClose(): void
 }) {
   const [selected, setSelected] = React.useState(member.accounts)
+  const followGroup = member.accountOrderMode !== 'manual'
   const available = accounts.filter(account => providerOf(account) === member.provider)
-  const order = [...new Set([...selected, ...available.map(account => account.id)])]
+  const liveOrder = followGroup ? sorting?.accountOrder?.[member.provider] : undefined
+  const order = [...new Set([...(liveOrder || []), ...selected, ...available.map(account => account.id)])]
+    .filter(id => selected.includes(id) || available.some(account => account.id === id))
   const move = (id: string, direction: number) => setSelected(current => {
     const next = [...current], index = next.indexOf(id), to = index + direction
     if (index >= 0 && to >= 0 && to < next.length) [next[index], next[to]] = [next[to], next[index]]
@@ -76,8 +79,8 @@ export function RoutingMemberAccounts({ member, accounts, onSave, onClose }: {
         const account = available.find(item => item.id === id), on = selected.includes(id), index = selected.indexOf(id)
         return <div className='routing-group-picker-row' key={id}>
           <div><b>{account ? displayNameOf(account) : t('账号已移除')}</b><small>{account?.enabled === false ? t('账号已禁用') : on ? t('参与本路由') : t('未参与本路由')}</small></div>
-          <Button variant='ghost' size='icon' disabled={!on || index === 0} aria-label={t('提高优先级')} onClick={() => move(id, -1)}><RouteIcon name='arrowUp' /></Button>
-          <Button variant='ghost' size='icon' disabled={!on || index === selected.length - 1} aria-label={t('降低优先级')} onClick={() => move(id, 1)}><RouteIcon name='arrowDown' /></Button>
+          <Button variant='ghost' size='icon' disabled={followGroup || !on || index === 0} title={followGroup ? t('当前跟随提供商组顺序') : t('提高优先级')} aria-label={t('提高优先级')} onClick={() => move(id, -1)}><RouteIcon name='arrowUp' /></Button>
+          <Button variant='ghost' size='icon' disabled={followGroup || !on || index === selected.length - 1} title={followGroup ? t('当前跟随提供商组顺序') : t('降低优先级')} aria-label={t('降低优先级')} onClick={() => move(id, 1)}><RouteIcon name='arrowDown' /></Button>
           <Button variant={on ? 'ghost' : 'outline'} size='sm' disabled={!account && !on} onClick={() => setSelected(current => on ? current.filter(value => value !== id) : [...current, id])}>{on ? t('移出本路由') : t('加入路由')}</Button>
         </div>
       })}{!order.length ? <Empty>{t('该提供商没有账号，请先到账号页添加。')}</Empty> : null}</div>

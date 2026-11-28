@@ -11,7 +11,7 @@
 .req-head {
   display: grid;
   grid-template-columns: var(--req-cols,
-    74px 96px minmax(116px, 0.95fr) minmax(144px, 1.15fr) minmax(156px, 1.4fr) 108px 88px 88px 148px 82px);
+    74px 96px minmax(116px, 0.95fr) minmax(144px, 1.15fr) minmax(156px, 1.4fr) 148px 88px 88px 148px 82px);
   gap: 14px;
   align-items: center;
   padding: 9px 16px;

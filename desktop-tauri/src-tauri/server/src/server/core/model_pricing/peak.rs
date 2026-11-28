@@ -33,11 +33,34 @@ fn is_cn_holiday(utc_ms: i64) -> bool {
 
 /// 给定模型和提供商是否受官网峰谷时段倍增影响。
 pub fn peak_kind_for(provider_id: &str) -> &'static str {
-    match provider_id.trim().to_ascii_lowercase().as_str() {
-        "deepseek" => "deepseek",
-        "ollama" | "ollama-cloud" => "ollama",
-        _ => "",
+    let trimmed = provider_id.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "deepseek" => return "deepseek",
+        "ollama" | "ollama-cloud" => return "ollama",
+        _ => {}
     }
+    if trimmed.starts_with(crate::server::core::custom_providers::ID_PREFIX) {
+        if let Some(custom) = crate::server::core::custom_providers::get(trimmed) {
+            let preset = custom
+                .get("presetKey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if preset.eq_ignore_ascii_case("deepseek") {
+                return "deepseek";
+            }
+            let base_url = custom
+                .get("baseUrl")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if base_url.contains("api.deepseek.com") {
+                return "deepseek";
+            }
+        }
+    }
+    ""
 }
 
 /// 判断给定 UTC 毫秒时间戳是否落入指定峰谷档的高峰期。

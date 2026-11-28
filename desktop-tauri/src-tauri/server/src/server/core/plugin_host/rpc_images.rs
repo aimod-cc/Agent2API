@@ -22,7 +22,10 @@ impl RpcAdapter {
         telemetry.note_upstream_protocol(match self.id {
             "antigravity" => "gemini",
             "doubaowork" => "proprietary",
-            _ => "images",
+            _ => match operation {
+                ImageOperation::Generate => "images_generations",
+                ImageOperation::Edit => "images_edits",
+            },
         });
         host.ensure().await.map_err(|message| GatewayError::with_status(503, message))?;
         let mut params = json!({ "provider": self.id, "account": account, "body": body,

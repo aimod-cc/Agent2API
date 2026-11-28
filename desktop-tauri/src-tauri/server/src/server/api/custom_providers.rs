@@ -31,11 +31,66 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 use crate::server::core::api_keys;
+use crate::server::core::capability;
 use crate::server::core::custom_providers;
+use crate::server::core::model_pricing::{self, ModelPricingSettings};
+use crate::server::core::models::model_id;
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
 use crate::server::ServerState;
+
+/// 为管理接口返回的自定义提供商记录附加只读模型元信息（能力识别、思考档位、计价）。
+///
+/// 原始存储字段 `models[].capabilities`（用户手动覆盖的稀疏表）原样保留，避免前端
+/// 整表提交时把 `models.dev` 补齐值误存为用户覆盖；管理页展示读取 `effectiveCapabilities`、
+/// `capOverrides`、`capSources`、`reasoning*` 与 `pricing`，与内置提供商保持同一口径。
+fn enrich_provider_with(provider: &mut Value, pricing: &ModelPricingSettings, now_ms: i64) {
+    let provider_id = provider
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let Some(models) = provider.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for model in models.iter_mut() {
+        let mid = model_id(model);
+        if mid.is_empty() {
+            continue;
+        }
+        let (enriched, cap_overrides) = custom_providers::enrich_model(model);
+        let effective_caps = capability::effective(&enriched);
+        let pricing_json = model_pricing::model_manage_pricing_json(pricing, &provider_id, &mid, now_ms);
+        let Some(object) = model.as_object_mut() else {
+            continue;
+        };
+        object.insert("effectiveCapabilities".to_string(), effective_caps);
+        object.insert("capOverrides".to_string(), json!(cap_overrides));
+        for key in [
+            "capSources",
+            "reasoningLevels",
+            "reasoningDefaultLevel",
+            "reasoningFixedLevel",
+            "reasoningBindingSupported",
+            "reasoningSource",
+        ] {
+            if let Some(value) = enriched.get(key) {
+                if !value.is_null() {
+                    object.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        object.insert("pricing".to_string(), pricing_json);
+    }
+}
+
+fn enrich_provider(mut provider: Value) -> Value {
+    let pricing = model_pricing::settings();
+    let now_ms = logging::now_ms();
+    enrich_provider_with(&mut provider, &pricing, now_ms);
+    provider
+}
 
 /// 解析请求体（空 body 视为 `{}`）；非对象形态一律 400。
 ///
@@ -53,7 +108,13 @@ fn body_object(body: &Bytes) -> Result<serde_json::Map<String, Value>, Response>
 
 /// 列出全部自定义提供商（按 createdAt 升序，排序在存储层保证）。
 pub async fn get_custom_providers(State(_state): State<ServerState>) -> Response {
-    ok_json(json!({ "providers": custom_providers::list() }))
+    let pricing = model_pricing::settings();
+    let now_ms = logging::now_ms();
+    let mut providers = custom_providers::list();
+    for provider in &mut providers {
+        enrich_provider_with(provider, &pricing, now_ms);
+    }
+    ok_json(json!({ "providers": providers }))
 }
 
 // ─── POST /api/custom-providers ─────────────────────────────
@@ -156,7 +217,7 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
         &format!("✅ 新建自定义提供商「{label}」（{provider_id}），并添加了首个账号"),
     );
     ok_json(json!({
-        "provider": provider,
+        "provider": enrich_provider(provider),
         "account": account,
         // 刚建的提供商名下不可能已有账号，这里恒为 true；带上它是为了让两条
         // 添加路径的响应形状一致（前端按同一份契约读）
@@ -248,7 +309,7 @@ pub async fn update_custom_provider(State(state): State<ServerState>, body: Byte
         &format!("✏️  自定义提供商「{label}」已更新（{changes}）"),
         "info",
     );
-    ok_json(json!({ "provider": updated }))
+    ok_json(json!({ "provider": enrich_provider(updated) }))
 }
 
 /// 两次快照之间**值确实变了**的字段名（只给日志用，不含值 —— apiKey 不在这里，
@@ -405,7 +466,7 @@ pub async fn set_custom_models(State(_state): State<ServerState>, body: Bytes) -
         ),
         "info",
     );
-    ok_json(json!({ "provider": updated }))
+    ok_json(json!({ "provider": enrich_provider(updated) }))
 }
 
 // ─── POST /api/custom-providers/fetch-models ────────────────
@@ -446,5 +507,61 @@ pub async fn fetch_custom_models(State(state): State<ServerState>, body: Bytes) 
             ok_json(json!({ "models": models }))
         }
         Err(message) => errors::management_error(502, message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::core::model_pricing::ProviderPricingRule;
+
+    #[test]
+    fn enrich_provider_populates_meta_and_pricing_without_mutating_user_overrides() {
+        let mut provider = json!({
+            "id": "custom-opencode001",
+            "name": "OpenCode Go",
+            "presetKey": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+            "models": [
+                { "id": "deepseek-v4.1-flash", "enabled": true, "reasoning": "" },
+                {
+                    "id": "glm-5.3",
+                    "enabled": true,
+                    "reasoning": "",
+                    "capabilities": { "maxInputTokens": 256_000 }
+                }
+            ],
+            "mappings": []
+        });
+        let mut settings = ModelPricingSettings::default();
+        settings.provider_pricing.insert(
+            "custom-opencode001".to_string(),
+            ProviderPricingRule {
+                price_rate: Some(0.5),
+                rate_windows: Vec::new(),
+            },
+        );
+        enrich_provider_with(&mut provider, &settings, 0);
+
+        let models = provider["models"].as_array().expect("models");
+        let ds = &models[0];
+        assert!(ds.get("capabilities").is_none(), "未手动覆盖时不应伪造原始 capabilities 字段");
+        assert_eq!(ds["effectiveCapabilities"]["maxInputTokens"], json!(1_000_000));
+        assert_eq!(ds["effectiveCapabilities"]["supportsToolCall"], json!(true));
+        assert_eq!(ds["capOverrides"], json!([]));
+        assert_eq!(ds["capSources"]["maxInputTokens"], json!("modelsdev"));
+        assert_eq!(ds["reasoningLevels"], json!(["low", "high", "max"]));
+        assert_eq!(ds["pricing"]["priced"], json!(true));
+        assert_eq!(ds["pricing"]["source"], json!("official"));
+        assert_eq!(ds["pricing"]["priceRate"], json!(0.5));
+
+        let glm = &models[1];
+        assert_eq!(glm["capabilities"], json!({ "maxInputTokens": 256_000 }));
+        assert_eq!(glm["effectiveCapabilities"]["maxInputTokens"], json!(256_000));
+        assert_eq!(glm["effectiveCapabilities"]["maxOutputTokens"], json!(131_072));
+        assert_eq!(glm["capOverrides"], json!(["maxInputTokens"]));
+        assert_eq!(glm["capSources"]["maxInputTokens"], json!("user"));
+        assert_eq!(glm["capSources"]["maxOutputTokens"], json!("modelsdev"));
+        assert_eq!(glm["pricing"]["priced"], json!(true));
     }
 }

@@ -1,6 +1,6 @@
 import * as React from 'react'
 import {
-  Alert, Badge, Button, Card, Dialog, DialogBody, DialogContent, DialogDescription,
+  Badge, Button, Card, Dialog, DialogBody, DialogContent, DialogDescription,
   DialogFooter, DialogHeader, DialogTitle, Empty, EmptyDescription, EmptyTitle, Input, Label, SegmentedControl, Switch,
 } from '@ui'
 import type { ScriptOperation, ScriptPackage, ScriptPluginsState, ScriptRecommendation } from './plugins'
@@ -15,6 +15,7 @@ import { getPluginStartup, pluginFailed, pluginPending, refreshPluginStartup, st
 import { requestPluginDiagnostics } from './plugin-startup-view'
 import { isRecommendationInstalled, matchesRecommendedPlugin, matchesScriptPlugin, recommendationKey, recommendedDescription, reinstallRequest, scriptOfficialBadge, scriptPluginDescription, scriptPluginName, scriptRecommendations, scriptSourceLabel, scriptUpdate, updateLabel } from './plugins-script-display'
 import { ScriptCatalogStatus, ScriptRepository, scriptUnavailableReason, type PluginOpenExternal } from './plugins-script-catalog'
+import { PluginErrorBanner, formatScriptOperationFailure, resolveScriptOperationRetry, type PluginErrorBannerState } from './plugins-error-banner'
 import { PluginStreamFooter, usePluginStream } from './plugins-stream-footer'
 import { scriptSelectionKey } from './plugins-batch-items'
 import type { PluginCardSelection } from './plugins-store'
@@ -60,6 +61,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   const [detailsRecommendation, setDetailsRecommendation] = React.useState<ScriptRecommendation | null>(null)
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
+  const [dismissedKey, setDismissedKey] = React.useState('')
   const [operationTarget, setOperationTarget] = React.useState<ScriptOperation['target']>()
   const pending = React.useRef(false)
   const lastInstallRequest = React.useRef(0)
@@ -107,7 +109,8 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   React.useEffect(() => { onBusyChange?.(busy) }, [busy, onBusyChange])
   React.useEffect(() => () => { onBusyChange?.(false) }, [onBusyChange])
   React.useEffect(() => {
-    if (!state.operation.active) setOperationTarget(undefined)
+    if (state.operation.active) setDismissedKey('')
+    else setOperationTarget(undefined)
   }, [state.operation.active, state.operation.updatedAt])
   React.useEffect(() => {
     if (installRequest <= lastInstallRequest.current) return
@@ -124,7 +127,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   async function act(path: string, body: Record<string, unknown>): Promise<boolean> {
     if (pending.current || locked) return false
     pending.current = true
-    setBusy(true); setError('')
+    setBusy(true); setError(''); setDismissedKey('')
     const id = typeof body.id === 'string' ? body.id : undefined
     const pack = state.packages.find(pack => pack.id === id)
     setOperationTarget({ id, name: pack?.name, source: typeof body.name === 'string' ? body.name.trim() : undefined })
@@ -160,10 +163,48 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   }
 
   const starting = state.packages.some(pack => pluginPending(startupForPack(pack.id, pack.startup)))
-  const failure = error || state.error || (!starting && (state.hostError || state.runtime.error || state.operation.error))
+  const failureBanner: PluginErrorBannerState | null = (() => {
+    if (error) return { message: error, onDismiss: () => setError('') }
+    if (state.error) {
+      const key = `state:${state.error}`
+      return dismissedKey === key ? null : {
+        message: state.error, retryDisabled: locked,
+        onRetry: () => { setDismissedKey(''); void refresh() },
+        onDismiss: () => setDismissedKey(key),
+      }
+    }
+    if (starting) return null
+    const hostOrRuntime = state.hostError || state.runtime.error || ''
+    if (hostOrRuntime) {
+      const key = `host:${hostOrRuntime}`
+      return dismissedKey === key ? null : {
+        message: hostOrRuntime, retryDisabled: locked,
+        onRetry: () => { setDismissedKey(''); void refresh() },
+        onDismiss: () => setDismissedKey(key),
+      }
+    }
+    if (state.operation.error) {
+      const op = state.operation
+      const key = `op:${op.operationId || op.updatedAt || ''}:${op.error}`
+      if (dismissedKey === key) return null
+      return {
+        message: formatScriptOperationFailure(op, state.packages, recommended, t),
+        retryDisabled: locked,
+        onRetry: resolveScriptOperationRetry(op, state.packages, { run: act, openInstall }),
+        onDismiss: () => {
+          setDismissedKey(key)
+          void request('/api/plugins/scripts/change', {
+            action: 'dismiss_error',
+            operationId: op.operationId || undefined,
+          }).then(() => refresh()).catch(() => undefined)
+        },
+      }
+    }
+    return null
+  })()
 
   return <>
-    {failure ? <Alert variant='destructive' className='whitespace-pre-wrap break-words'>{failure}</Alert> : null}
+    {failureBanner ? <PluginErrorBanner {...failureBanner} t={t} /> : null}
     {galleryVisible || count > 0 || unmatchedOperation ? <section ref={sectionRef} className='@container/plugin-gallery min-w-0' aria-label={t('Magpie 插件')}>
       <PluginSectionHeading t={t} title={t('Magpie 插件')} count={count + Number(operation.active && !operationInGallery)}
         filters={galleryVisible ? <SegmentedControl<ScriptPublisherFilter> value={publisher} onValueChange={changePublisher}

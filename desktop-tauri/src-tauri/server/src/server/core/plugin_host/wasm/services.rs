@@ -539,8 +539,10 @@ fn infer_upstream_protocol_from_url(raw: &str) -> Option<&'static str> {
         || path.ends_with("/generatecontent")
     {
         Some("gemini")
-    } else if path.ends_with("/images/generations") || path.ends_with("/images/edits") {
-        Some("images")
+    } else if path.ends_with("/images/generations") {
+        Some("images_generations")
+    } else if path.ends_with("/images/edits") {
+        Some("images_edits")
     } else {
         None
     }

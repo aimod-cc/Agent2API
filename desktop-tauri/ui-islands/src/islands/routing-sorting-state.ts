@@ -17,6 +17,17 @@ export function syncRoutingSorting(draft: RoutingDraft, sorting: AccountSorting)
       if (sorting.accountOrder[provider]) inheritedProfile.accountOrder[provider] = [...sorting.accountOrder[provider]]
     }
   }
+  if (draft.workspace.model && draft.mode === 'custom' && baseline) {
+    for (const [provider, order] of Object.entries(sorting.accountOrder)) {
+      if (!profile.providers.includes(provider)) continue
+      const mode = profile.accountOrderMode?.[provider] ?? (profile.accountOrder?.[provider] ? 'manual' : 'followGroup')
+      if (mode === 'followGroup') profile.accountOrder[provider] = [...order]
+      const baseMode = baseline.accountOrderMode?.[provider] ?? (baseline.accountOrder?.[provider] ? 'manual' : 'followGroup')
+      if (baseline.providers.includes(provider) && baseMode === 'followGroup') {
+        baseline.accountOrder[provider] = [...order]
+      }
+    }
+  }
   if (!draft.workspace.model && baseline) {
     for (const [provider, order] of Object.entries(sorting.accountOrder)) {
       if (!profile.providers.includes(provider) || !baseline.providers.includes(provider)) continue
@@ -38,11 +49,13 @@ function profileWithoutOrder(profile: RouteProfile) {
 }
 
 export function canSyncSortingRevision(before: RoutingWorkspace, next: RoutingWorkspace): boolean {
-  if (before.model || next.model || !same(profileWithoutOrder(before.profile), profileWithoutOrder(next.profile))) return false
+  if ((before.model || '') !== (next.model || '') || !same(profileWithoutOrder(before.profile), profileWithoutOrder(next.profile))) return false
   if (before.customized !== next.customized || before.settings.routingStrategy !== next.settings.routingStrategy
-    || before.settings.routingSticky !== next.settings.routingSticky) return false
+    || before.settings.routingSticky !== next.settings.routingSticky
+    || (before.settings.routingPriority || 'sticky') !== (next.settings.routingPriority || 'sticky')) return false
   return Object.entries(next.profile.accountOrder).every(([provider, order]) => {
     if (same(before.profile.accountOrder[provider], order)) return true
+    if (before.model && before.customized && before.profile.accountOrderMode?.[provider] === 'manual') return false
     const prior = before.sorting.rules[provider] || [], current = next.sorting.rules[provider] || []
     return activeGroupSortRules(provider, prior, before.sorting).length > 0
       || activeGroupSortRules(provider, current, next.sorting).length > 0 || !same(prior, current)

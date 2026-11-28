@@ -207,6 +207,7 @@ fn put_profile_blocking(state: ServerState, payload: Value) -> Response {
         }
         if let Some(profile) = &mut profile {
             profile.account_order.clear();
+            profile.account_order_mode.clear();
         }
     }
     if let Err(error) = config::save_routing_profile(&model, profile) {

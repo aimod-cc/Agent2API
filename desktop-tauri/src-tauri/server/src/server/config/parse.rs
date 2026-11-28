@@ -541,12 +541,18 @@ pub(super) fn routing_from(map: &Map<String, Value>) -> RoutingSettings {
         .and_then(Value::as_str)
         .map(StickyMode::from_id)
         .unwrap_or(defaults.sticky);
+    let priority = map
+        .get(KEY_ROUTING_PRIORITY)
+        .and_then(Value::as_str)
+        .map(RoutingPriority::from_id)
+        .unwrap_or(defaults.priority);
     let bool_field = |key: &str, default: bool| -> bool {
         map.get(key).and_then(Value::as_bool).unwrap_or(default)
     };
     RoutingSettings {
         strategy,
         sticky,
+        priority,
         failover_backoff: bool_field(KEY_ROUTING_FAILOVER_BACKOFF, defaults.failover_backoff),
         sink: bool_field(KEY_ROUTING_SINK, defaults.sink),
         breaker_enabled: bool_field(KEY_ROUTING_BREAKER_ENABLED, defaults.breaker_enabled),

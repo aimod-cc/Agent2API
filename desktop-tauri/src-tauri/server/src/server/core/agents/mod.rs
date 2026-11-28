@@ -19,8 +19,6 @@ pub mod model_config;
 pub mod native;
 pub mod paths;
 pub mod preview;
-pub mod quick_connect;
-mod quick_profiles;
 pub mod registry;
 pub mod resources;
 pub mod store;
@@ -196,7 +194,6 @@ fn client_view_with(
     });
     view["modelFields"] = model_config::declared_fields(def, &detection.path);
     view["supportsEffort"] = json!(def.effort && !(def.id == "kimi-code" && paths::kimi_legacy(&detection.path)));
-    view["quickProfiles"] = json!(quick_profiles::profiles(def, &live, gateway).iter().map(Profile::view).collect::<Vec<_>>());
     view["configTargets"] = json!(detection.config_targets);
     view["configLayout"] = json!(if def.id == "dsh" { if dsh_paths::is_patch(&detection.path) { "profile" } else { "legacy" } } else { "" });
     view
