@@ -4,6 +4,7 @@ import {
   deleteAccount,
   fetchAccount,
   fetchAccountUsage,
+  fetchUsageSnapshot,
   fetchProxyPool,
   promoteAccount,
   refreshAccount,
@@ -14,6 +15,8 @@ import {
   type UsageRow,
 } from '../core/api'
 import { formatDateTime, providerDisplayName } from '../core/format'
+import { t } from '../core/i18n'
+import { usageDisplayOf } from '../core/usage'
 import { store } from '../core/store'
 import { BottomSheet, CommonCard, CommonSwitch, ListGroup, ListItem } from '../ui/components'
 import { PickerSheet, PickerTrigger, type PickerOption } from '../ui/pickers'
@@ -47,6 +50,12 @@ export function AccountDetailSheet({
     fetchProxyPool(controller.signal)
       .then(pool => setProxies((pool.items || []).filter(p => p.enabled !== false)))
       .catch(() => {})
+    fetchUsageSnapshot(controller.signal, [initialAccount.id])
+      .then(snapshot => {
+        const row = snapshot.results?.find(item => item.id === initialAccount.id) || null
+        setUsage(current => current ?? row)
+      })
+      .catch(() => {})
     return () => controller.abort()
   }, [initialAccount.id])
 
@@ -57,8 +66,15 @@ export function AccountDetailSheet({
       const res = await fetchAccountUsage(account.id)
       const row = res.results?.[0] || null
       setUsage(row)
-      if (row?.error) {
-        store.toast(row.error, 'danger')
+      if (!row) {
+        store.toast(t('未返回可识别的余额数据'), 'info')
+        return
+      }
+      const display = usageDisplayOf(row)
+      if (display.status === 'error') {
+        store.toast(display.messages[0] || display.summary, 'danger')
+      } else if (display.status === 'notice' || display.status === 'empty' || display.status === 'unknown') {
+        store.toast(display.messages[0] || display.summary, 'info')
       } else {
         store.toast('已更新余额信息', 'success')
       }
@@ -91,6 +107,14 @@ export function AccountDetailSheet({
     account.proxy && typeof account.proxy === 'object' && account.proxy.source !== 'direct'
       ? account.proxy.id || 'custom'
       : 'direct'
+  const usageDisplay = usage ? usageDisplayOf(usage) : null
+  const usageColor = usageDisplay?.tone === 'danger'
+    ? 'var(--fc-danger)'
+    : usageDisplay?.tone === 'warning'
+      ? 'var(--fc-warning)'
+      : usageDisplay?.tone === 'muted'
+        ? 'var(--fc-text-secondary)'
+        : 'var(--fc-primary)'
 
   return (
     <BottomSheet open title='账号详情' onClose={onClose}>
@@ -206,38 +230,48 @@ export function AccountDetailSheet({
         </div>
       </CommonCard>
 
-      {usage ? (
+      {usageDisplay ? (
         <CommonCard>
-          <div style={{ fontSize: 13.5, fontWeight: 700 }}>额度与余额</div>
-          {usage.error ? (
-            <div style={{ fontSize: 12.5, color: 'var(--fc-danger)' }}>{usage.error}</div>
-          ) : (
-            <div className='fc-inner-block' style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {usage.summary ? (
-                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--fc-primary)' }}>
-                  {usage.summary}
-                </div>
-              ) : null}
-              {usage.items?.map((item, idx) => (
-                <div
-                  key={idx}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    fontSize: 12.5,
-                    color: 'var(--fc-text-secondary)',
-                  }}
-                >
-                  <span>{item.label || '额度'}</span>
-                  <span className='fc-mono'>
-                    {item.remaining !== undefined && item.remaining !== null
-                      ? `剩余 ${item.remaining}${item.unit || ''}`
-                      : `${item.used ?? 0} / ${item.total ?? '∞'}${item.unit || ''}`}
-                  </span>
-                </div>
-              ))}
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700 }}>额度与余额</div>
+            {usageDisplay.freshness ? (
+              <span style={{ fontSize: 11.5, color: 'var(--fc-text-tertiary)' }}>{usageDisplay.freshness}</span>
+            ) : null}
+          </div>
+          <div className='fc-inner-block' style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: usageColor }}>
+              {usageDisplay.summary}
             </div>
-          )}
+            {usageDisplay.rows.map((item, idx) => (
+              <div
+                key={`${item.label}-${idx}`}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 14,
+                  fontSize: 12.5,
+                  color: 'var(--fc-text-secondary)',
+                }}
+              >
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.label}</span>
+                <span className='fc-mono' style={{ textAlign: 'right' }}>{item.value}</span>
+              </div>
+            ))}
+            {usageDisplay.messages.map((message, idx) => (
+              <div
+                key={`${message}-${idx}`}
+                style={{
+                  fontSize: 11.5,
+                  lineHeight: 1.45,
+                  color: usageDisplay.tone === 'warning' || usageDisplay.tone === 'danger'
+                    ? usageColor
+                    : 'var(--fc-text-tertiary)',
+                }}
+              >
+                {message}
+              </div>
+            ))}
+          </div>
         </CommonCard>
       ) : null}
 

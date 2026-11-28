@@ -15,6 +15,7 @@ import {
 import { formatRelativeTime, providerDisplayName, syncProviderLabels } from '../core/format'
 import { t } from '../core/i18n'
 import { serverIdentity } from '../core/servers'
+import { usageDisplayOf } from '../core/usage'
 import { store, useStore } from '../core/store'
 import {
   CommonScaffold,
@@ -364,13 +365,15 @@ export function AccountsView() {
                 currentId === acc.id ||
                 (acc.provider ? currentByProvider[acc.provider] === acc.id : false)
               const usage = usageMap[acc.id]
-              const usageText =
-                usage?.summary ||
-                (usage?.remaining !== undefined && usage?.remaining !== null
-                  ? `余 ${usage.remaining}${usage.unit || ''}`
-                  : usage?.balance !== undefined && usage?.balance !== null
-                    ? `余额 ${usage.balance}${usage.unit || ''}`
-                    : '')
+              const usageDisplay = usage ? usageDisplayOf(usage) : null
+              const usageText = usageDisplay?.summary || ''
+              const usageTone = usageDisplay?.tone === 'danger'
+                ? 'danger'
+                : usageDisplay?.tone === 'warning'
+                  ? 'warning'
+                  : usageDisplay?.tone === 'ok'
+                    ? 'primary'
+                    : 'neutral'
               const expiresAt = acc.accessTokenExpiresAt || acc.tokenExpiresAt || acc.expiresAt
 
               return (
@@ -454,7 +457,7 @@ export function AccountsView() {
                     ) : (
                       <TonalChip>已停用</TonalChip>
                     )}
-                    {usageText ? <TonalChip tone='primary'>{usageText}</TonalChip> : null}
+                    {usageText ? <TonalChip tone={usageTone}>{usageText}</TonalChip> : null}
                     {expiresAt ? (
                       <TonalChip>令牌 {formatRelativeTime(expiresAt)}</TonalChip>
                     ) : null}
