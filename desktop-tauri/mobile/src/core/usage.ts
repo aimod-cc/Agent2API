@@ -244,6 +244,13 @@ function accountBalanceSummary(data: UsageObject): string {
   const fallbackStat = creditStatisticsWalletsOf(data)
     ?.find(wallet => usageNumberOrNull(wallet.creditRemaining) !== null) || null
   let summary = usageAvailableViewOf(data, t)
+  if (!summary && (usageNumberOrNull(data.available) !== null || data.unlimited === true)) {
+    const unit = unitOf(data)
+    summary = t('可用 {value} {unit}', {
+      value: data.unlimited === true ? '∞' : formatUsageNumber(usageNumberOrNull(data.available) ?? 0),
+      unit: unit ? usageUnitLabel(unit, t) : '',
+    })
+  }
   if (!summary && fallbackWallet) {
     const unit = stringOf(fallbackWallet.unit) || unitOf(data)
     summary = t('可用 {value} {unit}', {
@@ -255,13 +262,6 @@ function accountBalanceSummary(data: UsageObject): string {
     const unit = stringOf(fallbackStat.unit) || unitOf(data)
     summary = t('可用 {value} {unit}', {
       value: formatUsageNumber(usageNumberOrNull(fallbackStat.creditRemaining) ?? 0),
-      unit: unit ? usageUnitLabel(unit, t) : '',
-    })
-  }
-  if (!summary && (usageNumberOrNull(data.available) !== null || data.unlimited === true)) {
-    const unit = unitOf(data)
-    summary = t('可用 {value} {unit}', {
-      value: data.unlimited === true ? '∞' : formatUsageNumber(usageNumberOrNull(data.available) ?? 0),
       unit: unit ? usageUnitLabel(unit, t) : '',
     })
   }
@@ -360,15 +360,6 @@ export function usageDisplayOf(row: UsageRow | null | undefined): UsageDisplay {
   if (Object.prototype.hasOwnProperty.call(data, 'totalLeft')) {
     const unit = unitOf(data)
     const total = data.unlimited === true ? '∞' : amountOf(data.totalLeft, unit)
-    const plan = amountOf(data.planLeft, unit)
-    const bonus = amountOf(data.bonusLeft, unit)
-    if (plan || bonus) {
-      messages.unshift(t('总剩余 {total} · 套餐 {plan} · 奖励 {bonus}', {
-        total,
-        plan: plan || '—',
-        bonus: bonus || '—',
-      }))
-    }
     return finish({
       status: 'ready',
       tone: warnings.length ? 'warning' : 'ok',
